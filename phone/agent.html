@@ -1,0 +1,1379 @@
+<!DOCTYPE html>
+<!--
+  Pam — the voice agent. One page on the same HTTPS origin as the camera page.
+
+  Talk path:   mic -> PCM16 -> wss://agent.deepgram.com/v1/agent/converse -> audio back
+  Action path: Deepgram sends FunctionCallRequest -> this page executes it
+               (in-page UI or fetch to the laptop) -> FunctionCallResponse.
+
+  No build step: the Agent wire protocol is small enough to hold in one file,
+  which keeps every byte debuggable. Token auth rides the WebSocket subprotocol
+  header, the only header browsers allow.
+
+  ?demo=1 shows a test panel that calls each function handler directly, so the
+  whole action layer is verifiable before any voice session exists.
+
+  Design: flat white medical-tech. One blue used only for signal (logo, the
+  primary action, live state, active tab). Grouped lists with hairlines carry
+  everything else. Nothing animates until Pam is live; then a single ring
+  around the sphere breathes with the audio.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pam</title>
+<meta name="theme-color" content="#ffffff">
+<link rel="stylesheet" href="/assets/pam.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to Pam</a>
+<div id="memory-shine" aria-hidden="true"></div>
+<div class="sr-only" id="memory-announcement" role="status" aria-live="polite"></div>
+<svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+  <symbol id="icon-features" viewBox="0 0 24 24"><path d="M4 5a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4"/><path d="M14 5a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4"/><path d="M4 15a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4"/><path d="M14 15a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4"/></symbol>
+  <symbol id="icon-expand" viewBox="0 0 24 24"><path d="M4 8v-2a2 2 0 0 1 2 -2h2M4 16v2a2 2 0 0 0 2 2h2M16 4h2a2 2 0 0 1 2 2v2M16 20h2a2 2 0 0 0 2 -2v-2"/></symbol>
+  <symbol id="icon-camera" viewBox="0 0 24 24"><path d="M5 7h1a2 2 0 0 0 2 -2a1 1 0 0 1 1 -1h6a1 1 0 0 1 1 1a2 2 0 0 0 2 2h1a2 2 0 0 1 2 2v9a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-9a2 2 0 0 1 2 -2"/><path d="M9 13a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"/></symbol>
+  <symbol id="icon-key" viewBox="0 0 24 24"><path d="M16.555 3.843l3.602 3.602a2.877 2.877 0 0 1 0 4.069l-2.643 2.643a2.877 2.877 0 0 1 -4.069 0l-.301 -.301l-6.558 6.558a2 2 0 0 1 -1.239 .578l-.175 .008h-1.172a1 1 0 0 1 -.993 -.883l-.007 -.117v-1.172a2 2 0 0 1 .467 -1.284l.119 -.13l.414 -.414h2v-2h2v-2l2.144 -2.144l-.301 -.301a2.877 2.877 0 0 1 0 -4.069l2.643 -2.643a2.877 2.877 0 0 1 4.069 0"/><path d="M15 9h.01"/></symbol>
+  <symbol id="icon-glasses" viewBox="0 0 24 24"><path d="M8 4h-2l-3 10M16 4h2l3 10M10 16l4 0M21 16.5a3.5 3.5 0 0 1 -7 0v-2.5h7v2.5M10 16.5a3.5 3.5 0 0 1 -7 0v-2.5h7v2.5"/></symbol>
+  <symbol id="icon-pill" viewBox="0 0 24 24"><path d="M4.5 12.5l8 -8a4.94 4.94 0 0 1 7 7l-8 8a4.94 4.94 0 0 1 -7 -7M8.5 8.5l7 7"/></symbol>
+  <symbol id="icon-bottle" viewBox="0 0 24 24"><path d="M10 5h4v-2a1 1 0 0 0 -1 -1h-2a1 1 0 0 0 -1 1v2M14 3.5c0 1.626 .507 3.212 1.45 4.537l.05 .07a8.093 8.093 0 0 1 1.5 4.694v6.199a2 2 0 0 1 -2 2h-6a2 2 0 0 1 -2 -2v-6.2c0 -1.682 .524 -3.322 1.5 -4.693l.05 -.07a7.823 7.823 0 0 0 1.45 -4.537M7 14.803a2.4 2.4 0 0 0 1 -.803a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 1 -.805"/></symbol>
+  <symbol id="icon-phone" viewBox="0 0 24 24"><path d="M6 5a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-14M11 4h2M12 17v.01"/></symbol>
+  <symbol id="icon-wallet" viewBox="0 0 24 24"><path d="M17 8v-3a1 1 0 0 0 -1 -1h-10a2 2 0 0 0 0 4h12a1 1 0 0 1 1 1v3m0 4v3a1 1 0 0 1 -1 1h-12a2 2 0 0 1 -2 -2v-12M20 12v4h-4a2 2 0 0 1 0 -4h4"/></symbol>
+  <symbol id="icon-object" viewBox="0 0 24 24"><path d="M12 3l8 4.5l0 9l-8 4.5l-8 -4.5l0 -9l8 -4.5M12 12l8 -4.5M12 12l0 9M12 12l-8 -4.5M16 5.25l-8 4.5"/></symbol>
+</defs></svg>
+<header class="topbar">
+  <div class="topbar-inner">
+    <span class="wordmark" role="img" aria-label="Pam"></span>
+    <nav class="primary-nav" aria-label="Pam views">
+      <div class="tabs" role="tablist">
+        <button id="tab-talk" role="tab" aria-selected="true" aria-controls="view-talk" data-view="talk">Talk</button>
+        <button id="tab-memories" role="tab" aria-selected="false" aria-controls="view-memories" tabindex="-1" data-view="memories">Memories<span class="unread" id="memory-unread" hidden></span></button>
+        <button id="tab-camera" role="tab" aria-selected="false" aria-controls="view-camera" tabindex="-1" data-view="camera">Camera<span class="camera-badge" id="camera-badge">Off</span></button>
+      </div>
+    </nav>
+    <div class="topbar-actions">
+      <details class="settings">
+        <summary aria-label="Reading options">Aa</summary>
+        <div class="settings-panel">
+          <h2>Reading options</h2>
+          <label>Larger text<input type="checkbox" id="large-text"></label>
+          <label>Higher contrast<input type="checkbox" id="high-contrast"></label>
+          <label>Pause visual motion<input type="checkbox" id="reduce-effects"></label>
+          <p>Your device's reduced-motion setting is always respected.</p>
+        </div>
+      </details>
+    </div>
+  </div>
+</header>
+<div class="app-shell">
+  <div class="page-intro"><div><h1 id="greeting" class="display">Hello. I'm Pam.</h1><p class="intro">How can I help today?</p></div><time id="today" class="today"></time></div>
+<div class="workspace">
+<div class="session-column">
+<main id="main" tabindex="-1">
+  <section id="view-talk" class="col" role="tabpanel" aria-labelledby="tab-talk" tabindex="0">
+    <div class="call-room">
+      <div class="call-heading">
+        <div class="agent-identity">
+          <div class="visual-zone" aria-hidden="true"><div class="orb-scene"><div class="orb-ring" id="orb-ring"></div><div class="orb-fallback" id="orb-fallback"></div><canvas id="voice-orb"></canvas></div></div>
+          <div><strong class="agent-name">Pam</strong><p class="voice-state" id="voice-state">Ready when you are</p></div>
+        </div>
+        <span class="call-label">Your voice companion</span>
+      </div>
+      <div class="subtitle-area">
+        <div id="subtitle-placeholder" class="welcome-scene">
+          <div class="welcome-copy"><h2>What would you like help with?</h2><p>Speak naturally. Pam can help find your things and plan your day.</p></div>
+          <img src="/assets/elder-companions.svg" alt="" width="480" height="320">
+        </div>
+        <div id="subtitle-window" role="region" aria-label="Pam's live subtitles" hidden><p id="subtitle-text"></p></div>
+      </div>
+      <div class="actions">
+        <button id="features-open" aria-label="Explore Pam's features" aria-haspopup="dialog" aria-controls="features-dialog"><svg class="icon" aria-hidden="true"><use href="#icon-features"/></svg><span>Features</span></button>
+        <button id="talk" aria-pressed="false" aria-describedby="status">Talk to Pam</button>
+        <button id="mic-toggle" aria-pressed="false" hidden>Mute</button>
+        <span class="sr-only">Voice connection: <span id="conn">offline</span></span>
+      </div>
+      <p id="status" role="status" aria-live="polite" aria-atomic="true">Tap Talk to Pam, then speak naturally.</p>
+    </div>
+    <div class="voice-footer"><span id="memory-peek-detail" class="new-memory-note">One thing at a time.</span><button id="transcript-open" aria-haspopup="dialog" aria-controls="transcript-dialog">Conversation</button></div>
+    <div class="response-area">
+      <div class="result-heading"><span>Your result</span><button id="result-close" aria-label="Dismiss this result">Close</button></div>
+      <div id="card" role="region" aria-label="Pam's answer" tabindex="-1"><div class="title"></div><div class="body"></div><img alt="" style="display:none"><a class="action" style="display:none"></a><a class="action secondary" style="display:none"></a></div>
+      <div id="photo"><img alt=""><div class="cap"></div></div>
+    </div>
+  </section>
+  <section class="col" id="view-memories" role="tabpanel" aria-labelledby="tab-memories" tabindex="0" hidden>
+    <div class="view-heading"><h2 class="display">Memories</h2><p class="lead">Your things, with a little history. Pick an item to explore.</p></div>
+    <div class="memory-toolbar">
+      <label class="search-field" for="memory-search">Search memories<input id="memory-search" type="search" placeholder="An item or a place" autocomplete="off"></label>
+      <div class="memory-view-switch" role="group" aria-label="Memory display">
+        <button data-memory-view="items" aria-pressed="true">By item</button><button data-memory-view="timeline" aria-pressed="false">Timeline</button>
+      </div>
+    </div>
+    <p id="memory-results" class="memory-results" role="status" aria-live="polite">No observations yet</p>
+    <ul id="memory-history" data-mode="items"><li class="memory-empty">Turn on the camera to start collecting memories.</li></ul>
+    <details id="memory-note" class="record memory-latest" aria-label="Latest memory update">
+      <summary><strong id="memory-title">No memories yet</strong><time id="memory-time"></time></summary>
+      <p id="memory-detail">Turn on the camera and Pam will note where things are put down.</p>
+    </details>
+    <p class="feed-state" id="feed-state">Connecting to memory updates…</p>
+  </section>
+  <section class="col" id="view-camera" role="tabpanel" aria-labelledby="tab-camera" tabindex="0" hidden>
+    <div class="view-heading"><h2 class="display">Camera</h2><p class="lead">Lets Pam see where things are put down. You are always in control.</p></div>
+    <div class="panel">
+      <h3 id="camera-heading">Status</h3>
+      <p id="cam" role="status" aria-live="polite">Camera is off.</p>
+      <div class="camera-controls"><button id="camera-start">Start camera</button><button id="camera-stop" hidden>Stop camera</button></div>
+      <details id="camera-details" open><summary>Preview and tips</summary>
+        <button id="camera-open" aria-haspopup="dialog" aria-controls="camera-dialog">Expand camera preview</button>
+        <p class="privacy">Point the camera at the table or the things you want Pam to remember, and keep this page open.</p>
+        <p class="privacy">If it cannot connect, ask your helper to start the memory pipeline on the laptop.</p>
+      </details>
+      <p class="privacy">Camera frames go to your laptop. Selected images are sent to the AI service to create memories.</p>
+    </div>
+  </section>
+  <div id="demo"></div>
+</main>
+<aside class="camera-dock" aria-label="Persistent camera preview">
+  <button id="camera-peek" aria-label="Expand camera preview" aria-haspopup="dialog" aria-controls="camera-dialog">
+    <span class="mini-surface">
+      <video id="camera-preview" playsinline muted autoplay aria-label="Live camera preview" hidden></video>
+      <span id="mini-camera-empty" class="camera-placeholder"><svg class="icon" aria-hidden="true"><use href="#icon-camera"/></svg></span>
+    </span>
+    <span class="mini-copy"><span><strong id="mini-camera-title">Camera is off</strong><small id="mini-camera-status">Tap to open camera controls</small></span><svg class="icon" aria-hidden="true"><use href="#icon-expand"/></svg></span>
+  </button>
+</aside>
+</div>
+<aside class="activity-side" aria-label="Recent activity">
+  <div class="activity-heading"><h2>Recent memories</h2><button id="recent-all">View all</button></div>
+  <ul id="recent-list"><li class="recent-empty">Nothing saved yet. When Pam remembers something, it will appear here.</li></ul>
+  <div class="activity-note"><h3>You're in control.</h3><p>Your microphone and camera can be paused separately. Open Features to see what Pam can help with.</p></div>
+</aside>
+</div>
+</div>
+<dialog id="features-dialog" aria-labelledby="features-title">
+  <div class="dialog-head"><h2 id="features-title">How Pam can help</h2><button class="dialog-close" data-close="features-dialog">Close</button></div>
+  <div class="dialog-body">
+    <div class="feature-welcome"><div><h3 class="display">A little help.<br>A lighter day.</h3><p>Ask in your own words. Pam takes things one step at a time.</p></div><img src="/assets/elder-companions.svg" alt="An older couple sitting together" width="180" height="120"></div>
+    <label class="search-field" for="feature-search">Find a feature<input id="feature-search" type="search" placeholder="Try weather or reminders" autocomplete="off"></label>
+    <ul id="capability-list" class="capability-list"></ul><p id="feature-empty" class="privacy" hidden>No matching features. Try another word.</p>
+    <button id="features-transcript" class="chip" style="margin-top:20px">View conversation history</button>
+    <p class="privacy">Some features need a connected calendar, family photos, or robot. Ride booking must be completed separately in Uber.</p>
+  </div>
+</dialog>
+<dialog id="camera-dialog" aria-labelledby="camera-dialog-title">
+  <div class="dialog-head"><h2 id="camera-dialog-title">Your camera</h2><button class="dialog-close" data-close="camera-dialog">Close</button></div>
+  <div class="dialog-body">
+    <video id="camera-expanded" playsinline muted autoplay aria-label="Expanded live camera preview" hidden></video>
+    <div id="camera-expanded-empty"><svg class="icon" aria-hidden="true"><use href="#icon-camera"/></svg><p>Your camera is off.</p><p class="privacy">Turn it on when you're ready. You can stop it at any time.</p></div>
+    <p id="camera-expanded-status" role="status">Camera is off.</p>
+    <div class="camera-controls"><button id="camera-dialog-start">Start camera</button><button id="camera-dialog-stop" hidden>Stop camera</button></div>
+    <p class="privacy">Camera frames go to your laptop. Selected images are sent to the AI service to create memories.</p>
+  </div>
+</dialog>
+<dialog id="memory-dialog" aria-labelledby="memory-dialog-title">
+  <div class="dialog-head"><h2 id="memory-dialog-title">Memory history</h2><button class="dialog-close" data-close="memory-dialog">Close</button></div>
+  <div class="dialog-body">
+    <div class="memory-selected" aria-live="polite" aria-atomic="true">
+      <div class="memory-selected-heading"><span id="memory-selected-icon" class="memory-symbol" aria-hidden="true"></span><div><span id="memory-selected-status" class="memory-state"></span><time id="memory-selected-time"></time></div></div>
+      <p id="memory-selected-detail"></p>
+      <p class="memory-caution">This is a past observation. The item may have moved since then.</p>
+    </div>
+    <div class="memory-pager"><button id="memory-prev" aria-label="Previous observation">Previous</button><span id="memory-position"></span><button id="memory-next" aria-label="Next observation">Next</button></div>
+    <h3 class="memory-trail-heading">Saved history</h3>
+    <ol id="memory-trail" class="memory-trail"></ol>
+  </div>
+</dialog>
+<dialog id="transcript-dialog" aria-labelledby="transcript-title">
+  <div class="dialog-head"><h2 id="transcript-title">Your conversation</h2><button class="dialog-close" data-close="transcript-dialog">Close</button></div>
+  <div class="dialog-body"><div id="log" role="log" aria-live="polite" aria-relevant="additions"></div></div>
+</dialog>
+<div id="subtitle-announcement" class="sr-only" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const els = { talk: $("talk"), status: $("status"), conn: $("conn"), card: $("card"),
+              photo: $("photo"), log: $("log"), demo: $("demo"), cam: $("cam") };
+const DG_URL = "wss://agent.deepgram.com/v1/agent/converse";
+// ?dg=ws://127.0.0.1:8000/api/fake-dg tests the whole client path against the
+// server's fake agent — no API key needed.
+const DG_OVERRIDE = new URLSearchParams(location.search).get("dg");
+
+let ws = null, mic = null, player = null, running = false, wakeLock = null;
+let starting = false, voiceTimeout = null;
+let currentView = "talk", voiceState = "idle", voiceVisual = null, micMuted = false;
+let captionNewTurn = true, captionSegments = [], functionRenderId = 0;
+
+function fitCaptions() {
+  const viewport = $("subtitle-window");
+  viewport.scrollTop = viewport.scrollHeight;
+}
+function appendCaption(content) {
+  const text = String(content || "").trim();
+  if (!text) return;
+  if (captionNewTurn) { captionSegments = []; captionNewTurn = false; }
+  const previous = captionSegments.at(-1);
+  if (text === previous) return;
+  if (previous && text.startsWith(previous)) captionSegments[captionSegments.length - 1] = text;
+  else captionSegments.push(text);
+  captionSegments = captionSegments.slice(-32);
+  $("subtitle-text").textContent = captionSegments.join(" ").slice(-8000);
+  $("subtitle-placeholder").hidden = true;
+  $("subtitle-window").hidden = false;
+  document.body.classList.add("has-captions");
+  $("subtitle-announcement").textContent = text;
+  fitCaptions();
+  requestAnimationFrame(fitCaptions);
+}
+function resetCaptions() {
+  captionNewTurn = true; captionSegments = [];
+  $("subtitle-text").textContent = "";
+  $("subtitle-window").hidden = true;
+  $("subtitle-placeholder").hidden = false;
+  document.body.classList.remove("has-captions");
+}
+const captionResize = new ResizeObserver(fitCaptions);
+captionResize.observe($("subtitle-window"));
+
+function openDialog(id, trigger) {
+  const dialog = $(id);
+  dialog.returnFocus = trigger;
+  if (!dialog.open) dialog.showModal();
+}
+function restoreDialogFocus(dialog, target = dialog.returnFocus) {
+  if (document.activeElement === document.body || dialog.contains(document.activeElement)) target?.focus({ preventScroll: true });
+}
+for (const button of document.querySelectorAll("[data-close]")) button.onclick = () => $(button.dataset.close).close();
+for (const dialog of document.querySelectorAll("dialog")) {
+  dialog.addEventListener("close", () => restoreDialogFocus(dialog));
+  dialog.addEventListener("click", event => {
+    const rect = dialog.getBoundingClientRect();
+    if (event.target === dialog && (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom)) dialog.close();
+  });
+}
+$("features-open").onclick = () => { openDialog("features-dialog", $("features-open")); refreshCalendarStatus(); };
+$("transcript-open").onclick = () => openDialog("transcript-dialog", $("transcript-open"));
+$("features-transcript").onclick = () => { $("features-dialog").close(); openDialog("transcript-dialog", $("features-open")); };
+const CAPABILITIES = [
+  ["find_object", "Find your belongings", "Look up where Pam last saw something and show its saved photo.", "Where did I leave my glasses?"],
+  ["get_schedule", "Check your calendar", "Read today's events from your connected calendar.", "What do I have planned today?"],
+  ["get_reminders", "Read your reminders", "Hear the reminders you've already saved.", "What are my reminders?"],
+  ["set_reminder", "Set a reminder", "Save a reminder. Spoken alerts need Pam to stay open and connected.", "Remind me to drink water in ten minutes."],
+  ["get_time_and_place", "Know the day and where you are", "Hear today's date, the time, where you are, and what is next.", "What day is it? Where am I?"],
+  ["check_pills_taken", "Check on your pills", "Hear what is recorded about your pills. Pam cannot see whether you took them, so she only reports what you told her.", "Did I take my pills?"],
+  ["get_weather", "Check the weather", "Get the current weather for your saved home location.", "What's the weather like?"],
+  ["who_is_this", "Recognise a person", "Name someone the camera can see, if they have been introduced before.", "Who is this?"],
+  ["save_face", "Remember a person", "Store the face the camera can see under a name. Nothing is kept until you give one.", "This is my son Jacob."],
+  ["request_ride", "Prepare a ride", "Open a ride to a saved destination. You confirm the booking in Uber.", "Help me get a ride to the airport."],
+  ["show_photo", "See a familiar face", "Show family photos that your helper has added to Pam.", "Show me a photo of Sarah."],
+  ["search_flights", "Look for a flight", "Hear Google Flights options read aloud when the flight service is connected. Pam does not buy tickets.", "Find flights to New York."],
+  ["fetch_object", "Retrieve an item", "Ask a connected robot for help. This needs the robot service and setup.", "Can the robot bring my medicine?"],
+  ["guide_me", "Take it step by step", "Talk through an everyday task one step at a time, at your pace.", "Help me make a cup of tea."]
+];
+for (const [name, title, description, example] of CAPABILITIES) {
+  const item = document.createElement("li"); item.dataset.capability = name;
+  const heading = document.createElement("h3"), body = document.createElement("p"), hint = document.createElement("span");
+  heading.textContent = title; body.textContent = description; hint.className = "feature-example"; hint.textContent = `“${example}”`;
+  item.append(heading, body, hint);
+  if (name === "get_schedule") {
+    const status = document.createElement("p"), link = document.createElement("a");
+    status.id = "calendar-connection-status"; status.className = "privacy"; status.setAttribute("role", "status");
+    status.textContent = "Open Features to check your calendar connection.";
+    link.id = "calendar-connect"; link.className = "chip calendar-connect"; link.href = "/api/calendar/google/connect";
+    link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = "Connect Google Calendar"; link.hidden = true;
+    item.append(status, link);
+  }
+  $("capability-list").append(item);
+}
+async function refreshCalendarStatus() {
+  const label = $("calendar-connection-status"), link = $("calendar-connect");
+  link.hidden = true;
+  label.textContent = "Checking calendar connection…";
+  try {
+    const response = await fetch("/api/calendar/status");
+    if (!response.ok) throw new Error("Calendar status unavailable");
+    const status = await response.json();
+    if (status.connected) label.textContent = "Google Calendar linked. Read-only access.";
+    else if (!status.configured) label.textContent = "Calendar isn't set up yet. Your helper can connect it on the laptop.";
+    else label.textContent = status.can_connect_here ? "Connect your Google account to let Pam read today's schedule."
+                                                     : "Your helper can finish connecting the calendar on the laptop.";
+    link.textContent = "Connect Google Calendar";
+    // Once it is connected there is nothing to do, so do not offer a sign-in. The link
+    // goes straight to Google's OAuth consent screen, and a user who taps it expecting
+    // Pam gets asked to approve account access instead -- confusing at best, and for
+    // the person this is built for, a page they cannot safely act on. Reconnecting is a
+    // helper's job on the laptop, not something to surface in the app.
+    link.hidden = status.connected || !status.configured || !status.can_connect_here;
+  } catch { label.textContent = "Calendar setup is unavailable. Ask your helper to restart Pam's backend on the laptop."; }
+}
+$("feature-search").oninput = () => {
+  const query = $("feature-search").value.trim().toLowerCase();
+  let count = 0;
+  for (const item of $("capability-list").children) { item.hidden = !item.textContent.toLowerCase().includes(query); if (!item.hidden) count++; }
+  $("feature-empty").hidden = count > 0;
+};
+
+function selectView(view, animate = false) {
+  if (!["talk", "memories", "camera"].includes(view)) return;
+  currentView = view;
+  for (const tab of document.querySelectorAll("[data-view]")) {
+    const selected = tab.dataset.view === view;
+    tab.setAttribute("aria-selected", String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    const panel = $(tab.getAttribute("aria-controls"));
+    panel.hidden = !selected;
+    panel.classList.toggle("view-enter", selected && animate);
+  }
+  $("tab-" + view).removeAttribute("data-new");
+  $("tab-" + view).removeAttribute("aria-label");
+  if (view === "memories" && unreadMemories) { unreadMemories = 0; renderUnread(); }
+  voiceVisual?.refresh();
+  $("main").scrollTo({ top: 0, behavior: "instant" });
+  fitCaptions();
+}
+for (const tab of document.querySelectorAll("[data-view]")) {
+  tab.onclick = event => selectView(tab.dataset.view, event.detail > 0);
+  tab.onkeydown = event => {
+    const tabs = [...document.querySelectorAll("[data-view]")];
+    let index = tabs.indexOf(tab);
+    if (event.key === "ArrowRight") index = (index + 1) % tabs.length;
+    else if (event.key === "ArrowLeft") index = (index + tabs.length - 1) % tabs.length;
+    else if (event.key === "Home") index = 0;
+    else if (event.key === "End") index = tabs.length - 1;
+    else return;
+    event.preventDefault();
+    selectView(tabs[index].dataset.view);
+    tabs[index].focus();
+  };
+}
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  const dialog = document.querySelector("dialog[open]");
+  if (dialog) { event.preventDefault(); dialog.close(); }
+  else document.querySelector(".settings").open = false;
+});
+
+function setVoiceState(state) {
+  const label = ({ idle: "Ready when you are", connecting: "Connecting to Pam", listening: micMuted ? "Microphone paused" : "Listening to you", thinking: "Thinking with you", speaking: "Pam is speaking" })[state];
+  if (voiceState === state && $("voice-state").textContent === label) return;
+  voiceState = state;
+  document.body.dataset.voice = state;
+  $("voice-state").textContent = label;
+  voiceVisual?.refresh();
+}
+
+function createVoiceVisual() {
+  const canvas = $("voice-orb"), fallback = $("orb-fallback"), scene = canvas.parentElement;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+  const samples = new Float32Array(256);
+  let renderer = null, raf = 0, last = 0, clock = 0, level = 0, inView = true, disposed = false;
+  let pointer = [0, 0], target = [0, 0];
+  const vertex = `attribute vec2 position; varying vec2 uv; void main() { uv = position; gl_Position = vec4(position, 0.0, 1.0); }`;
+  const fragment = `
+    #extension GL_OES_standard_derivatives : enable
+    precision highp float;
+    varying vec2 uv;
+    uniform float uTime, uLevel, uMode, uAspect;
+    uniform vec2 uPointer;
+    void main() {
+      // A single smooth glass sphere. The only motion is a slow breathe plus a
+      // gentle swell driven by the live audio level, so it stays calm and legible.
+      vec2 screen = uv; screen.x *= uAspect;
+      float radius = .78 + .025 * sin(uTime * .9) + uLevel * .13;
+      float d = length(screen);
+      float edge = fwidth(d) * 1.5;
+      float body = 1.0 - smoothstep(radius - edge, radius + edge, d);
+      if (body <= 0.0) { gl_FragColor = vec4(0.0); return; }
+      vec3 n = vec3(screen / radius, sqrt(max(0.0, 1.0 - dot(screen / radius, screen / radius))));
+      vec3 light = normalize(vec3(-.55 + uPointer.x * .3, .85 - uPointer.y * .3, .9));
+      float diffuse = max(0.0, dot(n, light));
+      float rim = pow(1.0 - n.z, 2.2);
+      float gloss = pow(max(0.0, dot(reflect(-light, n), vec3(0.0, 0.0, 1.0))), 60.0);
+      vec3 deep = vec3(.12, .42, .70);
+      vec3 sky = vec3(.55, .78, .95);
+      vec3 pearl = vec3(.97, .99, 1.0);
+      vec3 color = mix(deep, sky, smoothstep(-.2, .9, n.y * .6 + n.x * -.35 + diffuse * .5));
+      color = mix(color, pearl, smoothstep(.55, 1.0, diffuse) * .6);
+      color += rim * vec3(.38, .62, .85) * .5 + gloss * .5;
+      color = mix(color, color * vec3(.92, 1.0, 1.05), step(2.5, uMode) * .2);
+      gl_FragColor = vec4(clamp(color, 0.0, 1.0), body);
+    }`;
+  function setup() {
+    const gl = canvas.getContext("webgl", { alpha: true, antialias: false, premultipliedAlpha: false, powerPreference: "low-power" });
+    if (!gl || !gl.getExtension("OES_standard_derivatives")) return null;
+    const shaders = [];
+    let program = null, buffer = null;
+    try {
+      for (const [type, source] of [[gl.VERTEX_SHADER, vertex], [gl.FRAGMENT_SHADER, fragment]]) {
+        const shader = gl.createShader(type);
+        shaders.push(shader);
+        gl.shaderSource(shader, source); gl.compileShader(shader);
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error("Shader unavailable");
+      }
+      program = gl.createProgram();
+      shaders.forEach(shader => gl.attachShader(program, shader));
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error("Renderer unavailable");
+      gl.useProgram(program);
+      buffer = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+      const position = gl.getAttribLocation(program, "position");
+      gl.enableVertexAttribArray(position); gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+      const uniforms = Object.fromEntries(["uTime", "uLevel", "uMode", "uAspect", "uPointer"].map(name => [name, gl.getUniformLocation(program, name)]));
+      shaders.forEach(shader => gl.deleteShader(shader));
+      canvas.dataset.renderer = "webgl";
+      fallback.hidden = true;
+      return { draw(time, energy) {
+        const scale = Math.min(devicePixelRatio || 1, 1.25);
+        const width = Math.max(1, Math.min(420, Math.round(canvas.clientWidth * scale)));
+        const height = Math.max(1, Math.min(420, Math.round(canvas.clientHeight * scale)));
+        if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+        gl.viewport(0, 0, width, height);
+        gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.uniform1f(uniforms.uTime, time); gl.uniform1f(uniforms.uLevel, energy);
+        gl.uniform1f(uniforms.uMode, ({idle:0, connecting:2, listening:1, thinking:2, speaking:3})[voiceState]);
+        gl.uniform1f(uniforms.uAspect, canvas.clientWidth / Math.max(canvas.clientHeight, 1));
+        gl.uniform2f(uniforms.uPointer, pointer[0], pointer[1]);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+      }, dispose() { gl.deleteBuffer(buffer); gl.deleteProgram(program); } };
+    } catch {
+      shaders.forEach(shader => gl.deleteShader(shader));
+      if (buffer) gl.deleteBuffer(buffer);
+      if (program) gl.deleteProgram(program);
+      return null;
+    }
+  }
+  function motionAllowed() { return voiceState !== "idle" && !reduce.matches && document.documentElement.dataset.effects !== "off"; }
+  function sample() {
+    const analyser = player?.active ? player.analyser : running && !micMuted ? mic?.analyser : null;
+    let energy = 0;
+    if (analyser) {
+      analyser.getFloatTimeDomainData(samples);
+      for (const value of samples) energy += value * value;
+      energy = Math.min(1, Math.sqrt(energy / samples.length) * 5);
+    }
+    level += (energy - level) * (energy > level ? .38 : .14);
+  }
+  const ring = $("orb-ring");
+  function draw(time) {
+    if (renderer) renderer.draw(time, motionAllowed() ? level : 0);
+    else fallback.style.transform = motionAllowed() ? `scale(${1 + level * .1 + .012 * Math.sin(time * .9)})` : "none";
+    // The live ring is the only thing on the page that moves: it swells with
+    // whoever is speaking, and stays still when motion is reduced.
+    ring.style.transform = motionAllowed() ? `scale(${1 + level * .04})` : "none";
+  }
+  function tick(now) {
+    raf = 0;
+    if (disposed || !motionAllowed() || document.hidden || !inView || currentView !== "talk") return;
+    if (now - last >= 1000 / 30) {
+      clock += Math.min((now - last) / 1000, .06); last = now;
+      sample();
+      pointer = pointer.map((value, i) => value + (target[i] - value) * .07);
+      draw(clock);
+    }
+    raf = requestAnimationFrame(tick);
+  }
+  function refresh() {
+    if (disposed) return;
+    cancelAnimationFrame(raf); raf = 0;
+    if (currentView !== "talk" || document.hidden || !inView) return;
+    draw(motionAllowed() ? clock : 0);
+    if (motionAllowed()) { last = performance.now(); raf = requestAnimationFrame(tick); }
+  }
+  function moved(event) {
+    if (event.pointerType !== "mouse" || !motionAllowed()) return;
+    const rect = scene.getBoundingClientRect();
+    target = [(event.clientX - rect.left) / rect.width - .5, (event.clientY - rect.top) / rect.height - .5];
+  }
+  scene.addEventListener("pointermove", moved);
+  scene.addEventListener("pointerleave", () => { target = [0, 0]; });
+  canvas.addEventListener("webglcontextlost", event => { event.preventDefault(); renderer = null; fallback.hidden = false; canvas.dataset.renderer = "fallback"; refresh(); });
+  canvas.addEventListener("webglcontextrestored", () => { renderer = setup(); refresh(); });
+  renderer = setup();
+  if (!renderer) canvas.dataset.renderer = "fallback";
+  const observer = new IntersectionObserver(entries => { inView = entries[0].isIntersecting; refresh(); });
+  observer.observe(scene);
+  const resize = new ResizeObserver(refresh); resize.observe(scene);
+  document.addEventListener("visibilitychange", refresh);
+  reduce.addEventListener("change", refresh);
+  refresh();
+  return { refresh, get level() { return level; }, get animating() { return !!raf; },
+    dispose() { disposed = true; cancelAnimationFrame(raf); observer.disconnect(); resize.disconnect(); renderer?.dispose(); document.removeEventListener("visibilitychange", refresh); reduce.removeEventListener("change", refresh); scene.removeEventListener("pointermove", moved); } };
+}
+
+// ---------------------------------------------------------------------------
+// Microphone: getUserMedia -> AudioWorklet -> Int16 PCM frames -> ws.send
+// ---------------------------------------------------------------------------
+// Noise gate. The worklet used to forward every block unconditionally, so a busy
+// room was transcribed as fast as speech was, and the agent answered the room.
+// echoCancellation and noiseSuppression clean the signal but do not decide when to
+// send, and Deepgram will faithfully transcribe whatever arrives.
+//
+// The threshold is RELATIVE, not absolute: an absolute one is wrong the moment the
+// room changes. A noise floor is tracked continuously -- falling fast so it follows
+// a room going quiet, rising slowly so a sentence never becomes "the new normal" --
+// and the gate opens when the level sits well above it. Two thresholds, open higher
+// than close, so a voice dipping mid-word does not chatter the gate.
+//
+// Two details make the difference between gating and clipping people:
+//   PRE-ROLL, because the gate can only open AFTER a sound starts; without replaying
+//     the moments before, every sentence loses its first consonant and Deepgram
+//     hears "ello" for "hello".
+//   HANGOVER, because the pauses inside a sentence are not the end of it; closing on
+//     the first quiet frame chops speech into fragments and triggers end-of-turn.
+const WORKLET = `
+const OPEN_RATIO = 3.5;     // open when level exceeds the noise floor by this much
+const CLOSE_RATIO = 2.0;    // and stay open until it falls below this (hysteresis)
+const ABS_FLOOR = 0.0016;   // never open on near-silence, whatever the ratio says
+const PRE_ROLL = 24;        // ~190ms of blocks replayed when the gate opens
+const HANGOVER = 55;        // ~440ms of blocks kept open after the level drops
+
+class PCM extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.floor = 0.01;
+    this.open = false;
+    this.quiet = 0;
+    this.ring = [];
+    this.gateOn = true;
+    this.port.onmessage = (e) => { if (e.data && e.data.gate !== undefined) this.gateOn = !!e.data.gate; };
+  }
+
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (!ch) return true;
+
+    let sum = 0;
+    for (let i = 0; i < ch.length; i++) sum += ch[i] * ch[i];
+    const rms = Math.sqrt(sum / ch.length);
+
+    // Fast down, slow up: the floor chases silence quickly and resists being dragged
+    // up by speech, which is what keeps the ratio meaningful.
+    this.floor = rms < this.floor ? this.floor * 0.90 + rms * 0.10
+                                  : this.floor * 0.9995 + rms * 0.0005;
+    const floor = Math.max(this.floor, ABS_FLOOR);
+
+    if (!this.open && rms > floor * OPEN_RATIO) { this.open = true; this.quiet = 0; }
+    else if (this.open) {
+      if (rms < floor * CLOSE_RATIO) { if (++this.quiet > HANGOVER) this.open = false; }
+      else this.quiet = 0;
+    }
+
+    const pcm = new Int16Array(ch.length);
+    for (let i = 0; i < ch.length; i++) pcm[i] = Math.max(-1, Math.min(1, ch[i])) * 32767;
+
+    if (!this.gateOn || this.open) {
+      // Flush the pre-roll first so the start of the word survives the gate opening.
+      if (this.gateOn && this.ring.length) {
+        for (const b of this.ring) this.port.postMessage(b.buffer, [b.buffer]);
+        this.ring = [];
+      }
+      this.port.postMessage(pcm.buffer, [pcm.buffer]);
+    } else {
+      this.ring.push(pcm);
+      if (this.ring.length > PRE_ROLL) this.ring.shift();
+    }
+    return true;
+  }
+}
+registerProcessor("pcm", PCM);`;
+
+async function startMic() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  const ctx = new AudioContext({ sampleRate: 16000 });
+  const url = URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" }));
+  try {
+    await ctx.audioWorklet.addModule(url);
+    await ctx.resume();
+    const node = new AudioWorkletNode(ctx, "pcm");
+    node.port.onmessage = (e) => { if (running && ws?.readyState === WebSocket.OPEN && ws.bufferedAmount < 65536) ws.send(e.data); };
+    const analyser = ctx.createAnalyser(); analyser.fftSize = 256;
+    ctx.createMediaStreamSource(stream).connect(analyser);
+    analyser.connect(node);
+    node.connect(ctx.destination);
+    return { ctx, stream, node, analyser };
+  } catch (e) {
+    stream.getTracks().forEach(t => t.stop());
+    await ctx.close();
+    throw e;
+  } finally { URL.revokeObjectURL(url); }
+}
+
+// ---------------------------------------------------------------------------
+// Playback: incoming linear16 @24k chunks -> Float32 -> scheduled AudioBuffers.
+// ---------------------------------------------------------------------------
+function makePlayer() {
+  const ctx = new AudioContext({ sampleRate: 24000 });
+  const analyser = ctx.createAnalyser(); analyser.fftSize = 256;
+  analyser.connect(ctx.destination);
+  let at = 0, sources = [];
+  return {
+    ctx, analyser,
+    get active() { return sources.length > 0; },
+    play(buf) {
+      const pcm = new Int16Array(buf);
+      if (!pcm.length) return;
+      const f = new Float32Array(pcm.length);
+      for (let i = 0; i < pcm.length; i++) f[i] = pcm[i] / 32768;
+      const ab = ctx.createBuffer(1, f.length, 24000);
+      ab.copyToChannel(f, 0);
+      const src = ctx.createBufferSource();
+      src.buffer = ab; src.connect(analyser);
+      at = Math.max(at, ctx.currentTime);
+      src.start(at); at += ab.duration; sources.push(src);
+      if (voiceState !== "speaking" && running) say("Pam is speaking. You can speak to interrupt.");
+      setVoiceState("speaking");
+      src.onended = () => {
+        sources = sources.filter(s => s !== src);
+        if (!sources.length && voiceState === "speaking") {
+          setVoiceState(running ? "listening" : "idle");
+          if (running) say(micMuted ? "Your microphone is paused. Tap Unmute to speak." : "I'm listening. Take your time.");
+        }
+      };
+    },
+    stop() { sources.forEach(s => { try { s.stop(); } catch {} }); sources = []; at = 0; setVoiceState(running ? "listening" : "idle"); },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Camera: same wire format as index.html -- one JPEG per binary WS message to
+// the perception relay. Kept in this file rather than shared with index.html so
+// that page stays a standalone, dependency-free fallback for debugging the
+// camera on its own.
+//
+// It rides the SAME user gesture as the Talk button (getUserMedia needs one),
+// but it is deliberately NOT stopped when the voice session stops: this is a
+// memory device, and it has to keep seeing put-downs between conversations.
+// ---------------------------------------------------------------------------
+const CAM = { fps: 10, height: 720, quality: 0.7, maxBuffered: 256 * 1024 };
+const CAM_URL = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api/camera`;
+
+let camStream = null, camSocket = null, camTimer = null, camVideo = null;
+let camSent = 0, camSkipped = 0, camStart = 0;
+let camSessionId = null, camFrameId = 0;
+let camRetry = null, camAttempts = 0, camBusy = false, camStarting = false, camGeneration = 0;
+const camCanvas = document.createElement("canvas");
+const camCtx = camCanvas.getContext("2d", { alpha: false });
+
+function camSay(msg, cls = "") {
+  els.cam.textContent = msg; els.cam.className = cls;
+  const badge = $("camera-badge");
+  badge.textContent = cls === "on" ? "Live" : cls === "err" ? "Check" : camStream ? "Connecting" : "Off";
+  badge.className = "camera-badge " + cls;
+  syncCameraUI();
+}
+
+function syncCameraUI() {
+  const active = !!camStream?.getVideoTracks().some(track => track.readyState === "live");
+  $("camera-preview").hidden = !active;
+  $("mini-camera-empty").hidden = active;
+  $("mini-camera-title").textContent = active ? "Live camera" : camStarting ? "Starting camera…" : "Camera is off";
+  $("mini-camera-status").textContent = active ? (els.cam.className === "on" ? "Connected to memory" : "Preview only. Check connection.") : "Tap to open camera controls";
+  $("camera-expanded-status").textContent = els.cam.textContent;
+  $("camera-expanded-empty").hidden = active;
+  $("camera-expanded").hidden = !active;
+  $("camera-dialog-start").hidden = active && els.cam.className === "on";
+  $("camera-dialog-start").disabled = camStarting;
+  $("camera-dialog-start").textContent = active ? "Retry connection" : "Start camera";
+  $("camera-dialog-stop").hidden = !active;
+  const expanded = $("camera-expanded");
+  if ($("camera-dialog").open && active && expanded.srcObject !== camStream) {
+    expanded.srcObject = camStream;
+    expanded.play().catch(() => { $("camera-expanded-status").textContent = "The expanded preview could not play. Close it and try again."; });
+  } else if (!active) { expanded.pause(); expanded.srcObject = null; }
+}
+function expandCamera(trigger) {
+  openDialog("camera-dialog", trigger);
+  syncCameraUI();
+}
+$("camera-peek").onclick = () => expandCamera($("camera-peek"));
+$("camera-open").onclick = () => expandCamera($("camera-open"));
+$("camera-dialog").addEventListener("close", () => { $("camera-expanded").pause(); $("camera-expanded").srcObject = null; });
+$("camera-dialog-start").onclick = startCamera;
+$("camera-dialog-stop").onclick = stopCamera;
+
+async function camSendFrame() {
+  if (camBusy || !camSocket || camSocket.readyState !== WebSocket.OPEN || !camVideo?.videoWidth) return;
+  // Backpressure: drop rather than deepen the queue, so "live" stays live.
+  if (camSocket.bufferedAmount > CAM.maxBuffered) { camSkipped++; return; }
+  const scale = CAM.height / camVideo.videoHeight;
+  const w = Math.round(camVideo.videoWidth * scale), h = CAM.height;
+  if (camCanvas.width !== w || camCanvas.height !== h) { camCanvas.width = w; camCanvas.height = h; }
+  const capturedAt = Date.now() / 1000;
+  camCtx.drawImage(camVideo, 0, 0, w, h);
+  const captureMetadata = { session_id: camSessionId, frame_id: ++camFrameId,
+    captured_at: capturedAt, location: latestGeoFix ? { ...latestGeoFix } : null };
+  const sock = camSocket;
+  camBusy = true;
+  try {
+    const blob = await new Promise((r) => camCanvas.toBlob(r, "image/jpeg", CAM.quality));
+    if (!blob) return;
+    const buffer = await blob.arrayBuffer();
+    if (sock !== camSocket || sock.readyState !== WebSocket.OPEN) return;
+    const header = new TextEncoder().encode(JSON.stringify(captureMetadata));
+    const packet = new Uint8Array(8 + header.length + buffer.byteLength);
+    packet.set([67, 77, 80, 50]);
+    new DataView(packet.buffer).setUint32(4, header.length, false);
+    packet.set(header, 8);
+    packet.set(new Uint8Array(buffer), 8 + header.length);
+    sock.send(packet.buffer);
+    camSent++;
+  } finally { camBusy = false; }
+}
+
+async function startCamera() {
+  if (camTimer || camStarting) return;          // already running: leave it alone
+  if (camStream) { connectCamera(); return; }
+  const generation = ++camGeneration;
+  camStarting = true;
+  $("camera-start").disabled = true;
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error("Open Pam using HTTPS on your phone, or localhost on your laptop.");
+    camSay("Waiting for camera permission…");
+    // "environment" = the rear camera, the one aimed at the table, not the face.
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false,
+    });
+    if (generation !== camGeneration) { stream.getTracks().forEach(t => t.stop()); return; }
+    camStream = stream;
+    camSessionId = crypto.randomUUID();
+    camFrameId = 0;
+    startLocation();
+    camVideo = $("camera-preview");
+    camVideo.hidden = false;
+    camVideo.playsInline = true; camVideo.muted = true; camVideo.srcObject = camStream;
+    camStream.getVideoTracks()[0].onended = () => { stopCamera(); camSay("Camera access ended. Tap Start camera to try again.", "err"); };
+    await camVideo.play();
+    if (generation !== camGeneration) return;
+    $("camera-stop").hidden = false;
+    connectCamera();
+  } catch (e) {
+    stopCamera();
+    camSay(e.name === "NotAllowedError" ? "Camera permission is blocked. Allow Camera in your browser's site settings, then try again."
+      : e.name === "NotFoundError" ? "No camera was found on this device. You can still talk to Pam."
+      : e.name === "NotReadableError" ? "Another app may be using the camera. Close it, then try again."
+      : (e.message || "The camera could not start. Please try again."), "err");
+  } finally {
+    camStarting = false;
+    $("camera-start").disabled = false;
+    syncCameraUI();
+  }
+}
+
+function connectCamera() {
+  clearTimeout(camRetry);
+  if (!camStream || (camSocket && camSocket.readyState < WebSocket.CLOSING)) return;
+  camSay("Camera is on. Connecting to memory…");
+  $("camera-start").textContent = "Retry connection";
+  const sock = camSocket = new WebSocket(CAM_URL);
+  let reason = "", ready = false, retryAllowed = true, lastAck = performance.now();
+  const timeout = setTimeout(() => { if (sock === camSocket && !ready) sock.close(); }, 7000);
+  sock.onmessage = (e) => {
+    if (sock !== camSocket) return;
+    const message = JSON.parse(e.data);
+    if (message.type === "camera_ready") {
+      clearTimeout(timeout);
+      ready = true;
+      camSent = camSkipped = 0; camStart = performance.now();
+      camSay("Connected. Sending the first camera image…");
+      camTimer = setInterval(() => {
+        if (performance.now() - lastAck > 12000) {
+          reason = "Camera images stopped reaching the laptop. Reconnecting…";
+          sock.close();
+        } else camSendFrame().catch(() => { reason = "Camera capture paused. Reconnecting…"; sock.close(); });
+      }, 1000 / CAM.fps);
+    } else if (message.type === "frame_received") {
+      lastAck = performance.now();
+      camAttempts = 0;
+      $("camera-start").hidden = true;
+      camSay("Camera connected. Images are reaching your laptop.", "on");
+    } else if (message.type === "camera_error") {
+      reason = message.message;
+      retryAllowed = message.retry !== false;
+      camSay(reason, "err");
+    }
+  };
+  // The usual cause is the relay not running, or its self-signed certificate
+  // never having been accepted on this phone. Say both, because the browser
+  // reports an opaque failure either way.
+  sock.onerror = () => { reason ||= "Pam's server cannot be reached. Check your connection. Retrying automatically."; };
+  sock.onclose = () => {
+    clearTimeout(timeout);
+    if (sock !== camSocket) return;
+    clearInterval(camTimer); camTimer = null; camSocket = null;
+    $("camera-start").hidden = false;
+    camSay(reason || "Camera connection interrupted. Retrying automatically…", "err");
+    if (camStream && retryAllowed) camRetry = setTimeout(connectCamera, Math.min(30000, 2000 * 2 ** Math.min(camAttempts++, 4)));
+  };
+}
+
+function stopCamera() {
+  stopLocation();
+  camGeneration++;
+  clearTimeout(camRetry); camRetry = null; camAttempts = 0;
+  clearInterval(camTimer); camTimer = null;
+  if (camSocket) { camSocket.onclose = camSocket.onmessage = camSocket.onerror = null; camSocket.close(); camSocket = null; }
+  if (camStream) { camStream.getTracks().forEach((t) => { t.onended = null; t.stop(); }); camStream = null; }
+  if (camVideo) { camVideo.srcObject = null; camVideo.hidden = true; }
+  camVideo = null;
+  $("camera-start").hidden = false;
+  $("camera-start").textContent = "Start camera";
+  $("camera-stop").hidden = true;
+  camSay("Camera is off. You can still talk to Pam.");
+}
+
+$("camera-start").onclick = startCamera;
+$("camera-stop").onclick = stopCamera;
+
+// ---------------------------------------------------------------------------
+// Location: the laptop running the pipeline has no GPS; this phone does. Positions
+// go to the server, which stamps each memory with the place it was written, so
+// "on the counter" can become "on the counter, at home".
+//
+// watchPosition, not a poll: iOS delivers a fix when one materially changes, which
+// for a phone sitting in a room is rarely, and costs far less battery than asking.
+// Accuracy is sent too and matters as much as the coordinates - the server refuses
+// a fix worse than 200m rather than confidently naming the wrong building.
+// ---------------------------------------------------------------------------
+let geoWatch = null, latestGeoFix = null;
+
+function stopLocation() {
+  if (geoWatch !== null) navigator.geolocation.clearWatch(geoWatch);
+  geoWatch = null;
+  latestGeoFix = null;
+  fetch("/api/location", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "stopped" }) }).catch(() => {});
+}
+
+function startLocation() {
+  if (geoWatch !== null || !navigator.geolocation) return;
+  geoWatch = navigator.geolocation.watchPosition(
+    (pos) => {
+      latestGeoFix = { lat: pos.coords.latitude, lon: pos.coords.longitude,
+        accuracy_m: pos.coords.accuracy, observed_at: pos.timestamp / 1000 };
+      fetch("/api/location", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(latestGeoFix),
+      }).catch(() => {});
+    },
+    // Denied or unavailable is not an error worth interrupting anyone over: every
+    // memory still records what it SAW, it just does not also record where.
+    (err) => {
+      latestGeoFix = null;
+      fetch("/api/location", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: err.code === 1 ? "denied" : "unavailable" }) }).catch(() => {});
+      post_log("location", `unavailable: ${err.message}`);
+    },
+    { enableHighAccuracy: true, maximumAge: 30000, timeout: 20000 });
+}
+
+function post_log(tag, msg) {
+  fetch("/api/log", { method: "POST", headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ tag, msg }) }).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// The voice session
+// ---------------------------------------------------------------------------
+async function start() {
+  if (starting || running) return;
+  starting = true;
+  resetCaptions();
+  clearResult();
+  setVoiceState("connecting");
+  els.talk.disabled = true;
+  els.talk.textContent = "Starting Pam…";
+  say("Allow microphone access when your browser asks.");
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error("Open Pam using HTTPS on your phone, or localhost on your laptop.");
+    player = makePlayer();                // before mic: greeting audio may
+    await player.ctx.resume();            //   arrive while getUserMedia pends
+    mic = await startMic();               // audio unlock: we are inside the Start gesture
+    say("Connecting to Pam…");
+    const token = DG_OVERRIDE ? "test" : await (await fetch("/api/dg-token")).text();
+    if (token.startsWith("{")) throw new Error(JSON.parse(token).error);
+    const config = await (await fetch("/api/agent-config")).json();
+
+    // Handlers must bind the socket instance, not the `ws` global: if start()
+    // fails and is retried while this socket is still CONNECTING, a stale
+    // socket that opens late would send Settings on the WRONG socket (or throw
+    // on a null `ws`), leaving a zombie session that Deepgram kills 10s later
+    // with a confusing "send a Settings message" error.
+    const sock = ws = new WebSocket(DG_OVERRIDE || DG_URL, ["token", token]);
+    sock.binaryType = "arraybuffer";
+    sock.onopen = () => {
+      if (sock !== ws) { sock.close(); return; }   // superseded — don't leave a zombie session
+      sock.send(JSON.stringify({ type: "Settings", audio: {
+        input:  { encoding: "linear16", sample_rate: 16000 },
+        output: { encoding: "linear16", sample_rate: 24000 } }, agent: config }));
+    };
+    sock.onmessage = (m) => {
+      if (sock !== ws) return;
+      if (typeof m.data === "string") { onControl(JSON.parse(m.data)); return; }
+      if (player) player.play(m.data);   // audio can arrive before mic resolves
+    };
+    sock.onerror = sock.onclose = () => { if (sock === ws) { say("Connection lost. Tap Talk to Pam to try again.", true); stop(); } };
+    els.conn.textContent = "connecting";
+    voiceTimeout = setTimeout(() => {
+      if (sock === ws && !running) { say("Pam could not connect. Please try again.", true); stop(); }
+    }, 12000);
+    startCamera();   // same user gesture; outlives the voice session on purpose
+    startLocation();
+  } catch (e) {
+    // getUserMedia failures are the common case — say what to do, not just that it failed.
+    say(e.name === "NotAllowedError"
+        ? "Microphone blocked. Open your browser's site settings, allow Microphone, then reload."
+        : e.name === "NotFoundError" || e.name === "NotReadableError"
+        ? "No microphone available on this device."
+        : (e.message || "couldn't start"), true);
+    stop();
+  }
+}
+
+function onControl(m) {
+  switch (m.type) {
+    case "SettingsApplied":
+      clearTimeout(voiceTimeout);
+      starting = false; running = true;
+      els.talk.disabled = false;
+      els.talk.textContent = "Stop talking";
+      els.talk.setAttribute("aria-pressed", "true");
+      els.talk.className = "listening";
+      els.conn.textContent = "connected";
+      micMuted = false; $("mic-toggle").disabled = false; $("mic-toggle").hidden = false;
+      setVoiceState("listening");
+      say("I'm listening. Take your time.");
+      navigator.wakeLock?.request("screen").then(lock => { if (running) wakeLock = lock; else lock.release(); }).catch(() => {});
+      break;
+    case "ConversationText":
+      log(m.role === "user" ? "u" : "a", m.content);
+      if (m.role === "user") captionNewTurn = true;
+      else if (m.role === "assistant") appendCaption(m.content);
+      break;
+    case "UserStartedSpeaking":
+      captionNewTurn = true;
+      player?.stop(); setVoiceState("listening"); els.talk.className = "listening"; say("I'm listening. Take your time."); break;
+    case "AgentThinking":
+      if (!player?.active) setVoiceState("thinking");
+      els.talk.className = "speaking"; say("Let me think about that."); break;
+    case "AgentStartedSpeaking":
+      setVoiceState("speaking");
+      els.talk.className = "speaking"; say("Pam is speaking. You can speak to interrupt."); break;
+    case "AgentAudioDone":
+      if (!player?.active) setVoiceState(running ? "listening" : "idle");
+      els.talk.className = "listening"; break;
+    case "FunctionCallRequest":
+      if (!player?.active) setVoiceState("thinking");
+      for (const f of m.functions) runFunction(f); break;
+    case "Error":
+      say(m.description || "Pam could not connect. Please try again.", true); stop(); break;
+    case "Warning":
+      say(m.description || m.type, true); break;
+  }
+}
+
+function stop() {
+  running = false; starting = false; micMuted = false;
+  $("mic-toggle").disabled = true; $("mic-toggle").hidden = true;
+  $("mic-toggle").textContent = "Mute";
+  $("mic-toggle").setAttribute("aria-pressed", "false");
+  setVoiceState("idle");
+  clearTimeout(voiceTimeout);
+  els.talk.disabled = false;
+  els.talk.setAttribute("aria-pressed", "false");
+  // Close in ANY state — a CONNECTING socket that isn't closed opens later as
+  // a zombie session. close() during CONNECTING aborts the handshake cleanly.
+  if (ws) { const s = ws; ws = null;
+            s.onopen = s.onmessage = s.onclose = s.onerror = null;
+            try { s.close(); } catch {} }
+  if (mic) { mic.stream.getTracks().forEach(t => t.stop()); mic.ctx.close(); mic = null; }
+  if (player) { player.stop(); player.ctx.close(); player = null; }
+  if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+  els.talk.textContent = "Talk to Pam"; els.talk.className = "";
+  els.conn.textContent = "offline";
+}
+
+els.talk.onclick = () => {
+  if (running) { stop(); say("Microphone is off. Tap Talk to Pam whenever you're ready."); }
+  else start();
+};
+$("mic-toggle").onclick = () => {
+  if (!running || !mic) return;
+  micMuted = !micMuted;
+  mic.stream.getAudioTracks().forEach(track => { track.enabled = !micMuted; });
+  $("mic-toggle").setAttribute("aria-pressed", String(micMuted));
+  $("mic-toggle").textContent = micMuted ? "Unmute" : "Mute";
+  setVoiceState(player?.active ? "speaking" : "listening");
+  say(micMuted ? "Your microphone is paused. You can still hear Pam." : "I'm listening. Take your time.");
+};
+
+// ---------------------------------------------------------------------------
+// Client-side functions. Each handler returns { say, card?, photo? } — `say`
+// goes back to Deepgram as the FunctionCallResponse content; card/photo render
+// on screen. This is the entire agentic surface.
+// ---------------------------------------------------------------------------
+const api = async (url, opts) => {
+  const r = await fetch(url, opts);
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) return j;
+  // This string is SPOKEN. "Sorry, that didn't work. 500" means nothing to someone
+  // asking where their medication is, and sounds broken. The status code and error go
+  // to the laptop terminal, where the person who can act on them is looking.
+  post_log("api", `${url} -> HTTP ${r.status} ${j.error || ""}`);
+  return { say: j.say || "Sorry, I couldn't do that just now." };
+};
+
+const handlers = {
+  find_object:   (a) => api(`/api/find?q=${encodeURIComponent(a.item)}`),
+  get_schedule:  () => api(`/api/calendar`),
+  get_reminders: () => api(`/api/reminders`),
+  get_weather:   () => api(`/api/weather`),
+  get_time_and_place: () => api(`/api/time-and-place`),
+  check_pills_taken: () => api(`/api/pill-status`),
+  check_streak: () => api(`/api/streak`),
+  confirm_pills: (a) => api(`/api/pill-answer`, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(a) }),
+  simulate_bottle_moved: () => api(`/api/dose/simulate-evidence`, { method: "POST" }),   // ?demo=1 only
+  show_photo:    (a) => api(`/api/photo-info?name=${encodeURIComponent(a.name)}`),
+  search_flights:(a) => api(`/api/flights?destination=${encodeURIComponent(a.destination)}&date=${encodeURIComponent(a.date || "")}`),
+  set_reminder:  (a) => api(`/api/reminders`, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(a) }),
+  request_ride:  (a) => api(`/api/ride`, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(a) }),
+  fetch_object:  (a) => api(`/api/fetch`, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(a) }),
+  who_is_this:   () => api(`/api/face/who`),
+  save_face:     (a) => api(`/api/face/save`, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(a) }),
+};
+
+async function runFunction(f) {
+  const sock = ws;
+  const renderId = ++functionRenderId;
+  clearResult();
+  const handler = handlers[f.name];
+  let out;
+  try { out = handler ? await handler(JSON.parse(f.arguments || "{}")) : { say: `I don't know how to do ${f.name} yet.` }; }
+  catch (e) { out = { say: "Sorry, something went wrong." }; }
+  if (renderId === functionRenderId) {
+    if (out.card) showCard(out.card, f.name);
+    if (out.photo && f.name === "show_photo") showPhoto(out.photo);
+  }
+  if (sock && sock === ws && sock.readyState === WebSocket.OPEN)
+    sock.send(JSON.stringify({ type: "FunctionCallResponse", id: f.id, name: f.name,
+                             content: out.say || "Done." }));
+}
+
+// ---------------------------------------------------------------------------
+// Screen output: confirmation cards + photos. The tap IS the consent.
+// ---------------------------------------------------------------------------
+function clearResult() {
+  els.card.className = els.photo.className = "";
+  for (const image of document.querySelectorAll(".response-area img")) { image.removeAttribute("src"); image.style.display = "none"; }
+}
+$("result-close").onclick = () => { clearResult(); els.talk.focus({ preventScroll: true }); };
+function showCard(c, source = "") {
+  els.card.querySelector(".title").textContent = c.title || "";
+  els.card.querySelector(".body").textContent = c.body || "";
+  const img = els.card.querySelector("img");
+  img.style.display = "none";
+  img.removeAttribute("src");
+  if (source === "find_object" && c.image) { img.src = c.image; img.alt = `Recorded location of ${c.title || "your item"}`; img.style.display = "block"; }
+  const [a1, a2] = els.card.querySelectorAll("a.action");
+  for (const [el, act] of [[a1, c.action], [a2, c.action2]]) {
+    el.style.display = "none";
+    el.onclick = null;
+    if (act) {
+      el.textContent = act.label; el.href = act.href || "#"; el.style.display = "block";
+      if (act.post) el.onclick = (ev) => { ev.preventDefault(); cardAction(act); };   // a button that answers Pam
+    }
+  }
+  els.card.className = "show";
+  els.photo.className = "";
+  if (currentView !== "talk") $("tab-talk").dataset.new = "true";
+}
+
+// A card button that POSTs an answer (the pill question). The reply is shown and spoken exactly.
+async function cardAction(act) {
+  const out = await api(act.post, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(act.body || {}) });
+  clearResult();
+  if (out.say) { showCard({ title: "Your pills", body: out.say }); speak(out.say); }
+}
+
+// Have Pam say exactly this. Falls back to the status line when there is no live voice session.
+function speak(text) {
+  if (running && ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "InjectAgentMessage", message: text }));
+  else els.status.textContent = text;
+}
+
+function showPhoto(p) {
+  els.photo.querySelector("img").src = p.url;
+  els.photo.querySelector("img").style.display = "block";
+  els.photo.querySelector("img").alt = p.caption || "Family photo";
+  els.photo.querySelector(".cap").textContent = p.caption || "";
+  els.photo.className = "show";
+  els.card.className = "";
+  if (currentView !== "talk") $("tab-talk").dataset.new = "true";
+}
+
+// ---------------------------------------------------------------------------
+// Pushed messages (reminders firing, "the arm is done") -> spoken by Pam.
+// ---------------------------------------------------------------------------
+const memories = new Map();
+
+// Unread memories, notification-style: counts up while you are on another tab and
+// clears the moment you look. Replaces a plain dot, which said "something happened"
+// but not "three things happened while you were talking".
+let unreadMemories = 0;
+
+function renderUnread() {
+  const badge = $("memory-unread"), tab = $("tab-memories");
+  badge.hidden = unreadMemories === 0;
+  badge.textContent = unreadMemories > 9 ? "9+" : String(unreadMemories);
+  // The count is decoration to a screen reader unless the tab says it out loud.
+  if (unreadMemories) tab.setAttribute("aria-label", `Memories, ${unreadMemories} new`);
+  else tab.removeAttribute("aria-label");
+}
+let lastShine = -Infinity, memoryView = "items", memoryIndex = 0;
+let memoryDialogRecords = [], memoryOrigin = null;
+const memoryKey = memory => String(memory.object || "Saved observation").trim().replace(/\s+/g, " ").toLowerCase() || "saved observation";
+const memoryLabel = memory => { const key = memoryKey(memory); return key[0].toUpperCase() + key.slice(1); };
+function orderedMemories() {
+  const stamp = memory => { const time = Date.parse(memory.logged_at || ""); return Number.isFinite(time) ? time : -Infinity; };
+  return [...memories.values()].reverse().sort((a, b) => (stamp(b) - stamp(a)) || 0);
+}
+function groupMemories(records) {
+  const groups = new Map();
+  for (const memory of records) {
+    const key = memoryKey(memory);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(memory);
+  }
+  return [...groups.values()];
+}
+function memoryIcon(memory) {
+  const object = memoryKey(memory);
+  const type = /pill|medicine|medication/.test(object) ? "pill" : /key/.test(object) ? "key" : /glasses|spectacle/.test(object) ? "glasses"
+    : /bottle/.test(object) ? "bottle" : /phone|mobile/.test(object) ? "phone" : /wallet|purse/.test(object) ? "wallet" : "object";
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"), use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  svg.classList.add("icon"); svg.setAttribute("aria-hidden", "true"); use.setAttribute("href", `#icon-${type}`); svg.append(use);
+  return svg;
+}
+function memoryTime(memory) {
+  const time = document.createElement("time"), date = new Date(memory.logged_at || "");
+  time.className = "memory-when";
+  if (Number.isNaN(date.getTime())) time.textContent = "Time not recorded";
+  else {
+    time.dateTime = date.toISOString(); time.title = date.toLocaleString();
+    time.textContent = date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  }
+  return time;
+}
+function createMemoryCard(records, matching = false) {
+  const memory = records[0], li = document.createElement("li"), button = document.createElement("button");
+  button.className = "memory-card"; button.dataset.memoryObject = memoryKey(memory); button.dataset.memoryId = memory.id;
+  button.setAttribute("aria-haspopup", "dialog"); button.setAttribute("aria-controls", "memory-dialog");
+  const top = document.createElement("span"), symbol = document.createElement("span"), count = document.createElement("span");
+  top.className = "memory-card-top"; symbol.className = "memory-symbol"; count.className = "memory-count";
+  symbol.append(memoryIcon(memory));
+  count.textContent = `${records.length} ${matching ? (records.length === 1 ? "match" : "matches") : (records.length === 1 ? "observation" : "observations")}`;
+  top.append(symbol, count);
+  const title = document.createElement("strong"), detail = document.createElement("span");
+  title.className = "memory-card-title"; title.textContent = memoryLabel(memory);
+  detail.className = "memory-card-description"; detail.textContent = memory.detail || "No description was recorded.";
+  button.append(top, title, detail);
+  if (memory.title === "Observation saved") {
+    const caution = document.createElement("span"); caution.className = "memory-card-caution"; caution.textContent = "Location not confirmed"; button.append(caution);
+  }
+  const footer = document.createElement("span"), more = document.createElement("span");
+  footer.className = "memory-card-footer"; more.className = "memory-card-more"; more.textContent = "View history ›";
+  footer.append(memoryTime(memory), more); button.append(footer);
+  button.onclick = () => openMemoryDetail(memoryKey(memory), memory.id, button);
+  li.append(button);
+  return li;
+}
+function findMemoryButton(list, object, id) {
+  const buttons = [...(list?.querySelectorAll(".memory-card") || [])];
+  return buttons.find(button => button.dataset.memoryId === id) || buttons.find(button => button.dataset.memoryObject === object);
+}
+function replaceMemoryCards(list, rows) {
+  const active = list.contains(document.activeElement) ? document.activeElement.closest(".memory-card") : null;
+  list.replaceChildren(...rows);
+  if (active) findMemoryButton(list, active.dataset.memoryObject, active.dataset.memoryId)?.focus({ preventScroll: true });
+}
+function renderRecentMemories() {
+  const groups = groupMemories(orderedMemories()).slice(0, 3);
+  const rows = groups.map(records => createMemoryCard(records));
+  if (!rows.length) {
+    const li = document.createElement("li"); li.className = "recent-empty";
+    li.textContent = "Nothing saved yet. When Pam remembers something, it will appear here."; rows.push(li);
+  }
+  replaceMemoryCards($("recent-list"), rows);
+}
+$("recent-all").onclick = () => { $("memory-search").value = ""; renderMemoryHistory(); selectView("memories"); };
+function renderMemoryHistory() {
+  const query = $("memory-search").value.trim().toLowerCase();
+  const matches = orderedMemories().filter(m => `${m.object || ""} ${m.detail || ""}`.toLowerCase().includes(query));
+  const groups = memoryView === "items" ? groupMemories(matches) : matches.map(memory => [memory]);
+  const rows = groups.map(records => createMemoryCard(records, !!query));
+  if (!rows.length) {
+    const li = document.createElement("li"), title = document.createElement("strong"), detail = document.createElement("p"), action = document.createElement("button");
+    li.className = "memory-empty";
+    title.textContent = query ? "No memories match" : "A place for your memories";
+    detail.textContent = query ? "Try another item or place, or clear your search." : "Turn on the camera. Pam will save observations of the things around you.";
+    action.className = "chip"; action.textContent = query ? "Clear search" : "Open camera";
+    action.onclick = () => { if (query) { $("memory-search").value = ""; renderMemoryHistory(); $("memory-search").focus(); } else selectView("camera"); };
+    li.append(title, detail, action); rows.push(li);
+  }
+  $("memory-history").dataset.mode = memoryView;
+  replaceMemoryCards($("memory-history"), rows);
+  $("memory-results").textContent = `${matches.length} ${query ? "matching" : "recent"} ${matches.length === 1 ? "observation" : "observations"}`;
+}
+$("memory-search").oninput = renderMemoryHistory;
+for (const button of document.querySelectorAll("[data-memory-view]")) {
+  button.onclick = () => {
+    memoryView = button.dataset.memoryView;
+    for (const choice of document.querySelectorAll("[data-memory-view]")) choice.setAttribute("aria-pressed", String(choice === button));
+    renderMemoryHistory();
+  };
+}
+function openMemoryDetail(object, id, trigger) {
+  memoryDialogRecords = orderedMemories().filter(memory => memoryKey(memory) === object);
+  if (!memoryDialogRecords.length) return;
+  memoryOrigin = { list: trigger.closest("ul")?.id, object, id };
+  $("memory-dialog-title").textContent = memoryLabel(memoryDialogRecords[0]);
+  $("memory-selected-icon").replaceChildren(memoryIcon(memoryDialogRecords[0]));
+  const trail = memoryDialogRecords.map((memory, index) => {
+    const li = document.createElement("li"), button = document.createElement("button"), detail = document.createElement("span");
+    detail.textContent = memory.detail || "No description was recorded.";
+    button.append(memoryTime(memory), detail); button.onclick = () => selectMemoryObservation(index); li.append(button); return li;
+  });
+  $("memory-trail").replaceChildren(...trail);
+  selectMemoryObservation(Math.max(0, memoryDialogRecords.findIndex(memory => memory.id === id)));
+  openDialog("memory-dialog", trigger);
+}
+function selectMemoryObservation(index) {
+  const memory = memoryDialogRecords[index];
+  if (!memory) return;
+  memoryIndex = index;
+  $("memory-selected-detail").textContent = memory.detail || "No description was recorded.";
+  $("memory-selected-status").textContent = memory.title === "Memory saved" ? "Saved location" : memory.title === "Observation saved" ? "Location not confirmed" : "Saved observation";
+  const time = memoryTime(memory), selectedTime = $("memory-selected-time");
+  selectedTime.textContent = time.textContent;
+  selectedTime.removeAttribute("datetime");
+  if (time.dateTime) selectedTime.dateTime = time.dateTime;
+  $("memory-position").textContent = `${index + 1} of ${memoryDialogRecords.length}`;
+  $("memory-prev").disabled = index === 0;
+  $("memory-next").disabled = index === memoryDialogRecords.length - 1;
+  [...$("memory-trail").children].forEach((li, i) => {
+    const button = li.querySelector("button");
+    if (i === index) button.setAttribute("aria-current", "true"); else button.removeAttribute("aria-current");
+  });
+}
+$("memory-prev").onclick = () => selectMemoryObservation(memoryIndex - 1);
+$("memory-next").onclick = () => selectMemoryObservation(memoryIndex + 1);
+$("memory-dialog").addEventListener("close", () => {
+  if (!$("memory-dialog").returnFocus?.isConnected && memoryOrigin) {
+    const target = findMemoryButton($(memoryOrigin.list), memoryOrigin.object, memoryOrigin.id) || $("tab-" + currentView);
+    restoreDialogFocus($("memory-dialog"), target);
+  }
+});
+renderMemoryHistory();
+renderRecentMemories();
+function showMemory(memory, fresh = true) {
+  if (!memory.id || memories.has(memory.id)) return;
+  memories.set(memory.id, memory);
+  if (memories.size > 100) memories.delete(memories.keys().next().value);
+  $("memory-title").textContent = memory.title || "Memory saved";
+  $("memory-detail").textContent = memory.detail || "Pam saved a new observation.";
+  const date = new Date(memory.logged_at || "");
+  $("memory-time").textContent = Number.isNaN(date.getTime()) ? "" : date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  $("memory-time").dateTime = Number.isNaN(date.getTime()) ? "" : date.toISOString();
+  renderMemoryHistory();
+  renderRecentMemories();
+  $("memory-peek-detail").textContent = fresh ? `New memory: ${memory.object || "observation"}` : "Your memories are ready.";
+  if (fresh) $("memory-announcement").textContent = `${memory.title || "Memory saved"}: ${memory.object || "a new observation"}`;
+  if (fresh && currentView !== "memories") {
+    $("tab-memories").dataset.new = "true";
+    unreadMemories++;
+    renderUnread();
+  }
+  if (fresh && performance.now() - lastShine > 8000 && !matchMedia("(prefers-reduced-motion: reduce)").matches && document.documentElement.dataset.effects !== "off") {
+    lastShine = performance.now();
+    $("memory-shine").classList.remove("shine");
+    requestAnimationFrame(() => $("memory-shine").classList.add("shine"));
+  }
+}
+$("memory-shine").addEventListener("animationend", () => $("memory-shine").classList.remove("shine"));
+const es = new EventSource("/api/push");
+es.onopen = () => { $("feed-state").textContent = "Memory updates connected"; };
+es.onerror = () => { $("feed-state").textContent = "Memory updates paused. Reconnecting…"; };
+es.onmessage = (e) => {
+  const m = JSON.parse(e.data);
+  if (m.type === "hello") { for (const memory of m.memories || []) showMemory(memory, false); }
+  if (m.type === "memory_saved") showMemory(m);
+  if (m.type === "say" && running && ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({ type: "InjectUserMessage", content: m.text }));
+  else if (m.type === "say")
+    els.status.textContent = m.text;   // not connected — still show it
+  if (m.type === "speak") speak(m.text);   // exact words: the pill prompts are worded on purpose
+  if (m.type === "card") { selectView("talk", true); clearResult(); showCard(m.card); }
+};
+
+// The page greets by time of day; it should feel like it noticed you arrive.
+{
+  const hour = new Date().getHours();
+  $("greeting").textContent = hour < 12 ? "Good morning." : hour < 18 ? "Good afternoon." : "Good evening.";
+  const today = new Date();
+  $("today").dateTime = today.toISOString();
+  $("today").textContent = today.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
+}
+
+for (const [id, key] of [["large-text", "large"], ["high-contrast", "contrast"], ["reduce-effects", "effects"]]) {
+  const input = $(id);
+  const apply = () => { document.documentElement.dataset[key] = key === "effects" ? (input.checked ? "off" : "on") : String(input.checked); voiceVisual?.refresh(); };
+  try { input.checked = localStorage.getItem(`pam-${key}`) === "true"; } catch {}
+  apply();
+  input.onchange = () => { apply(); try { localStorage.setItem(`pam-${key}`, String(input.checked)); } catch {} };
+}
+
+voiceVisual = createVoiceVisual();
+setVoiceState("idle");
+window.addEventListener("pagehide", () => { stop(); stopCamera(); es.close(); voiceVisual?.dispose(); captionResize.disconnect(); });
+window.addEventListener("pageshow", event => { if (event.persisted) location.reload(); });
+
+// ---------------------------------------------------------------------------
+function say(msg, isErr) { els.status.textContent = msg; els.status.classList.toggle("error", !!isErr); }
+function log(cls, text) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = (cls === "u" ? "You: " : "Pam: ") + text;
+  els.log.prepend(d);
+}
+
+// ?demo=1 — a button per function so every feature is testable with no voice.
+if (location.search.includes("demo")) {
+  els.demo.className = "show";
+  const tests = {
+    find_object:  { item: "pill bottle" }, get_schedule: {}, get_reminders: {},
+    who_is_this:  {}, save_face: { name: "Test Person" },
+    get_weather:  {}, get_time_and_place: {}, show_photo: { name: "Sarah" },
+    check_pills_taken: {}, check_streak: {}, simulate_bottle_moved: {}, confirm_pills: { answer: "yes" },
+    search_flights: { destination: "New York", date: "next Friday" },
+    set_reminder: { text: "take your medication", in_minutes: 1 },
+    request_ride: { destination: "airport" }, fetch_object: { item: "pill bottle" },
+  };
+  for (const [name, args] of Object.entries(tests)) {
+    const b = document.createElement("button");
+    b.textContent = name;
+    b.onclick = async () => {
+      const out = await handlers[name](args);
+      clearResult();
+      if (out.card) showCard(out.card, name);
+      if (out.photo && name === "show_photo") showPhoto(out.photo);
+      log("a", out.say || "(no response)");
+    };
+    els.demo.appendChild(b);
+  }
+}
+</script>
+</body>
+</html>

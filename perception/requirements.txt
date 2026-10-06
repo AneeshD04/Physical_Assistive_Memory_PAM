@@ -1,0 +1,10 @@
+ultralytics==8.4.155
+opencv-python
+anthropic
+pydantic
+lap
+pandas
+clip @ git+https://github.com/ultralytics/CLIP.git
+websockets
+sounddevice
+mlx-whisper; sys_platform == "darwin"   # Apple Silicon only; voice.py --text works without it

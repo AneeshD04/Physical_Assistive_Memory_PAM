@@ -1,0 +1,11 @@
+.venv/
+data/
+weights/
+runs/
+.env
+*.ts
+*.pt
+
+# capture frames from sweep_conf.py / diagnose_bottle.py: photos of whoever ran it
+*.jpg
+faces.json

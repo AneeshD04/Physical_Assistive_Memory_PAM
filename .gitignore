@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Secrets: never commit. phone/serve.py needs cert.pem + key.pem on disk; generate them locally.
+.env
+*.pem
+*.key
+*.p12
+
+# Model weights and exports: shared out of band (hundreds of MB, over GitHub's limit)
+weights/
+*.ts
+*.pt
+*.onnx
+*.safetensors
+
+# Run data: captured frames, ledgers, logs. Frames are photos of whoever ran it.
+perception/data/
+perception/runs/
+*.db
+*.sqlite
+*.sqlite3
+*.jsonl
+*_log.txt
+*.jpg
+*.jpeg
+faces.json
+
+# Editors
+.DS_Store
+.idea/
+.vscode/
