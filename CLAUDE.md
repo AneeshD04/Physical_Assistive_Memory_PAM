@@ -890,3 +890,20 @@ The focused subset can be run without any legacy app modules:
 ```text
 python -B server/test_personal_pipeline.py EventVerifierTests PublicFileSecurityTests SQLiteResourceTests CertificateCreationTests -v
 ```
+
+### Checkpoint: standalone private storage
+
+- `perception/private_files.py` ports only `private_append_fd` and its Windows
+  API support from the archived scheduling module. No scheduling code is
+  imported at runtime. `ObjectStore` now uses this standalone dependency.
+- Six focused permission tests pass on Windows: new/existing files, append
+  preservation, injected protection failure, wrong-owner rejection and
+  non-inheritable descriptors. Windows ACL assertions inspect the protected
+  DACL and current owner SID; they do not substitute Unix mode bits. POSIX
+  behavior is retained but was not executed on this Windows machine.
+- All four requested suites were rerun: capture 8/8, interaction 7/7, lifecycle
+  61/61; pipeline 36 passed and 23 setup errors out of 59. The remaining errors
+  are `ModuleNotFoundError: No module named 'doses'` during app import: 12
+  `ObjectApiSecurityTests`, 7 `CameraRelaySecurityTests`, 4 `TokenSecurityTests`.
+  Synthetic-frame and worker-boundary tests now run and pass; API, relay and
+  token assertions remain unverified until the app/auth split is completed.

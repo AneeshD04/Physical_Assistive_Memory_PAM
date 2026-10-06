@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 import re
 import sqlite3
-import sys
 import time
 import uuid
 
@@ -18,8 +17,10 @@ from typing import Literal
 
 try:
     from .capture import finite_number, location_at
+    from .private_files import private_append_fd
 except ImportError:
     from capture import finite_number, location_at
+    from private_files import private_append_fd
 
 
 class InteractionEvidence(BaseModel):
@@ -94,10 +95,6 @@ def _words(text):
 
 
 def _private_file(path):
-    root = str(Path(__file__).resolve().parents[1])
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    from server.schedule import private_append_fd
     fd = private_append_fd(path)
     os.close(fd)
 
