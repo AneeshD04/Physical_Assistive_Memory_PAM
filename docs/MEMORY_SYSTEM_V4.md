@@ -1,5 +1,6 @@
-<!-- PAM MEMORY LAYER, v4 spec. Exported 2026-10-05 from the canonical doc.
-     Part 1 (the spec) is authoritative. Part 2 is the review log; where they differ, Part 1 wins. -->
+<!-- PAM MEMORY LAYER, v4 spec, revision 4 (after the fourth review). Exported 2026-10-05.
+     Part 1 (the spec) is authoritative. Part 2 is the review log; where they differ, Part 1 wins.
+     Frozen for build: section 10 steps 1 and 2 are cleared to start. -->
 
 # pam Memory Layer: Response to Review and v4 Direction
 
@@ -9,7 +10,7 @@ Oct 3, 2026 · @aneesh
 
 We accept the review's direction: the evidence ledger becomes the center of the system, three design rules in the September brief flip, and "seven proven components" becomes "a modular pipeline with explicit, testable uncertainty." The core bet survives intact: capture on hand interaction rather than on sight, write memory without language, keep instance identity separate from detector classes, and keep the paid cloud off the write path.
 
-The review's single most important finding is one it under-sold. Wearer-only admission would make pam fail on the most common elder-care scenario there is: a caregiver moves the medication. That is not an edge case to handle later; non-wearer moves of tracked items are the product.
+The review's single most important finding is one it under-sold. Wearer-only admission would make pam fail on the scenario we prioritize above all others: a caregiver moves the medication. That is not an edge case to handle later; observed non-wearer moves of tracked items are the product.
 
 The second most important finding is ours, not the review's: actual v1 end-to-end performance is unknown, and 70% success is the initial experimental target (corrected in Round 2: the earlier framing of this as evidence-backed was wrong). The product has to be designed for that number, which means a photo-first answer and a first-class "I'm not sure" response, not a confident sentence that sends someone with memory impairment to the wrong room.
 
@@ -19,7 +20,7 @@ Everything below describes two systems and keeps them apart: the native wearable
 
 Two systems, kept apart. The research rig uses iOS Safari for capture and an authenticated laptop service for inference and storage, except for the stages explicitly assigned to the browser: the gate, hand landmarks, grasp, the episode state machine and the ring buffer. It validates episode detection, object localization, identity, retrieval, the data contracts and the UX. It does not establish native-phone inference latency, NPU use, offline operation or production battery life; those need separate on-device validation. The native target is a phone or wearable running the whole pipeline on its own silicon, with the same stage boundaries and the same episode packet, so the contract the rig validates is the one the wearable keeps internally.
 
-The September brief's budget was "5 fps on a CPU laptop with a 45 ms hand detector." That target is retired. Native-target stages are sized for a mid-range phone, with the NPU where the platform exposes one. On the rig, phone-side stages are measured as they run in JavaScript (an upper bound on native) and server-side stages as the work a wearable would inherit; neither is a native number and neither is presented as one.
+The September brief's budget was "5 fps on a CPU laptop with a 45 ms hand detector." That target is retired. Native-target stages are sized for a mid-range phone, with the NPU where the platform exposes one. On the rig, phone-side stages are measured as they run in JavaScript (a measurement of the rig implementation, not a bound on the target) and server-side stages as the work a wearable would inherit; neither is a native number and neither is presented as one.
 
 The form-factor question (pendant vs. glasses vs. phone-tethered) is parked by decision, not forgotten. The review's point that it must be answered before a production build stands; it does not block the next eight weeks. Updated October 4: the test rig is an iOS browser web app streaming to the laptop server; the Round 2 tab, under Platform decision, records what runs where and which efficiency numbers carry over to the wearable.
 
@@ -29,11 +30,11 @@ Twelve of the review's findings change the design. Ranked by how much each one c
 
 | # | Finding (review §) | What changes | Why it ranks here |
 | --- | --- | --- | --- |
-| 1 | Relevance-based admission; actor-independent updates (§2A) | Relevance, actor and location become three independent fields. Creating a durable item needs a relevance signal; updating one accepts any actor. | A caregiver moving the medication is the most common elder-care scenario. The brief's rule fails it by design. |
+| 1 | Relevance-based admission; actor-independent updates (§2A) | Relevance, actor and location become three independent fields. Creating a durable item needs a relevance signal; updating one accepts any actor. | A caregiver moving the medication is the scenario we prioritize. The brief's rule fails it by design. |
 | 2 | Episodes must be object-centric (§2D) | Episode outcomes become picked\_up / placed\_on\_surface / placed\_in\_container / handed\_to\_someone / returned\_to\_origin / lost\_from\_view / uncertain. A location can be another object. | Purse, pocket, drawer and bag are where things actually go. "Hearing aids in the purse" is a verbatim MemPal interview quote. |
 | 3 | Appearance banks drift (§2E, §8) | Observations are immutable; identity assignments are versioned; banks have trusted and provisional tiers; no update from an ambiguous match. | One wrong match poisons every later answer about that item. Event-sourcing the ledger also makes user corrections cheap. |
 | 4 | MemPal's 97% is a filtered number (§1) | The comparison table is rewritten: 72% correct descriptions is their system accuracy; occlusion-at-carry is our hypothesis, tested by ablation. | We checked the paper: it sends 3x3 tiled batches of nine frames to GPT-4V, not one still. The brief's causal story was wrong. |
-| 5 | The 45 ms detector is not the compute budget (§4) | Every stage is benchmarked on the phone with p50/p95, bursts, thermal and power. See section 7. | The event path (DINOv2, SigLIP 2, place, open-vocab) was never measured as a whole. |
+| 5 | The 45 ms detector is not the compute budget (§4) | Every stage is benchmarked where it runs: rig stages on the iPhone in JavaScript and on the laptop now, native stages on-device later, each with p50/p95, bursts, thermal and power. See section 7. | The event path (DINOv2, SigLIP 2, place, open-vocab) was never measured as a whole. |
 | 6 | Voice cost was wrong (§6) | Deepgram Voice Agent at $0.075 per connected minute is $67.50 per user per month at 30 min/day. Replaced with push-to-talk STT and platform TTS. See section 8. | The brief's $6 assumed an implementation it did not name. |
 | 7 | Self-taught hand bank is circular (§2C) | Geometry and temporal continuity first; appearance bank as supporting evidence only; optional 10-second wearer calibration; unknown\_actor is a valid output. | A false positive trains the next false positive. "No item enrollment" never meant "no wearer calibration." |
 | 8 | Home/store policy contradicts the product (§3) | Encounter evidence, candidate items and durable items become three retention tiers. Geofence sets retention and processing policy, never ownership. | A phone left at checkout and a prescription first seen at the pharmacy are both things pam must remember. |
@@ -53,7 +54,7 @@ Four points are correct in the letter and do not change the conclusion. They are
 - **The examine test (§2B).** Correct, and small. A returned\_to\_origin event is a timestamp refresh, which is itself useful ("you last touched your keys at 3 pm, on the counter"). It becomes a state update that suppresses a notification, not a discard.
 - **"Choose hardware now" (§4).** Parked by decision. The browser rig on an iPhone is the research platform and the native target stays unchosen; the pipeline accepts a glasses stream later, and nothing in the next eight weeks depends on the answer.
 
-One thing the review under-sells: it treats the caregiver-moves-the-medication case as an architectural weakness. It is the product. Pam's value is highest exactly when someone other than the wearer moved the thing, because that is when the wearer's own memory has nothing to offer.
+One thing the review under-sells: it treats the caregiver-moves-the-medication case as an architectural weakness. It is the product. We expect Pam's value to be highest when someone other than the wearer moved the thing and the camera saw it, because that is when the wearer's own memory has nothing to offer; the pilot measures whether that holds.
 
 ## Revised design rules
 
@@ -81,11 +82,11 @@ Six changes the review did not ask for. Three of them also cut compute.
 
 **Printed labels are evidence, not identity.** Zero enrollment stays the default, and the system may still read text on its own. At first sighting of an object with text (pharmacy label, box, bottle), run OCR on a capture-resolution source crop kept separately from the 224 px embedding crop (ML Kit wants about 16 px per character). On the native target this is the platform OCR; on the rig it is Tesseract or the Vision framework on the server. The result is stored as recognized text, the source image and an uncertainty. It contributes candidate identifiers: drug name as category, patient name as relevance, Rx number and fill date as the strongest discriminator between refills. Two refills can share patient, drug and dose, so text alone never establishes physical-instance identity or ownership; continuous visual tracking is what establishes continuity. Extracted dose text is never an input to any medication-taking or dosing feature.
 
-**Abstention is a first-class answer.** Three response shapes, chosen by confidence: confident (photo, room, time), hedged ("I last saw it here at 3 pm, but someone may have moved it"), abstain ("I'm not sure. The last time I saw it was here," with the photo). For a person with memory impairment, a confident wrong answer is worse than no answer: it sends them searching the wrong room and erodes trust in every later answer. The pilot scores confident-wrong as a worse outcome than abstain.
+**Abstention is a first-class answer.** Three response shapes, chosen by the resolver under rule 12 and the answer contract in section 7: confident (a reliable sighting and no later uncertain event: photo, time, room when known); hedged (a reliable sighting followed by an unobserved gap or an unknown actor: "I saw it here at 3 pm, but someone may have moved it since," with the photo); abstain (no reliable sighting: "I'm not sure where it is," with no photo and no claimed sighting, and the offer to say when it is next seen). For a person with memory impairment, a confident wrong answer is worse than no answer: it sends them searching the wrong room and erodes trust in every later answer. The pilot scores confident-wrong as a worse outcome than abstain.
 
 **Corrections are evidence first, labels second.** "No, the silver one." "It was in the drawer." Each is a correction on our own hardware in a real home. The voice loop is built to capture them: when two hypotheses are close, ask one clarifying question; log every correction with its source, meaning, timestamp and the hypothesis it links to. A correction may be an identity constraint, a current location, a past location, the item's usual home, or a mistaken recollection; the resolver asks which when it matters. A sample is human-audited before any export as training labels, and personalization of this user's ledger is kept separate from consent to global model training. The loop is expected to reduce labeling cost; by how much is measured, not assumed.
 
-**Validate with existing checkpoints now.** We validate with existing checkpoints whose terms permit our intended experiments, obtaining permission where needed; some model terms restrict product-development research itself, so each checkpoint's weight, code and dataset terms are checked separately (corrected in Round 2). DINOv2, SigLIP 2, MediaPipe and the platform OCR are permitted; the hand-contact checkpoints are checked one by one before use. The decision to train the Hand Sentinel, and on what ontology, comes after that measurement, not before. This is the single largest schedule and cash saving available.
+**Validate with existing checkpoints now.** We validate with existing checkpoints whose terms permit our intended experiments, obtaining permission where needed; some model terms restrict product-development research itself, so each checkpoint's weight, code and dataset terms are checked separately (corrected in Round 2). DINOv2, SigLIP 2, MediaPipe and the platform OCR are permitted; the hand-contact checkpoints are checked one by one before use. The decision to train the Hand Sentinel, and on what ontology, comes after that measurement, not before. This is a large schedule and cash saving.
 
 **Bystander recording is a product requirement.** Aides, visitors and family get recorded. Audio consent law varies by state. Before any household pilot: a visible recording indicator, a one-touch pause, a disclosure for people in the home, and a retention policy for frames that include other people's faces. The review puts this under IRB; it also belongs in the product spec, because it applies after the pilot too.
 
@@ -110,13 +111,13 @@ The design principle for both: the camera is believed to be the dominant power d
 | 0 Sensors | Always | Continuous | IMU motion state when permitted (missing means unknown, never still); coarse geofence; time of day | Near zero |
 | 1 Idle | No hand in view | 2 to 5 fps analysis on a 256 px downscale of the stream; a bounded pre-roll of the last 2 s kept at capture resolution | Sharpness; near-duplicate drop, for storage and idle compute only; cheap hand check | Under 5 ms plus the hand check |
 | 2 Escalating | The moment a hand appears or relevant motion starts, not after a confirmed grasp | 10 fps at 256 px for landmarks; the pre-roll is promoted into the episode | Hand landmarks (MediaPipe; about 17 ms CPU and 12 ms GPU on a Pixel 6 per Google's benchmark; JS numbers measured on the rig); hand size and entry edge | 10 to 40 ms |
-| 3 Active episode | Grasp evidence accumulates | 10 fps; duplicate suppression off, because near-duplicate rest frames are the evidence | Grasp classifier on landmarks; object-region localization (frame differencing pre-contact against rest, co-motion minus the hand hull during the carry, a tiny class-agnostic proposer as fallback); episode state machine; quality gaps recorded explicitly | Under 30 ms plus localization |
-| 4 Event write | Episode close | 2 to 4 crops at 224 px plus one capture-resolution OCR crop | DINOv2 ViT-S/14 on pre-contact and rest crops; one global embedding of the rest frame; OCR if text is present; 6 to 8 keyframes stored; one SigLIP 2 embedding per genuinely new candidate within minutes | 0.3 to 1 s per event |
+| 3 Active episode | Grasp evidence accumulates | 10 fps evidence acquisition; duplicate suppression off, because near-duplicate rest frames are the evidence | On the phone: grasp classifier on landmarks; episode state machine; keyframe selection for the packet; quality gaps recorded explicitly. Localization does not run here; it consumes the packet in tier 4 | Under 30 ms on the phone |
+| 4 Event write | Episode close; on the rig this is the laptop receiving the packet, on the target it is on-device | 2 to 4 crops at 224 px plus one capture-resolution OCR crop | Object-region localization on the packet (frame differencing pre-contact against rest; co-motion minus the hand hull during the carry; a tiny class-agnostic proposer as fallback), then DINOv2 ViT-S/14 on the pre-contact and rest crops; one global embedding of the rest frame; OCR if text is present; 6 to 8 keyframes stored; one SigLIP 2 embedding per genuinely new candidate scheduled at once | 0.3 to 1 s per event, localization included; per episode, never per frame |
 | 5 Charger | Nightly or on the charger; not guaranteed to run | Batch | Additional-view embeddings, bank maintenance, cloud VLM for the day's unresolved ties | Off the critical path |
 
 Tier 1 is a mode controller, not a filter: it decides which mode the camera and the analysis are in; it does not pass individual frames to tier 2. The pre-roll exists at whatever resolution idle capture runs at. On the rig that is 720p, because the stream is captured once and downscaled, so pre-contact crops are full resolution there. A native build that runs idle capture lower tells identity and OCR the pre-contact crop's resolution and does not upsample it.
 
-**Indexing is immediate for new items and deferred for everything else.** Text-space (SigLIP 2) embeddings are only used at query time, but a text query cannot find an unindexed new item, because DINOv2 and SigLIP 2 are different spaces. So one SigLIP 2 embedding per genuinely new candidate is computed within minutes of capture (a handful a day, so a handful of forward passes), while additional views, bank cleanup and maintenance wait for the charger. A query that arrives while a candidate is unindexed prioritizes it and answers with `index_pending`, never "I haven't seen it." Background jobs are not guaranteed to run every night on a phone; the nightly batch is a convenience, not a dependency.
+**Indexing is immediate to schedule and asynchronous to complete.** Text-space (SigLIP 2) embeddings are only used at query time, but a text query cannot find an unindexed new item, because DINOv2 and SigLIP 2 are different spaces. So one SigLIP 2 embedding per genuinely new candidate is scheduled the moment the candidate is created and runs in the background; the contract in "Stage contracts" below gives the queue order, the readiness deadline and the query rule. Additional views, bank cleanup and maintenance wait for the charger. The new-candidate rate is expected to be low after the first days and high on day one; it is measured, not assumed, including the identity fragmentation that inflates it. Background jobs are not guaranteed to run every night on a phone; the nightly batch is a convenience, not a dependency.
 
 **What v1 does not run on the phone.**
 
@@ -124,27 +125,27 @@ Tier 1 is a mode controller, not a filter: it decides which mode the camera and 
 - AnyLoc. DINOv2 ViT-G plus VLAD is far beyond a phone budget. The DINOv2-S global embedding of the rest frame, plus geofence and time, is the v1 place descriptor; it does not name rooms, so room stays optional until something does.
 - A scene classifier per frame. Geofence, IMU and time of day do the gate's job. Places365 at most once per minute, and only if a measured need appears.
 - SAM 2, metric SLAM, any segmentation. Teacher-side, offline, on a rented GPU.
-- Resolution switching on the hot path. Capture once at the mode the device actually delivers (recorded from `getSettings()`) and downscale for the cheap stages; switching mid-stream is unreliable in Safari and costs a stream restart natively.
+- Resolution switching on the hot path. Capture once at the mode the device actually delivers (recorded from `getSettings()`) and downscale for the cheap stages. This is a frozen policy choice, not a platform fact: `applyConstraints` behavior mid-stream has varied across Safari versions in our experience, and native format changes carry their own cost; neither is claimed to be universal.
 
-**Storage and radio.** Keep keyframes around events only, never video. At roughly 50 handlings per day, 6 to 8 keyframes at 720p plus crops is on the order of 20 MB per day (estimate; measure), against the 5.8 GB per day the review computed for streaming at 5 fps. On the native target nothing leaves the phone except tie-break crops and the nightly digest. On the rig, every episode packet and one idle keyframe every 30 s go to the laptop; bytes per hour is recorded and is the proxy for radio power.
+**Storage and radio.** Two stores with different retention. Event keyframes (6 to 8 per episode plus crops) are durable; video is never kept. Idle keyframes (one every 30 s) are a rolling cache for re-observation under rule 13, retained for 24 hours and then dropped unless a re-observation match promoted one into an item's evidence. At roughly 50 handlings per day, durable storage is on the order of 20 MB per day (estimate; measure), against the 5.8 GB per day the review computed for streaming at 5 fps. On the native target nothing leaves the phone except tie-break crops and the nightly digest. On the rig, every episode packet and the idle keyframes go to the laptop; bytes per hour is recorded.
 
-**Thermal and power.** The native bar is a full waking day on one charge with the pipeline on; a battery pack on the mount is acceptable for a pilot if the number is reported. The rig cannot measure this: a lit screen, video encoding and streaming dominate its battery and say nothing about local inference. What the rig measures instead: per-stage milliseconds in JavaScript on the iPhone (an upper bound on native); per-event milliseconds on the laptop (the work a wearable inherits); escalation rate (the share of frames that reach the hand stage, and the share that open an episode); bytes per hour; and a burst of 10 handlings in 2 minutes to see whether the queue drains. These five replace the brief's single "45 ms" number. A design that keeps escalation at a few percent of frames and ships tens of megabytes a day can move onto a wearable; one that does not will not be rescued by better silicon.
+**Thermal and power.** The native bar is a full waking day on one charge with the pipeline on; a battery pack on the mount is acceptable for a pilot if the number is reported. The rig cannot measure this: a lit screen, video encoding and streaming dominate its battery and say nothing about local inference. What the rig measures instead: per-stage milliseconds in JavaScript on the iPhone (a measurement of the rig implementation, not a bound on the target); per-event milliseconds on the laptop (the work a wearable would inherit); escalation rate (the share of frames that reach the hand stage, and the share that open an episode); bytes per hour (rig transport, which the target keeps internal, so it measures work moved, not native radio use); and a burst of 10 handlings in 2 minutes to see whether the queue drains. These five replace the brief's single "45 ms" number. They are proxies that inform the design; native feasibility is established only by the native build.
 
-**Frame accounting.** Requested frame rate is not delivered frame rate, and a JavaScript timer firing five times a second does not prove five fresh camera frames were processed. Record the negotiated stream settings from `getSettings()`; use `requestVideoFrameCallback` metadata to detect missed frames; and count separately: source frames, frames selected, frames transmitted, frames received, frames processed, capture-to-processing age, and dropped frames and observation gaps. Missed-transition rate at each active-tier rate is a week-2 measurement. A lower idle rate is acceptable because nothing is happening; a lower active rate is not.
+**Frame accounting.** Requested frame rate is not delivered frame rate, and a JavaScript timer firing five times a second does not prove five fresh camera frames were processed. Record the negotiated stream settings from `getSettings()`; use `requestVideoFrameCallback` metadata to detect missed frames; and count separately: source frames, frames selected, frames transmitted, frames received, frames processed, capture-to-processing age, and dropped frames and observation gaps. Missed-transition rate at each active-tier rate is a week-2 measurement. A lower idle rate rests on the assumption that nothing happens between samples; the missed-transition test evaluates that assumption rather than granting it. A lower active rate is not acceptable.
 
 ## The browser rig
 
 The rig is the current code's shape: Safari captures, the laptop infers, HTTPS between them, which is why `serve.py` carries a certificate and why the key route is closed first. What the browser imposes, and the answer to each:
 
 - The camera stops on screen lock or backgrounding. Screen Wake Lock API, auto-lock off, brightness at minimum, standalone home-screen mode; every stop logged as coverage loss. Verify `getUserMedia`, the wake lock and `DeviceMotion` in standalone on the test iOS version before mounting anything.
-- MediaPipe's JS detection blocks the calling thread. Inference runs in a Web Worker so capture and UI are never stalled by a long call.
+- MediaPipe's JS detection blocks the calling thread. Inference runs in a Web Worker so that synchronous call does not block capture or the UI; shared compute, memory and transfer contention can still stall them, and the frame counters are what will show it.
 - `DeviceMotion` needs HTTPS and a tap-initiated permission. Denied, unavailable and interrupted are handled explicitly; camera without motion is a valid state; missing IMU means unknown.
 - Speech is not offline in Safari. Push-to-talk to server STT, `speechSynthesis` for replies; the "$0 platform recognizer" line in section 8 is native-target only.
-- Native OCR and the NPU are not reachable from a page. OCR runs on the server. WebGPU (Safari on iOS 18 and later) is GPU compute and an optional later experiment, not evidence for native NPU timings.
+- Native OCR and the NPU are not reachable from a page. OCR runs on the server. WebGPU (shipped by default in Safari 26) is GPU compute and an optional later experiment, not evidence for native NPU timings.
 
 **Connectivity, decided before the store trip.** The laptop lives on a home LAN that the phone leaves at the front door. One of three is chosen and recorded before the scripted store trip: carry the laptop on a phone hotspot; an authenticated tunnel to the laptop, with bandwidth, exposure and availability accounted for; or record on the phone and replay later, acknowledging that this does not test live assistance. Without the choice, the store trip measures a disconnected camera, not the relevance gate.
 
-**Failure modes with defined behavior.** Wi-Fi loss, laptop sleep, browser backgrounding or screen lock, server restart, delayed upload. In every case the phone keeps its ring buffer and episode queue and uploads when the link returns; the server processes on observation time, never arrival time; a network stall is not an object coming to rest; every gap is recorded as coverage loss.
+**Failure modes with defined behavior.** Wi-Fi loss, laptop sleep, browser backgrounding or screen lock, server restart, delayed upload. This is a requirement on the rig, not a guarantee the browser gives: the phone holds its episode queue in memory for the page's lifetime and mirrors unsent packets to IndexedDB as a best-effort cache, uploading when the link returns; a page reload or storage eviction can still lose them, and every such loss is recorded as coverage loss. The server processes on observation time, never arrival time; a network stall is not an object coming to rest.
 
 **Disclosure matches the rig.** Camera keyframes leave the phone for the laptop. "Only a few tie-break crops leave the phone" describes the native target and is not used in the rig's consent language.
 
@@ -155,7 +156,7 @@ The rig is the current code's shape: Safari captures, the laptop infers, HTTPS b
 | Ledger ordering, idempotency, corrections, containment logic | Yes: software behavior |
 | API token cost for identical requests | Yes, at the same rates and payloads |
 | Escalation rate and bytes per hour | Yes, as design proxies |
-| Phone-side JS milliseconds per stage | As an upper bound on native |
+| Phone-side JS milliseconds per stage | As a rig measurement; not a bound on the target |
 | Event frequency and storage per day | As workload-dependent estimates |
 | Accuracy on the rig's recorded footage | For that camera, mount and input distribution only |
 | Hand visibility, blur, exposure, viewpoint robustness | Revalidated on the new camera and mount |
@@ -164,6 +165,28 @@ The rig is the current code's shape: Safari captures, the laptop infers, HTTPS b
 | Background operation and recovery | No: platform-specific |
 
 Rig cost (laptop time, a hotspot plan, the phone) is kept separate from the subscription economics in section 8; laptop vision processing is not free because it makes no paid VLM calls.
+
+## Stage contracts
+
+Five interfaces a coding agent builds from without guessing: the packet, the localizer, the capture controller, indexing, and the answer. Every number marked *initial* is a starting value for the week-1 and week-2 measurements, not a tuned result; it is in the spec so that two implementers start from the same place.
+
+**Episode packet (phone to server; on the target, phone to its own tier 4). One per episode.** `episode_id`; `device_id`; `t_start` and `t_end` on the observation clock (monotonic) with a wall-clock anchor; `keyframes[]`, 6 to 8 entries of `{frame_id, t, role, width, height, jpeg}` at capture resolution with `role` in `pre_contact | grasp | carry | release | rest | idle`; `landmarks[]`, one entry per analysed frame, `{t, frame_id, hands[]}` where each hand is 21 points in the pixel coordinates of that frame plus `handedness` and `hand_bbox`; `imu[]` as `{t, state}` with `state` in `still | walking | head_turn | unknown`; `location` as `{lat, lon, accuracy_m, t}` or null; `gaps[]` as `{t_from, t_to, reason}`; `quality` as sharpness per keyframe; `outcome_hint` from the phone's state machine. The server never needs a frame that is not in the packet.
+
+**Object-region localizer. Runs on the laptop on the rig, on-device on the target; input is the packet.** Output per episode: `target_region` as `{frame_id, x, y, w, h}` in the pixel coordinates of that frame; `region_source` in `pre_rest_diff | carry_flow | proposer | none`; `region_confidence` in \[0, 1\]; `association_to_hand` as `{frame_id, hand_index, overlap}` or null; `association_to_pre_contact_object` as `{frame_id, bbox, confidence}` or null; `association_to_resting_object` as `{frame_id, bbox, confidence}` or null; `crops[]`, each `{frame_id, bbox, purpose}` with `purpose` in `identity_224 | ocr_full`. `region_source = none` with `region_confidence = 0` is a valid output: the episode is stored context-only and no identity is created (rule 4). Initial acceptance: a difference region is accepted when it covers between 0.5% and 30% of the frame and overlaps the last hand bbox; a carry region is accepted when the co-moving area minus the hand hull is at least 400 px² at analysis resolution; the proposer runs only when both fail.
+
+**Capture-mode controller (phone). States: Idle, Escalating, Active, Settled. Transitions, initial values:**
+
+- Idle to Escalating: a hand present in 2 consecutive analysis frames, or IMU or flow motion above the still threshold within 1 s of a hand being seen.
+- Escalating to Active: the grasp classifier positive in 3 consecutive 10 fps frames. Capture is already at full rate, so the 300 ms of evidence costs nothing; it is a decision threshold, not a capture trigger.
+- Escalating to Idle: no hand for 1.5 s.
+- Active to Settled: the tracked object region stationary (centroid moving under 2% of frame width) for 1.0 s with no hand within 1.5 hand-widths of it, outcome `placed`; or the hand leaves the frame with no object region tracked, outcome `lost_from_view`; or the maximum unobserved gap of 3 s is exceeded, outcome `uncertain`.
+- Settled to Idle: once the packet is enqueued, after a 0.5 s refractory period.
+
+Every transition is logged with its cause and timestamp; the log is part of frame accounting.
+
+**Immediate indexing (server on the rig).** Trigger: candidate creation. Queue order: most recent episode first. Readiness: target 5 minutes, maximum 15; past 15 minutes the next query embeds that candidate synchronously before answering. Query rule: answer from indexed items; if any candidate created in the last 24 hours is unindexed, attach `index_pending` and re-run the resolver when indexing completes; never answer "I haven't seen it" while a candidate is pending.
+
+**Answer (resolver).** Fields: `reference_image` as `{frame_id, bbox}` or null; `target_indicated` (bool, false when `reference_image` is null); `capture_time` (null when `reference_image` is null); `identity_status` in `matched_trusted | matched_provisional | group | unknown`; `location_status` in `placed | sighted | inferred | stale | unknown`; `room` (string, or "room unknown"); `shape` in `confident | hedged | abstain`; `index_pending` (bool). A *reliable sighting* is an observation where `identity_status` is `matched_trusted` or `matched_provisional` with a margin over the runner-up at or above the trusted threshold (initial 0.15 cosine), `location_status` is `placed` or `sighted`, and it is the item's most recent observation. Shape: `confident` when there is a reliable sighting and no later `uncertain` episode or unknown-actor event on the item; `hedged` when there is a reliable sighting and a later gap, an unknown actor, or an `inferred` location; `abstain` otherwise, with `reference_image` null and no sighting claimed. `index_pending` may accompany any shape.
 
 ## Corrected cost model
 
@@ -177,7 +200,7 @@ Cloud cost per user per month is about $6 to $8 with cloud speech-to-text, and a
 | Text-to-speech, alternative | Cloud voice (Aura-2 class), 30 replies/day | about $5 |
 | Query reasoning | Local: embedding compare and templated sentence. Cloud LLM only for descriptive queries and ties, budget 5 calls/day at about 1.5k input and 150 output tokens at the review's $2/$10 per million | under $1 |
 | Write-path VLM | None in v1 | $0 |
-| Write-path VLM, optional | 10 calls/day as the brief proposed | $1.80 to $5.10 depending on crop and context size |
+| Write-path VLM, September brief (not in v1) | Excluded from v1; shown only to compare with the brief's 10 calls/day | $1.80 to $5.10 depending on crop and context size |
 | Deepgram Voice Agent | Not used: $0.075 per connected minute is $67.50 at 30 min/day, and push-to-talk does not change the rate | removed |
 
 The pilot cash figures in the brief ($9 to 18k founders-only; $34 to 78k with a contract engineer) stay as hypotheses with two changes: add a 25% contingency line for hardware access, failed experiments, data handling, participant support and labeling QA, and move the IRB or institutional determination from "after the pilot" to before recruitment. The labeling line ($8 to 15k) is now conditional on the week-4 decision in section 10, and the correction loop in section 6 may reduce it by an amount that is measured, not assumed. Research-rig costs (laptop time, a hotspot plan, the phone) are tracked separately from the subscription estimate.
@@ -226,7 +249,7 @@ What stays from the brief's "What Devin does next": keep `capture.py` and the CM
 
 ---
 
-<!-- PART 2: REVIEW LOG (rounds 2 and 3). Not canonical; kept for traceability. -->
+<!-- PART 2: REVIEW LOG (rounds 2, 3 and 4). Not canonical; kept for traceability. -->
 
 # Round 2: response to the review of v4
 
@@ -375,3 +398,31 @@ The third review saw only the main tab and found it describing two systems at on
 Not changed, because the review's point was already answered on the main tab or is a hypothesis by design: the 69% chain in the section 3 table stays as the reason end-to-end testing matters, labeled as an illustration; the containment inference stays as a rule with its two timestamps; the "camera dominates power" sentence is labeled a hypothesis.
 
 Still open after this pass: the exact hand-contact checkpoints and their terms, checked one by one before use; the store-trip connectivity choice itself; and the iPhone model, iOS version and standalone-mode verification, recorded when the rig is first mounted.
+
+## Round 4 (October 5, evening): interface pass
+
+The fourth review was against the exported file with both parts and found three contradictions, one timing ambiguity, four contracts not yet buildable without guessing, and eleven sentences that overstated. All are merged into the main tab; none changed the architecture.
+
+| Finding | What changed on the main tab |
+| --- | --- |
+| C1: §6 abstention example asserted a sighting and a photo | §6 paragraph rewritten to the rule 12 shapes; abstain has no photo and no claimed sighting |
+| C2: §3 promised phone benchmarks for every stage | Row 5 now says each stage is benchmarked where it runs: rig now, native later |
+| C3: "event keyframes only" vs. idle keyframes | §7 storage now has two stores: durable event keyframes, and a 24-hour rolling idle cache for re-observation |
+| S1: localization listed at 10 fps on the phone and on the laptop | Tier 3 is evidence acquisition on the phone; localization consumes the packet in tier 4, per episode, never per frame |
+| S2: optional write-path VLM row read as allowed | Row relabeled "September brief (not in v1)" |
+| Four contracts | New section "Stage contracts": the episode packet, the localizer's inputs and outputs, the capture controller's transition predicates with initial values, the indexing queue and readiness deadline, and the answer fields with the reliable-sighting definition |
+| "Upper bound on native" (§2, §7 twice) | Now "a measurement of the rig implementation, not a bound on the target" |
+| "Can move onto a wearable; not rescued by silicon" | Proxies inform the design; feasibility is established only by the native build |
+| "A handful a day" | Expected low after the first days, high on day one; measured, including identity fragmentation |
+| "Lower idle rate is acceptable because nothing is happening" | An assumption the missed-transition test evaluates |
+| "Never stalled" by the Web Worker | The synchronous call does not block; contention still can, and the counters show it |
+| WebGPU on iOS 18 | Shipped by default in Safari 26 |
+| Resolution switching "unreliable" and "costs a restart" | A frozen policy choice; the justification qualified, not claimed universal |
+| "Most common elder-care scenario" (§1, §3) | "The scenario we prioritize" |
+| "Value is highest exactly when" (§4) | An expectation the pilot measures |
+| "Single largest saving" (§6) | "A large saving" |
+| Ring buffer "in every case" | A requirement with IndexedDB best-effort mirroring; losses logged as coverage loss |
+
+Subagent results noted as historical: rates verified at the time; 42 of 49 integration tests passing before the SQLite fix, not rerun since.
+
+After this pass the spec is frozen for build. Devin's go-ahead for section 10 steps 1 and 2 is given with the export of this revision.
