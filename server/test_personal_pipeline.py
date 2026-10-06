@@ -393,7 +393,8 @@ class EventVerifierTests(IsolatedCase):
                      ({**self.event, "crop": forbidden}, []),
                      (self.event, [{"object_id": TRACK, "category": "pill bottle", "continuous_track": False, "crop": forbidden}])]
             for candidate, gallery in cases:
-                with self.subTest(path=forbidden, gallery=bool(gallery)), self.assertRaises(ValueError):
+                with self.subTest(path=forbidden, gallery=bool(gallery)), \
+                        self.assertRaisesRegex(ValueError, "^Unapproved event image$"):
                     self.verifier.prepare(candidate, gallery)
         self.client.messages.parse.assert_not_called()
 
@@ -404,8 +405,11 @@ class EventVerifierTests(IsolatedCase):
         corrupt.write_bytes(b"not a JPEG")
         huge = self.artifacts / "oversized.jpg"
         huge.write_bytes(b"x" * (2 ** 20 + 1))
-        for path in (self.artifacts / "missing.jpg", bad_text, corrupt, huge):
-            with self.subTest(path=path.name), self.assertRaises(ValueError):
+        cases = ((self.artifacts / "missing.jpg", "Unapproved event image"),
+                 (bad_text, "Unapproved event image"), (corrupt, "Invalid event image"),
+                 (huge, "Event image too large"))
+        for path, message in cases:
+            with self.subTest(path=path.name), self.assertRaisesRegex(ValueError, f"^{message}$"):
                 self.verifier.prepare({**self.event, "frames": [*self.event["frames"][:2], str(path)]}, [])
         self.client.messages.parse.assert_not_called()
 
@@ -1081,6 +1085,21 @@ class PublicFileSecurityTests(IsolatedCase):
                 status, body = self.request(path)
                 self.assertIn(status, (400, 403, 404))
                 self.assertNotIn(LONG_KEY.encode(), body)
+
+    def test_actual_phone_directory_denies_private_get_and_head_without_opening_files(self):
+        for method in ("GET", "HEAD"):
+            for path in ("/key.pem", "/cert.pem", "/../server/app.py"):
+                with self.subTest(method=method, path=path), \
+                        patch("builtins.open", side_effect=AssertionError("Real file read forbidden")) as builtin_open, \
+                        patch("io.open", side_effect=AssertionError("Real file read forbidden")) as io_open, \
+                        patch.object(Path, "open", side_effect=AssertionError("Real file read forbidden")) as path_open:
+                    status, body = self.request(path, directory=ROOT / "phone", method=method)
+                    self.assertIn(status, (403, 404))
+                    if method == "HEAD":
+                        self.assertEqual(body, b"")
+                    builtin_open.assert_not_called()
+                    io_open.assert_not_called()
+                    path_open.assert_not_called()
 
     def test_head_is_restricted_by_the_same_allowlist(self):
         for path in ("/key.pem", "/cert.pem", "/.env", "/assets/key.pem"):

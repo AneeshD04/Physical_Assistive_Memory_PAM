@@ -815,9 +815,11 @@ section 10 steps 1–2 only, not the data-model migration or the app/auth trim.
   none was copied from the archive. OpenSSL verified the certificate for the
   current LAN address, the key passed its consistency check, and Python SSL
   loaded the matching pair. The private key's protected Windows DACL grants
-  access only to the current user; inheritance is disabled. No trust store was
-  changed and no live server or phone session was started. Safari trust and the
-  live browser handshake still need device verification.
+  access only to the current user; inheritance is disabled. This was a manual
+  PowerShell action at this checkpoint, not an automatic guarantee of
+  `ensure_cert`; code-level enforcement is a separate follow-up. No trust store
+  was changed and no live server or phone session was started. Safari trust and
+  the live browser handshake still need device verification.
 - `EventVerifier.prepare()` requires distinct resolved frame paths and matching,
   finite, positive, strictly increasing capture timestamps. Pixel equality is
   not rejected: separate captures of a stationary scene are valid. Negative
@@ -835,7 +837,7 @@ section 10 steps 1–2 only, not the data-model migration or the app/auth trim.
   Python 3.11.0, Python SSL OpenSSL 1.1.1q, CLI OpenSSL 1.1.1s; these older TLS
   runtimes need updating before production deployment.
 
-Current isolated verification (test methods, no skipped tests):
+Initial isolated verification before the review follow-up (test methods, no skipped tests):
 
 | Suite | Passed | Assertion failures | Setup errors |
 | --- | ---: | ---: | ---: |
@@ -846,10 +848,41 @@ Current isolated verification (test methods, no skipped tests):
 
 All 99 setup errors are `ModuleNotFoundError: No module named 'server.schedule'`.
 The 20 passing integration/security methods cover the verifier, public-file
-handler, certificate command construction/non-overwrite behavior, and isolated
-SQLite connection cleanup. That cleanup test mocks only the private-file-writer
-boundary; it does not establish that the missing storage dependency or full API
-integration works. These synthetic tests do not measure vision-model accuracy.
+handler, certificate command construction/non-overwrite behavior, and an isolated
+SQLite connection-cleanup regression test. That regression test mocks only the
+private-file-writer boundary; it does not establish that the missing storage
+dependency or full API integration works. These synthetic tests do not measure
+vision-model accuracy. Step 2 is complete only for the tests whose bodies ran;
+store, worker, API, relay and token behavior was not verified at this checkpoint.
+
+Follow-up verification on the same Windows runtime:
+
+- Temporarily replacing `ObjectStore._connection`'s `db.close()` with `pass`
+  made the regression test fail at `connections[0].closed`. Restoring the line
+  made it pass. The temporary production-code mutation was fully restored; this
+  is evidence for the regression test's sensitivity, not a new SQLite fix.
+- Changed media fixtures now assert their exact intended rejection messages:
+  `Unapproved event image`, `Invalid event image`, or `Event image too large`.
+  A timestamp-validation error can no longer make those cases pass.
+- In-memory GET and HEAD requests against the actual `phone/` directory deny
+  `/key.pem`, `/cert.pem` and `/../server/app.py` with 403/404. Python content-open
+  operations are guarded and asserted unused, so the check cannot read private
+  file contents even if the denial regresses. No socket is opened.
+- The requested verbose pipeline run now has 59 methods: 21 pass and 38 error
+  during setup. All 38 stop at the missing `server.schedule` dependency:
+
+| Unverified class | Setup errors |
+| --- | ---: |
+| `SyntheticFrameTests` | 10 |
+| `WorkerBoundaryTests` | 5 |
+| `ObjectApiSecurityTests` | 12 |
+| `CameraRelaySecurityTests` | 7 |
+| `TokenSecurityTests` | 4 |
+
+Section 10 retains and migrates the SQLite ledger and `object_memory.py`; it does
+not replace the store with another backend. The scheduling application is not
+part of PAM. Its standalone private-file utility remains needed by the retained
+store and must be ported without the medication/scheduling dependencies.
 
 Run the files directly with an interpreter containing the declared dependencies.
 The focused subset can be run without any legacy app modules:
