@@ -14,11 +14,11 @@ import cv2
 import numpy as np
 
 try:
-    from .capture import location_at
+    from .capture import finite_number, location_at
     from .interaction import InteractionTrack
     from .object_memory import ObjectStore, Verification, _private_file
 except ImportError:
-    from capture import location_at
+    from capture import finite_number, location_at
     from interaction import InteractionTrack
     from object_memory import ObjectStore, Verification, _private_file
 
@@ -80,14 +80,19 @@ class EventVerifier:
                 "data": base64.b64encode(encoded).decode("ascii")}}
 
     def prepare(self, candidate, gallery):
-        if not 2 <= len(candidate.get("frames", [])) <= 5:
-            raise ValueError("Temporal verification needs at least two distinct event frames")
+        frames, stamps = candidate.get("frames"), candidate.get("frame_times")
+        if (not isinstance(frames, list) or not 2 <= len(frames) <= 5
+                or any(not isinstance(path, str) or not path for path in frames)
+                or not isinstance(stamps, list) or len(stamps) != len(frames)):
+            raise ValueError("Temporal verification needs distinct frames with aligned capture times")
+        times = [finite_number(stamp) for stamp in stamps]
+        if (any(stamp <= 0 for stamp in times) or any(a >= b for a, b in zip(times, times[1:]))
+                or len({Path(path).resolve() for path in frames}) != len(frames)):
+            raise ValueError("Temporal verification needs distinct frames in capture-time order")
         content = [{"type": "text", "text": json.dumps({"proposal": candidate["event_type"],
             "detector_hint": candidate["object"], "evidence": candidate["evidence"],
             "gallery_complete": candidate.get("gallery_complete", False)})}]
-        for index, path in enumerate(candidate["frames"]):
-            stamps = candidate.get("frame_times", [])
-            at = stamps[index] if index < len(stamps) else None
+        for index, (path, at) in enumerate(zip(frames, times)):
             content.extend([{"type": "text", "text": f"Event frame {index + 1}, captured_at={at}"}, self._image(path)])
         if candidate.get("crop"):
             content.extend([{"type": "text", "text": "Target detail crop from this event"}, self._image(candidate["crop"], 768)])

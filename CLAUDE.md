@@ -794,3 +794,66 @@ Model weights are gitignored too and shared out of band.
   assertion, not the privacy requirement. The Windows laptop passed 196 schedule/
   parser tests, including torn writes, 25 concurrent saves, new/existing-file ACLs,
   and an injected permission failure proving that no patient data is appended.
+
+## PAM split: security and verification — 2026-10-06, Windows
+
+`docs/MEMORY_SYSTEM_V4.md`, Part 1, is the current design authority. Historical
+HackMIT architecture and measurements above do not override it. This work covers
+section 10 steps 1–2 only, not the data-model migration or the app/auth trim.
+
+- `phone/serve.py` now uses `PublicFiles`: only the two public HTML pages and
+  approved file types under `assets/` are served. Directory listings, private
+  files, hidden paths, traversal, Windows alternate-stream syntax, and paths
+  resolving outside the public tree are rejected for GET and HEAD.
+- TLS generation uses an explicit OpenSSL configuration on stdin, SHA-256, SANs,
+  `CA:FALSE`, and server-authentication usage. Inheriting this machine's OpenSSL
+  configuration while adding `CA:FALSE` produced duplicate Basic Constraints
+  (`CA:TRUE` and `CA:FALSE`) and failed certificate verification; the explicit
+  configuration fixes the cause. Existing complete pairs are reused; partial
+  pairs are refused rather than silently overwritten.
+- A fresh certificate/key pair was generated in the ignored `phone/` paths;
+  none was copied from the archive. OpenSSL verified the certificate for the
+  current LAN address, the key passed its consistency check, and Python SSL
+  loaded the matching pair. The private key's protected Windows DACL grants
+  access only to the current user; inheritance is disabled. No trust store was
+  changed and no live server or phone session was started. Safari trust and the
+  live browser handshake still need device verification.
+- `EventVerifier.prepare()` requires distinct resolved frame paths and matching,
+  finite, positive, strictly increasing capture timestamps. Pixel equality is
+  not rejected: separate captures of a stationary scene are valid. Negative
+  media/path tests must keep their timestamps aligned so they exercise image
+  validation, not an unrelated temporal-validation error.
+- The split omitted `server.schedule`, but `ObjectStore._private_file()` still
+  imports its `private_append_fd`. This blocks store/API test setup before the
+  assertions run. `server/app.py` also still imports omitted legacy services,
+  and `object_api.py` imports `caregiver`; those await the planned step-3 trim
+  and auth shim. Do not hide these failures by importing archive application
+  modules or replacing private storage with unrestricted file opens.
+- This checkout has no local venv yet. Runs used the existing archive venv only
+  as the Python/dependency runtime, with PAM as the working directory and
+  `PYTHONPATH` cleared. No packages or model weights were installed. Runtime:
+  Python 3.11.0, Python SSL OpenSSL 1.1.1q, CLI OpenSSL 1.1.1s; these older TLS
+  runtimes need updating before production deployment.
+
+Current isolated verification (test methods, no skipped tests):
+
+| Suite | Passed | Assertion failures | Setup errors |
+| --- | ---: | ---: | ---: |
+| `perception/test_capture.py` | 8 | 0 | 0 |
+| `perception/test_interaction.py` | 7 | 0 | 0 |
+| `server/test_memory_lifecycle.py` | 0 | 0 | 61 |
+| `server/test_personal_pipeline.py` | 20 | 0 | 38 |
+
+All 99 setup errors are `ModuleNotFoundError: No module named 'server.schedule'`.
+The 20 passing integration/security methods cover the verifier, public-file
+handler, certificate command construction/non-overwrite behavior, and isolated
+SQLite connection cleanup. That cleanup test mocks only the private-file-writer
+boundary; it does not establish that the missing storage dependency or full API
+integration works. These synthetic tests do not measure vision-model accuracy.
+
+Run the files directly with an interpreter containing the declared dependencies.
+The focused subset can be run without any legacy app modules:
+
+```text
+python -B server/test_personal_pipeline.py EventVerifierTests PublicFileSecurityTests SQLiteResourceTests CertificateCreationTests -v
+```

@@ -36,9 +36,42 @@ import ssl
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 HERE = Path(__file__).resolve().parent
 CERT, KEY = HERE / "cert.pem", HERE / "key.pem"
+
+
+class PublicFiles(http.server.SimpleHTTPRequestHandler):
+    ASSET_SUFFIXES = {".css", ".js", ".mjs", ".png", ".jpg", ".jpeg", ".svg", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".otf", ".txt"}
+
+    def send_head(self):
+        try:
+            url = urlsplit(self.path)
+            decoded = unquote(url.path)
+            if url.scheme or url.netloc or any(ord(char) < 32 or ord(char) == 127 for char in decoded):
+                raise ValueError("Invalid public path")
+            if any(part.startswith(".") or "\\" in part or ":" in part for part in decoded.split("/")):
+                raise ValueError("Invalid public path")
+            root = Path(self.directory).resolve()
+            path = Path(self.translate_path(self.path)).resolve()
+            if path == root:
+                path = (root / "index.html").resolve()
+            relative = path.relative_to(root)
+            page = relative.as_posix() in {"index.html", "agent.html"}
+            asset = (len(relative.parts) > 1 and relative.parts[0] == "assets"
+                     and path.suffix.lower() in self.ASSET_SUFFIXES
+                     and not any(part.startswith(".") or ":" in part for part in relative.parts))
+            if not (page or asset) or not path.is_file():
+                raise ValueError("Not a public file")
+        except (OSError, ValueError, RuntimeError):
+            self.send_error(404, "File not found")
+            return None
+        return super().send_head()
+
+    def list_directory(self, path):
+        self.send_error(404, "File not found")
+        return None
 
 
 def lan_ip() -> str:
@@ -67,13 +100,19 @@ def ensure_cert(ip: str) -> None:
     """
     if CERT.exists() and KEY.exists():
         return
+    if CERT.exists() or KEY.exists():
+        raise FileExistsError("Incomplete TLS pair; refusing to overwrite an existing certificate or key.")
     print(f"generating a self-signed certificate for {ip} ...")
     subprocess.run(
-        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        ["openssl", "req", "-config", "-", "-x509", "-newkey", "rsa:2048", "-sha256", "-nodes",
          "-keyout", str(KEY), "-out", str(CERT), "-days", "365",
          "-subj", "/CN=compass-laptop",
-         "-addext", f"subjectAltName=IP:{ip},IP:127.0.0.1,DNS:localhost"],
-        check=True, capture_output=True,
+         "-addext", f"subjectAltName=IP:{ip},IP:127.0.0.1,DNS:localhost",
+         "-addext", "basicConstraints=critical,CA:FALSE",
+         "-addext", "keyUsage=critical,digitalSignature,keyEncipherment",
+         "-addext", "extendedKeyUsage=serverAuth"],
+        check=True, capture_output=True, text=True,
+        input="[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=compass-laptop\n",
     )
     print(f"wrote {CERT.name} and {KEY.name}")
 
@@ -87,6 +126,8 @@ def main() -> None:
     ip = lan_ip()
     try:
         ensure_cert(ip)
+    except FileExistsError as e:
+        sys.exit(str(e))
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         sys.exit(f"could not generate a certificate with openssl: {e}\n"
                  f"Install openssl, or drop your own cert.pem/key.pem into {HERE}.")
@@ -95,7 +136,7 @@ def main() -> None:
     ctx.load_cert_chain(CERT, KEY)
 
     # Serve only this directory, whatever the shell's working directory is.
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(HERE))
+    handler = functools.partial(PublicFiles, directory=str(HERE))
     httpd = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), handler)
     httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
 

@@ -389,7 +389,7 @@ class EventVerifierTests(IsolatedCase):
         outside = self.jpeg(self.root / "outside.jpg")
         lookalike = self.jpeg(self.root / "object_evidence-private" / "private.jpg")
         for forbidden in (str(outside), str(self.artifacts / ".." / "outside.jpg"), str(lookalike)):
-            cases = [({**self.event, "frames": [self.event["frames"][0], forbidden]}, []),
+            cases = [({**self.event, "frames": [*self.event["frames"][:2], forbidden]}, []),
                      ({**self.event, "crop": forbidden}, []),
                      (self.event, [{"object_id": TRACK, "category": "pill bottle", "continuous_track": False, "crop": forbidden}])]
             for candidate, gallery in cases:
@@ -406,14 +406,35 @@ class EventVerifierTests(IsolatedCase):
         huge.write_bytes(b"x" * (2 ** 20 + 1))
         for path in (self.artifacts / "missing.jpg", bad_text, corrupt, huge):
             with self.subTest(path=path.name), self.assertRaises(ValueError):
-                self.verifier.prepare({**self.event, "frames": [self.event["frames"][0], str(path)]}, [])
+                self.verifier.prepare({**self.event, "frames": [*self.event["frames"][:2], str(path)]}, [])
         self.client.messages.parse.assert_not_called()
 
     def test_repeated_frame_is_not_temporal_evidence(self):
-        duplicate = {**self.event, "frames": [self.event["frames"][0]] * 2,
-                     "frame_times": [self.event["frame_times"][0]] * 2}
-        with self.assertRaises(ValueError):
-            self.verifier.prepare(duplicate, [])
+        first = Path(self.event["frames"][0])
+        alias = str(first.parent / ".." / first.parent.name / first.name)
+        frames, stamps = self.event["frames"][:2], self.event["frame_times"][:2]
+        cases = [
+            {"frames": [str(first)] * 2, "frame_times": stamps},
+            {"frames": [str(first), alias], "frame_times": stamps},
+            {"frames": frames, "frame_times": [stamps[0]] * 2},
+            {"frames": frames, "frame_times": stamps[::-1]},
+            {"frames": frames, "frame_times": []},
+            {"frames": frames, "frame_times": stamps[:1]},
+            {"frames": frames, "frame_times": [stamps[0], float("nan")]},
+            {"frames": frames, "frame_times": [stamps[0], float("inf")]},
+            {"frames": frames, "frame_times": [True, stamps[1]]},
+        ]
+        for changes in cases:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.verifier.prepare({**self.event, **changes}, [])
+        self.client.messages.parse.assert_not_called()
+
+    def test_distinct_frames_with_identical_pixels_remain_valid_evidence(self):
+        frames = [str(self.jpeg(self.artifacts / f"stationary-{index}.jpg")) for index in range(2)]
+        content = self.verifier.prepare({**self.event, "frames": frames,
+                                         "frame_times": self.event["frame_times"][:2]}, [])
+        images = [block for block in content if block["type"] == "image"]
+        self.assertEqual(images[0]["source"]["data"], images[1]["source"]["data"])
         self.client.messages.parse.assert_not_called()
 
     def test_verify_makes_one_mocked_structured_request_and_records_usage_cost(self):
@@ -911,6 +932,39 @@ class TokenSecurityTests(ApiFixture):
         self.assertNoSecret(response)
 
 
+class SQLiteResourceTests(IsolatedCase):
+    def test_corrupt_database_closes_connection_when_initial_pragma_fails(self):
+        import sqlite3
+        from perception import object_memory
+
+        path = self.root / "corrupt.sqlite3"
+        path.write_bytes(b"SYNTHETIC-NOT-A-SQLITE-DATABASE")
+        connections = []
+        connect = sqlite3.connect
+
+        class ObservedConnection(sqlite3.Connection):
+            closed = False
+
+            def close(self):
+                super().close()
+                self.closed = True
+
+        def observed_connect(*args, **kwargs):
+            kwargs["factory"] = ObservedConnection
+            connection = connect(*args, **kwargs)
+            connections.append(connection)
+            self.addCleanup(connection.close)
+            return connection
+
+        with patch.object(object_memory, "_private_file") as private_file, \
+                patch.object(sqlite3, "connect", observed_connect):
+            with self.assertRaises(sqlite3.DatabaseError):
+                ObjectStore(path)
+        self.assertEqual(private_file.call_count, 2)
+        self.assertEqual(len(connections), 1)
+        self.assertTrue(connections[0].closed)
+
+
 class MemoryConnection:
     def __init__(self, request):
         self.input = io.BytesIO(request)
@@ -926,6 +980,48 @@ class MemoryConnection:
         pass
 
 
+class CertificateCreationTests(IsolatedCase):
+    def setUp(self):
+        super().setUp()
+        self.serve = importlib.import_module("phone.serve")
+        self.cert, self.key = self.root / "cert.pem", self.root / "key.pem"
+        self.enterContext(patch.multiple(self.serve, CERT=self.cert, KEY=self.key))
+        self.openssl_run = self.enterContext(patch.object(self.serve.subprocess, "run"))
+        self.enterContext(patch("builtins.print"))
+
+    def test_generation_uses_explicit_configuration_and_leaf_extensions(self):
+        self.serve.ensure_cert("192.0.2.10")
+        self.openssl_run.assert_called_once()
+        args, kwargs = self.openssl_run.call_args.args[0], self.openssl_run.call_args.kwargs
+        self.assertEqual(args[args.index("-config") + 1], "-")
+        self.assertIn("-sha256", args)
+        self.assertIn("subjectAltName=IP:192.0.2.10,IP:127.0.0.1,DNS:localhost", args)
+        self.assertIn("basicConstraints=critical,CA:FALSE", args)
+        self.assertIn("extendedKeyUsage=serverAuth", args)
+        self.assertIn("[req]", kwargs["input"])
+        self.assertNotIn("x509_extensions", kwargs["input"])
+        self.assertTrue(kwargs["check"])
+        self.assertTrue(kwargs["capture_output"])
+
+    def test_existing_pair_is_never_replaced(self):
+        self.cert.write_text("SYNTHETIC-CERT", encoding="utf-8")
+        self.key.write_text(LONG_KEY, encoding="utf-8")
+        self.serve.ensure_cert("192.0.2.10")
+        self.openssl_run.assert_not_called()
+        self.assertEqual(self.cert.read_text(encoding="utf-8"), "SYNTHETIC-CERT")
+        self.assertEqual(self.key.read_text(encoding="utf-8"), LONG_KEY)
+
+    def test_partial_pair_is_rejected_without_overwriting_either_file(self):
+        for present, missing in ((self.cert, self.key), (self.key, self.cert)):
+            present.write_text("SYNTHETIC-EXISTING", encoding="utf-8")
+            with self.subTest(present=present.name), self.assertRaises(FileExistsError):
+                self.serve.ensure_cert("192.0.2.10")
+            self.assertFalse(missing.exists())
+            self.assertEqual(present.read_text(encoding="utf-8"), "SYNTHETIC-EXISTING")
+            present.unlink()
+        self.openssl_run.assert_not_called()
+
+
 class PublicFileSecurityTests(IsolatedCase):
     def setUp(self):
         super().setUp()
@@ -939,9 +1035,9 @@ class PublicFileSecurityTests(IsolatedCase):
                            ("private.json", LONG_KEY), ("assets/.env", LONG_KEY), ("assets/key.pem", LONG_KEY)):
             (self.public / name).write_text(text, encoding="utf-8")
 
-    def request(self, path, directory=None):
+    def request(self, path, directory=None, method="GET"):
         self.assertTrue(hasattr(self.serve, "PublicFiles"), "phone.serve must install the PublicFiles allowlist handler")
-        connection = MemoryConnection(f"GET {path} HTTP/1.0\r\nHost: testserver\r\n\r\n".encode("ascii"))
+        connection = MemoryConnection(f"{method} {path} HTTP/1.0\r\nHost: testserver\r\n\r\n".encode("ascii"))
         server = SimpleNamespace(server_name="testserver", server_port=8443)
         with patch.object(self.serve.PublicFiles, "log_message", lambda *args: None):
             self.serve.PublicFiles(connection, ("127.0.0.1", 12345), server,
@@ -983,6 +1079,51 @@ class PublicFileSecurityTests(IsolatedCase):
         for path in paths:
             with self.subTest(path=path):
                 status, body = self.request(path)
+                self.assertIn(status, (400, 403, 404))
+                self.assertNotIn(LONG_KEY.encode(), body)
+
+    def test_head_is_restricted_by_the_same_allowlist(self):
+        for path in ("/key.pem", "/cert.pem", "/.env", "/assets/key.pem"):
+            with self.subTest(path=path):
+                status, body = self.request(path, method="HEAD")
+                self.assertIn(status, (400, 403, 404))
+                self.assertEqual(body, b"")
+        status, body = self.request("/index.html", method="HEAD")
+        self.assertEqual((status, body), (200, b""))
+
+    def test_public_assets_support_queries_and_encoded_spaces(self):
+        (self.public / "assets" / "display styles.css").write_text("PUBLIC-STYLES", encoding="utf-8")
+        for path, marker in (("/index.html?from=home", b"SYNTHETIC-CAMERA-PAGE"),
+                             ("/assets/display%20styles.css?v=2", b"PUBLIC-STYLES")):
+            with self.subTest(path=path):
+                status, body = self.request(path)
+                self.assertEqual(status, 200)
+                self.assertIn(marker, body)
+
+    def test_hidden_assets_and_unapproved_extensions_are_not_public(self):
+        (self.public / "assets" / ".private").mkdir()
+        names = (".secret.css", ".private/style.css", "private.json", "source.py", "secret.key")
+        for name in names:
+            (self.public / "assets" / name).write_text(LONG_KEY, encoding="utf-8")
+            with self.subTest(name=name):
+                status, body = self.request("/assets/" + name)
+                self.assertIn(status, (400, 403, 404))
+                self.assertNotIn(LONG_KEY.encode(), body)
+        for path in ("/assets/test.css:secret", "/assets/%00test.css", "/assets/test.css%5c"):
+            with self.subTest(path=path):
+                self.assertIn(self.request(path)[0], (400, 403, 404))
+
+    def test_assets_resolving_to_private_or_external_files_are_denied(self):
+        alias = self.public / "assets" / "alias.css"
+        alias.write_text(LONG_KEY, encoding="utf-8")
+        outside = self.root / "outside.css"
+        outside.write_text(LONG_KEY, encoding="utf-8")
+        resolve = Path.resolve
+        for target in (outside, self.public / "key.pem"):
+            def redirected(path, *args, **kwargs):
+                return target if path == alias else resolve(path, *args, **kwargs)
+            with self.subTest(target=target.name), patch.object(Path, "resolve", redirected):
+                status, body = self.request("/assets/alias.css")
                 self.assertIn(status, (400, 403, 404))
                 self.assertNotIn(LONG_KEY.encode(), body)
 
