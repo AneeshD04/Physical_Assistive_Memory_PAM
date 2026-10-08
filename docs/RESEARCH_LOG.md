@@ -124,10 +124,10 @@ SQLite fix**. No current model, camera, native-device or pilot accuracy is valid
 | --- | --- | --- |
 | G-ARCH: first functional software DESIGN | Accepted by coordinator, 2026-10-07, A-025/A-029 | BUILD_CONTRACT governs this milestone; builders started. Full v5/model/pilot approval is not implied. |
 | G-TEST: software integration/independent integrity | Pending; CP0 still has 23 setup errors | Tester owns the approved retirement/replacement map, keyless ingest/process/restart/catalogue gate and independent verdicts. No completed builder report or post-CP0 result supplied. |
-| G-PROV: artifacts and permitted use | Pending | Actual scoped inventory; pinned code/weight/data identities; primary terms and intended-use assessment. No blanket legal clearance. |
+| G-PROV: artifacts and permitted use | Pending; `docs/LICENSES.md` register exists (2026-10-08) with MediaPipe JS/WASM, DINOv2, SAM 2.1, PaddleOCR, ONNX Runtime, CUTE, HoloAssist verified at primary sources; `hand_landmarker.task` and the SigLIP 2 checkpoint card UNVERIFIED | Actual scoped inventory; pinned code/weight/data identities; primary terms and intended-use assessment. No blanket legal clearance. |
 | G-PRIV: retention and deletion | Pending | Data-class map covering SQL and derived copies, not just files; an approved deletion/replay policy and synthetic deletion tests. |
 | G-RIG: model/device experiments | Not run; actual iPhone testing later per user | Agreed protocol, permitted fixtures, exact package/model/device pins, delivered-frame accounting and recorded failures. |
-| G-COST: subscription feasibility | Pending; assumptions only | Small per-user subscription sensitivity at $5/$10/$15, without selecting a price or market; bounded token/image/audio spend and measured workload before margin claims. |
+| G-COST: subscription feasibility | Pending; `docs/FINANCE.md` v1 (2026-10-08) gives the sensitivity and caps, all prices unverified | Small per-user subscription sensitivity at $5/$10/$15, without selecting a price or market; bounded token/image/audio spend and measured workload before margin claims. |
 | G-PILOT: household recruitment/recording | Not authorized by this record | Institutional/IRB determination, consent and bystander plan, safety/retention/data-flow review and explicit authorization. |
 
 A gate record must name who decided, when, affected revision, evidence and remaining
@@ -196,7 +196,11 @@ permission**, not architecture approval. All implementation gates remain pending
 | D-013 | accepted (arithmetic correction only) | With the hypothetical $25 receipts, $1.03 fee, $5 API and $0.75 hosting inputs, residual is **$18.22 / $25 = 72.88%**, not at least 75%. A-024 verifies arithmetic only; inputs and cloud margins remain assumptions, and $25 is not a selected subscription price. |
 | D-014 | proposal | Prefer Tasks Vision **1.0.1** over the just-published 1.1.0 for initial stability assessment. A-020's observed 1.1.0 release date remains true. Neither version's runtime, complete asset pins or weight rights are validated here; no package change/download authorized. Source: A-022. |
 
-### Cross-review blocker register — all OPEN
+### Blocker dispositions after CP1/CP2 (architect, 2026-10-08)
+
+Resolved with tests: B-01 (causal first-valid carry, `episode_controller.py` and the tester's long-carry trace), B-02 (capture-resolution keyframes, analysis-resolution burst, explicit pin counts in `memory-camera.js`), B-06 (tasks-vision pinned 1.0.1; D-014 accepted), B-11 (clock-only staleness and `as_of` replay, `test_cp2_staleness.py`), B-12 (fail-closed auth with absent/corrupt DB, `test_personal_pipeline.py` ported tests), B-13 (never overwrite a pair; `validate_pair` raises, certificate tests), B-16 (digest-bound acks, bootstrap suite). Partially resolved: B-04 (register wording corrected in `docs/LICENSES.md`; no breach claim anywhere). Still open: B-03, B-05 (hand-model licence line and hash need a human), B-07, B-08, B-09, B-10 (CP4), B-14 (CP3), B-15 (CP5), B-17 (`docs/FINANCE.md` v1 has the $5/$10/$15 sensitivity with every external price labelled unverified; no measured margin claimed). The register below is kept as the historical intake record.
+
+### Cross-review blocker register — all OPEN at intake
 
 These are coordinator-relayed corrections and unresolved requirements, not measured
 failures of a new implementation. Keep the original reports intact as provenance,

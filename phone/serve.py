@@ -71,7 +71,11 @@ class PublicFiles(http.server.SimpleHTTPRequestHandler):
                 path = (root / "index.html").resolve()
             relative = path.relative_to(root)
             page = relative.as_posix() in {"index.html", "agent.html", "memory.html"}
+            # assets/models/ (pinned model files and their manifest) is served only by
+            # the combined app, whose route is gated on the manifest, the licence
+            # register and PAM_ENABLE_HAND_MODEL; this suffix allowlist never is.
             asset = (len(relative.parts) > 1 and relative.parts[0] == "assets"
+                     and relative.parts[1] != "models"
                      and path.suffix.lower() in self.ASSET_SUFFIXES
                      and not any(part.startswith(".") or ":" in part for part in relative.parts))
             if not (page or asset) or not path.is_file():

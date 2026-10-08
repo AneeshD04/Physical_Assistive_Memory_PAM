@@ -1,0 +1,94 @@
+{
+ "name": "short_busy_no_release",
+ "basis": "synthetic golden, authored by the tester 2026-10-08; thresholds are initial values",
+ "description": "Busy ends after 50 ms: no select_release before BUSY_MIN_MS has elapsed since busy_since (t=150, 199, 299 are all under 200 ms); the gap aborts with no rest.",
+ "samples": [
+  {
+   "t_ms": 0,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 100,
+   "busy": true,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 150,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 199,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 299,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 350,
+   "busy": null,
+   "motion": null,
+   "frame_valid": false,
+   "gap": true
+  },
+  {
+   "t_ms": 400,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  }
+ ],
+ "expected": [
+  {
+   "t_ms": 0,
+   "actions": [],
+   "phase": "idle"
+  },
+  {
+   "t_ms": 100,
+   "actions": [
+    "start",
+    "select_pre_contact",
+    "select_hand_busy"
+   ],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 150,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 199,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 299,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 350,
+   "actions": [
+    "gap",
+    "abort"
+   ],
+   "phase": "idle"
+  },
+  {
+   "t_ms": 400,
+   "actions": [],
+   "phase": "idle"
+  }
+ ]
+}

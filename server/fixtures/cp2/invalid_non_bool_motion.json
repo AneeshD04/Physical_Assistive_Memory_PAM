@@ -1,0 +1,14 @@
+{
+ "name": "non_bool_motion",
+ "basis": "synthetic golden, authored by the tester 2026-10-08; thresholds are initial values",
+ "samples": [
+  {
+   "t_ms": 0,
+   "busy": false,
+   "motion": 0,
+   "frame_valid": true
+  }
+ ],
+ "expected_stderr": "error: Invalid controller measurement\n",
+ "expected_exit": 1
+}

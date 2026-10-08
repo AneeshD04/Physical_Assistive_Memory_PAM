@@ -1,0 +1,14 @@
+{
+ "name": "negative_t_ms",
+ "basis": "synthetic golden, authored by the tester 2026-10-08; thresholds are initial values",
+ "samples": [
+  {
+   "t_ms": -1,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  }
+ ],
+ "expected_stderr": "error: Invalid controller time\n",
+ "expected_exit": 1
+}

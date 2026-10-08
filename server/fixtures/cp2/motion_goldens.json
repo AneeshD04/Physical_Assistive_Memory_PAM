@@ -1,0 +1,311 @@
+{
+ "basis": "synthetic golden, authored by the tester 2026-10-08; thresholds are initial values",
+ "note": "energy = round-half-up to 6 decimals of (sum |blur3(next)-blur3(prev)|) / (w*h*255), blur3 being the integer 3x3 box mean with edge replication. Expected values were worked by hand (see the tester's notes in server/test_cp2_controller.py).",
+ "cases": [
+  {
+   "name": "single_pixel_90",
+   "width": 4,
+   "height": 3,
+   "prev": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "next": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    90,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "energy": 0.029412,
+   "moving": false,
+   "work": "blur spreads 90//9=10 over the 9 pixels whose window contains (1,1): S=90, D=3060, 90/3060=0.0294117.."
+  },
+  {
+   "name": "ramp_10_to_120",
+   "width": 4,
+   "height": 3,
+   "prev": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "next": [
+    10,
+    20,
+    30,
+    40,
+    50,
+    60,
+    70,
+    80,
+    90,
+    100,
+    110,
+    120
+   ],
+   "energy": 0.253595,
+   "moving": true,
+   "work": "blurred ramp = [26,33,43,50,53,60,70,76,80,86,96,103], S=776, D=3060, 776/3060=0.2535947.."
+  },
+  {
+   "name": "identical_frames",
+   "width": 4,
+   "height": 3,
+   "prev": [
+    7,
+    250,
+    3,
+    99,
+    0,
+    255,
+    128,
+    64,
+    32,
+    16,
+    8,
+    4
+   ],
+   "next": [
+    7,
+    250,
+    3,
+    99,
+    0,
+    255,
+    128,
+    64,
+    32,
+    16,
+    8,
+    4
+   ],
+   "energy": 0.0,
+   "moving": false,
+   "work": "S=0"
+  },
+  {
+   "name": "black_to_white",
+   "width": 4,
+   "height": 3,
+   "prev": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "next": [
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255
+   ],
+   "energy": 1.0,
+   "moving": true,
+   "work": "blur(255)=2295//9=255 everywhere, S=12*255=D"
+  },
+  {
+   "name": "one_by_one",
+   "width": 1,
+   "height": 1,
+   "prev": [
+    200
+   ],
+   "next": [
+    8
+   ],
+   "energy": 0.752941,
+   "moving": true,
+   "work": "a 1x1 frame blurs to itself: |8-200|=192, D=255, 192/255=0.7529411.."
+  },
+  {
+   "name": "white_to_black_symmetric",
+   "width": 4,
+   "height": 3,
+   "prev": [
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255
+   ],
+   "next": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "energy": 1.0,
+   "moving": true,
+   "work": "absolute difference is symmetric"
+  },
+  {
+   "name": "two_by_one_17",
+   "width": 2,
+   "height": 1,
+   "prev": [
+    0,
+    0
+   ],
+   "next": [
+    17,
+    17
+   ],
+   "energy": 0.066667,
+   "moving": true,
+   "work": "blur of [17,17] with replication = 153//9=17 each; S=34, D=510, 34/510=0.0666666.. (above MOTION_ON)"
+  },
+  {
+   "name": "below_threshold_2x1",
+   "width": 2,
+   "height": 1,
+   "prev": [
+    0,
+    0
+   ],
+   "next": [
+    8,
+    8
+   ],
+   "energy": 0.031373,
+   "moving": false,
+   "work": "blur=72//9=8 each; S=16, D=510, 16/510=0.0313725.."
+  }
+ ],
+ "hysteresis": {
+  "energies": [
+   0,
+   0.034,
+   0.035,
+   0.02,
+   0.015,
+   0.0149,
+   0.03,
+   0.05,
+   0
+  ],
+  "moving": [
+   false,
+   false,
+   true,
+   true,
+   true,
+   false,
+   false,
+   true,
+   false
+  ],
+  "work": "off->on at >= 0.035 (0.034 stays off), on->off only below 0.015 (0.015 stays on), 0.0149 turns off"
+ },
+ "invalid": [
+  {
+   "name": "wrong_length",
+   "width": 4,
+   "height": 3,
+   "prev": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "next": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "name": "zero_width",
+   "width": 0,
+   "height": 3,
+   "prev": [],
+   "next": []
+  },
+  {
+   "name": "pixel_out_of_range",
+   "width": 2,
+   "height": 1,
+   "prev": [
+    0,
+    256
+   ],
+   "next": [
+    0,
+    0
+   ]
+  }
+ ]
+}

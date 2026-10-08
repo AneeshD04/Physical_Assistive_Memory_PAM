@@ -16,6 +16,10 @@ weights/
 *.pt
 *.onnx
 *.safetensors
+# Model assets fetched by scripts/fetch_models.py; the manifest is machine-generated too
+*.task
+*.wasm
+phone/assets/models/
 
 # Run data: captured frames, ledgers, logs. Frames are photos of whoever ran it.
 perception/data/

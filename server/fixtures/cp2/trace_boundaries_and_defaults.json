@@ -1,0 +1,167 @@
+{
+ "name": "boundaries_and_defaults",
+ "basis": "synthetic golden, authored by the tester 2026-10-08; thresholds are initial values",
+ "description": "Boundaries: release at exactly BUSY_MIN_MS, rest at exactly REST_MIN_MS, timeout at exactly MAX_EPISODE_MS; omitted frame_valid/gap default false, omitted busy/motion are null; unknown sample keys are ignored.",
+ "samples": [
+  {
+   "t_ms": 0,
+   "busy": true,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 199,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 200,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 799,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 800,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 801,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 10800,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 10801,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 10802,
+   "busy": true,
+   "motion": true
+  },
+  {
+   "t_ms": 10803,
+   "gap": true
+  },
+  {
+   "t_ms": 10804,
+   "note": "unknown keys are ignored"
+  },
+  {
+   "t_ms": 10805,
+   "busy": true,
+   "frame_valid": true,
+   "extra": [
+    1,
+    2,
+    3
+   ]
+  }
+ ],
+ "expected": [
+  {
+   "t_ms": 0,
+   "actions": [
+    "start",
+    "select_pre_contact",
+    "select_hand_busy"
+   ],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 199,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 200,
+   "actions": [
+    "select_release"
+   ],
+   "phase": "settling"
+  },
+  {
+   "t_ms": 799,
+   "actions": [],
+   "phase": "settling"
+  },
+  {
+   "t_ms": 800,
+   "actions": [
+    "select_rest",
+    "finish"
+   ],
+   "phase": "idle"
+  },
+  {
+   "t_ms": 801,
+   "actions": [
+    "start",
+    "select_pre_contact",
+    "select_hand_busy",
+    "select_carry"
+   ],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 10800,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 10801,
+   "actions": [
+    "gap",
+    "abort"
+   ],
+   "phase": "idle"
+  },
+  {
+   "t_ms": 10802,
+   "actions": [
+    "start",
+    "select_pre_contact"
+   ],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 10803,
+   "actions": [
+    "gap",
+    "abort"
+   ],
+   "phase": "idle"
+  },
+  {
+   "t_ms": 10804,
+   "actions": [],
+   "phase": "idle"
+  },
+  {
+   "t_ms": 10805,
+   "actions": [
+    "start",
+    "select_pre_contact",
+    "select_hand_busy"
+   ],
+   "phase": "busy"
+  }
+ ]
+}

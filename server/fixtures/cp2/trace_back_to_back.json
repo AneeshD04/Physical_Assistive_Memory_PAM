@@ -1,0 +1,129 @@
+{
+ "name": "back_to_back",
+ "basis": "synthetic golden, authored by the tester 2026-10-08; thresholds are initial values",
+ "description": "Two back-to-back episodes with sparse samples (thresholds are in milliseconds, not frames): the first finishes at t=900 and the very next sample starts the second, whose carry is selected again.",
+ "samples": [
+  {
+   "t_ms": 0,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 100,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 300,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 900,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 1000,
+   "busy": true,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 1100,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 1200,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 1800,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 1900,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  }
+ ],
+ "expected": [
+  {
+   "t_ms": 0,
+   "actions": [],
+   "phase": "idle"
+  },
+  {
+   "t_ms": 100,
+   "actions": [
+    "start",
+    "select_pre_contact",
+    "select_hand_busy",
+    "select_carry"
+   ],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 300,
+   "actions": [
+    "select_release"
+   ],
+   "phase": "settling"
+  },
+  {
+   "t_ms": 900,
+   "actions": [
+    "select_rest",
+    "finish"
+   ],
+   "phase": "idle"
+  },
+  {
+   "t_ms": 1000,
+   "actions": [
+    "start",
+    "select_pre_contact",
+    "select_hand_busy"
+   ],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 1100,
+   "actions": [
+    "select_carry"
+   ],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 1200,
+   "actions": [
+    "select_release"
+   ],
+   "phase": "settling"
+  },
+  {
+   "t_ms": 1800,
+   "actions": [
+    "select_rest",
+    "finish"
+   ],
+   "phase": "idle"
+  },
+  {
+   "t_ms": 1900,
+   "actions": [],
+   "phase": "idle"
+  }
+ ]
+}

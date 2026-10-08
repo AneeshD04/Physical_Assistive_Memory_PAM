@@ -1,0 +1,9 @@
+{
+ "name": "sample_is_null",
+ "basis": "synthetic golden, authored by the tester 2026-10-08; thresholds are initial values",
+ "samples": [
+  null
+ ],
+ "expected_stderr": "error: Invalid controller sample\n",
+ "expected_exit": 1
+}

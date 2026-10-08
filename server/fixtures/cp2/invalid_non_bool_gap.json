@@ -1,0 +1,15 @@
+{
+ "name": "non_bool_gap",
+ "basis": "synthetic golden, authored by the tester 2026-10-08; thresholds are initial values",
+ "samples": [
+  {
+   "t_ms": 0,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true,
+   "gap": "yes"
+  }
+ ],
+ "expected_stderr": "error: Invalid controller flags\n",
+ "expected_exit": 1
+}

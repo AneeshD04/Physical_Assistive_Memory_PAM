@@ -1,0 +1,404 @@
+{
+ "name": "long_carry",
+ "basis": "synthetic golden, authored by the tester 2026-10-08; thresholds are initial values",
+ "description": "Long carry: 2.5 s of busy+motion yields exactly one select_carry; a not-busy frame with motion still true does not release; release waits for busy false AND motion false.",
+ "samples": [
+  {
+   "t_ms": 0,
+   "busy": null,
+   "motion": null,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 100,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 200,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 300,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 400,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 500,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 600,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 700,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 800,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 900,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 1000,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 1100,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 1200,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 1300,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 1400,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 1500,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 1600,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 1700,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 1800,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 1900,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 2000,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 2100,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 2200,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 2300,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 2400,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 2500,
+   "busy": true,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 2600,
+   "busy": false,
+   "motion": true,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 2700,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 2800,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 2900,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 3000,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 3100,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 3200,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 3300,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 3400,
+   "busy": null,
+   "motion": null,
+   "frame_valid": true
+  }
+ ],
+ "expected": [
+  {
+   "t_ms": 0,
+   "actions": [],
+   "phase": "idle"
+  },
+  {
+   "t_ms": 100,
+   "actions": [
+    "start",
+    "select_pre_contact",
+    "select_hand_busy",
+    "select_carry"
+   ],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 200,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 300,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 400,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 500,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 600,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 700,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 800,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 900,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 1000,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 1100,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 1200,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 1300,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 1400,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 1500,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 1600,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 1700,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 1800,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 1900,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 2000,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 2100,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 2200,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 2300,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 2400,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 2500,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 2600,
+   "actions": [],
+   "phase": "busy"
+  },
+  {
+   "t_ms": 2700,
+   "actions": [
+    "select_release"
+   ],
+   "phase": "settling"
+  },
+  {
+   "t_ms": 2800,
+   "actions": [],
+   "phase": "settling"
+  },
+  {
+   "t_ms": 2900,
+   "actions": [],
+   "phase": "settling"
+  },
+  {
+   "t_ms": 3000,
+   "actions": [],
+   "phase": "settling"
+  },
+  {
+   "t_ms": 3100,
+   "actions": [],
+   "phase": "settling"
+  },
+  {
+   "t_ms": 3200,
+   "actions": [],
+   "phase": "settling"
+  },
+  {
+   "t_ms": 3300,
+   "actions": [
+    "select_rest",
+    "finish"
+   ],
+   "phase": "idle"
+  },
+  {
+   "t_ms": 3400,
+   "actions": [],
+   "phase": "idle"
+  }
+ ]
+}

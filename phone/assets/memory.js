@@ -5,6 +5,10 @@ const text = (element, value) => { element.textContent = value == null ? '' : St
 function node(tag, content, className) { const element = document.createElement(tag); if (content != null) text(element, content); if (className) element.className = className; return element; }
 let authenticated = false, authGeneration = 0, currentView = 'chat', catalogueSequence = 0, detailSequence = 0;
 let selectedId = null, detailTrigger = null, lastCatalogue = '', storageReady = false, camera = null;
+// The server's own verdict on automatic hand recognition (GET /api/health
+// capabilities); null until a health response names that capability.
+let handPolicy = null;
+const HAND_CAPABILITY = 'automatic_hand_recognition';
 function notice(message) { text($('app-status'), message); $('app-status').hidden = !message; }
 function dateLabel(value) {
   if (!Number.isSafeInteger(value) || value <= 0) return 'Time not recorded';
@@ -52,12 +56,24 @@ function image(item) {
   figure.append(img);
   return figure;
 }
+// Clock-only staleness (CP2): the server ages a placed location by evaluation time
+// and sets stale_reason "age" with aged: true. "aged" may be absent on an older
+// server; its absence means nothing more than "not reported".
+function ageNotice(item) {
+  if (item.stale_reason === 'age' || item.aged === true) {
+    return item.location_status === 'stale'
+      ? 'Older evidence: recorded more than a week ago; this location is no longer relied on and the item may have moved.'
+      : 'Older evidence: recorded more than a day ago; it may have moved.';
+  }
+  return item.stale_reason ? `Note: ${item.stale_reason}` : null;
+}
 function describe(item, target) {
   target.append(node('p', `Identity: ${item.identity_status || 'unknown'}`, 'badge'));
-  target.append(node('p', `Location: ${item.location_status || 'unknown'}`));
+  target.append(node('p', `Location: ${item.location_status || 'unknown'}${item.aged === true ? ' · older evidence' : ''}`));
   target.append(node('p', item.location_text || 'No supported location is recorded.'));
   target.append(node('p', `Observed: ${dateLabel(item.observed_at_ms)}`, 'muted'));
-  if (item.stale_reason) target.append(node('p', `Older evidence: ${item.stale_reason}`, 'notice'));
+  const age = ageNotice(item);
+  if (age) target.append(node('p', age, item.stale_reason === 'age' || item.aged === true ? 'notice aged' : 'notice'));
   if (item.index_pending) target.append(node('p', 'Processing pending. New evidence may change this record.', 'notice'));
   target.append(node('p', `Relevance: ${item.relevance || 'unknown'} · Source: ${item.source || 'not recorded'}`, 'muted'));
 }
@@ -119,19 +135,45 @@ async function setupStorage() {
         $('camera-start').disabled = !authenticated || state.running || state.starting || state.saving || state.unsaved;
         $('camera-pause').disabled = !state.running; $('camera-stop').disabled = !(state.running || state.starting);
         $('mark-before').disabled = !state.running || state.episode || state.saving || state.unsaved;
-        $('mark-rest').disabled = !state.running || !state.episode || state.saving;
+        $('mark-rest').disabled = !state.running || !state.episode || state.saving || state.automaticEpisode;
         $('mark-cancel').disabled = !state.episode || state.saving;
-        text($('camera-summary'), state.running ? `Camera on · manual mode${state.episode ? ' · episode in progress' : ''}` : state.starting ? 'Waiting for camera permission' : 'Camera off');
+        text($('camera-summary'), state.running ? `Camera on · ${state.automaticActive ? 'automatic' : 'manual'} mode${state.episode ? ' · episode in progress' : ''}` : state.starting ? 'Waiting for camera permission' : 'Camera off');
         $('preview-placeholder').hidden = state.running;
+        renderAutomatic(state);
       },
       gap: gap => {
         const li = node('li', `${gap.reason} · ${((gap.t_to_ms - gap.t_from_ms) / 1000).toFixed(1)} seconds recorded as a gap.`);
         $('coverage-log').prepend(li); while ($('coverage-log').children.length > 12) $('coverage-log').lastElementChild.remove();
       }
     });
+    if (handPolicy) camera.setServerPolicy(handPolicy);
     camera.update();
-  } catch (error) { text($('storage-status'), `${error.message} Capture is disabled; local queries and browsing still work.`); $('camera-start').disabled = true; }
+  } catch (error) {
+    text($('storage-status'), `${error.message} Capture is disabled; local queries and browsing still work.`); $('camera-start').disabled = true;
+    renderAutomatic({ automatic: false, saving: false, adapter: { enabled: false, reason: 'capture is disabled in this browser, so no hand model was loaded.', version: null } });
+  }
 }
+// Automatic capture UI: the toggle is usable only when the worker reported a ready
+// hand model and the server does not deny the capability; otherwise it is disabled
+// with the reason. Everything shown is the camera's reported state, never a promise.
+function renderAutomatic(state) {
+  const adapter = state.adapter || { enabled: false, reason: 'Checking whether a hand model is provisioned on this server.', version: null };
+  const on = adapter.enabled && state.automatic;
+  $('automatic-toggle').disabled = !adapter.enabled || state.saving;
+  $('automatic-toggle').checked = on;
+  text($('automatic-description'), !adapter.enabled
+    ? `Unavailable: ${adapter.reason || 'no hand model is available.'} Manual marking still works.`
+    : on ? `On · hand model ${adapter.version}. An episode starts when a hand looks busy and ends when the item rests; it is saved locally before upload. Turn off to return to manual marks only.`
+      : `Off · hand model ${adapter.version} is loaded from this server. Turn on to let Pam pin episodes automatically; manual marks keep working.`);
+  text($('camera-mode-badge'), on ? 'Automatic capture mode' : 'Manual mark mode');
+  text($('automatic-notice'), adapter.enabled
+    ? `A hand model is provisioned on this server (hand model ${adapter.version}). Automatic capture is ${on ? 'on: a busy-hand heuristic, not verified recognition.' : 'off until you turn it on below.'} Manual marking remains available.`
+    : `Automatic hand recognition is unavailable: ${adapter.reason || 'no hand model is available.'} Manual marking is a first checkpoint, not automatic daily tracking.`);
+}
+$('automatic-toggle').addEventListener('change', () => {
+  const wanted = $('automatic-toggle').checked;
+  if (camera && authenticated) camera.setAutomatic(wanted); else $('automatic-toggle').checked = false;
+});
 async function signedIn() {
   authenticated = true; authGeneration++; $('signin').hidden = true; $('app').hidden = false; $('logout').hidden = false; $('pin').value = '';
   const generation = authGeneration;
@@ -175,6 +217,11 @@ for (const button of document.querySelectorAll('[data-view]')) button.addEventLi
 function renderCapabilities(capabilities) {
   $('capabilities').replaceChildren();
   for (const cap of Array.isArray(capabilities) ? capabilities : []) $('capabilities').append(node('li', `${cap.name || 'Capability'}: ${cap.enabled ? 'available' : 'unavailable'}${cap.reason ? ` — ${cap.reason}` : ''}`));
+  const hand = (Array.isArray(capabilities) ? capabilities : []).find(cap => cap && cap.name === HAND_CAPABILITY);
+  if (hand && typeof hand === 'object') {
+    handPolicy = { enabled: hand.enabled === true, reason: typeof hand.reason === 'string' ? hand.reason : null };
+    camera?.setServerPolicy(handPolicy);
+  }
 }
 async function refreshHealth() {
   try {

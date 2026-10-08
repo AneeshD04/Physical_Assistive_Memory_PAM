@@ -63,3 +63,72 @@ def step(state: dict | None, sample: dict) -> tuple[dict, list[str]]:
         else:
             state.update(phase="busy", rest_since=None)
     return state, actions
+
+
+def replay(samples: list[dict]) -> list[dict]:
+    """Run step() over a whole trace from the initial state.
+
+    Returns one record per sample, in order: {"t_ms": int, "actions": [...],
+    "phase": <phase after the step>}. The machine above is unchanged; this is only
+    the entry point the tester diffs against the browser port
+    (phone/assets/controller.js replay). An invalid sample raises the same
+    ValueError step() raises, at the sample that is invalid; nothing is swallowed.
+
+    Trace boundary rule (coordinator, 2026-10-08): JSON text 100.0 is accepted as
+    100 at the trace boundary; step() itself still requires int. An integral float
+    t_ms is normalised to int in a copied sample so both CLIs agree (JS cannot
+    distinguish 100.0 from 100); a non-integral float (100.5) still raises
+    "Invalid controller time".
+    """
+    if not isinstance(samples, list):
+        raise ValueError("Controller trace must be a list of samples")
+    state = None
+    log = []
+    for sample in samples:
+        if not isinstance(sample, dict):
+            raise ValueError("Invalid controller sample")
+        t = sample.get("t_ms")
+        if isinstance(t, float) and not isinstance(t, bool) and t.is_integer():
+            sample = dict(sample, t_ms=int(t))
+        state, actions = step(state, sample)
+        log.append({"t_ms": sample["t_ms"], "actions": list(actions), "phase": state["phase"]})
+    return log
+
+
+def _main(argv: list[str]) -> int:
+    """`python -m perception.episode_controller trace.json`
+
+    trace.json is either a JSON list of samples or an object with a "samples" key.
+    Prints replay() as compact JSON (sort_keys, no spaces) so the output can be
+    diffed byte-for-byte with the Node replay. A ValueError prints its message to
+    stderr and exits 1; a missing file prints "error: trace file not found" and an
+    unreadable or undecodable file "error: trace file is not valid JSON" (both
+    exit 1, the same text as the Node CLI); a usage error exits 2.
+    """
+    import json
+    import sys
+    if len(argv) != 2:
+        sys.stderr.write("usage: python -m perception.episode_controller trace.json\n")
+        return 2
+    try:
+        with open(argv[1], "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        sys.stderr.write("error: trace file not found\n")
+        return 1
+    except (OSError, ValueError):  # unreadable, undecodable text, or JSONDecodeError
+        sys.stderr.write("error: trace file is not valid JSON\n")
+        return 1
+    samples = data.get("samples") if isinstance(data, dict) else data
+    try:
+        result = replay(samples)
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
+    sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(_main(sys.argv))

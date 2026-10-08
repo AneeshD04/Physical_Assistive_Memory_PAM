@@ -10,6 +10,7 @@ import json
 import math
 import re
 import uuid
+from datetime import datetime, timezone
 
 try:
     from .episode import parse_packet, jpeg_bytes, RevisionLimitError
@@ -21,6 +22,15 @@ except ImportError:
 
 def _json(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+
+
+# Clock-only staleness (B-11, CP2). A 'placed' location ages by the evaluation clock
+# alone: no write is needed for an answer to age, and the stored projection never
+# carries an evaluated age. Ageing is applied when a projection is READ, at as_of
+# when the caller gives one, else at the injected clock. Initial values from the
+# build plan; a re-observation stage (CP4) is what refreshes observed_at_ms.
+AGE_STALE_MS = 24 * 3600 * 1000        # age > this: still 'placed', stale_reason "age", aged true, answer hedged
+AGE_ABSTAIN_MS = 7 * 24 * 3600 * 1000  # age > this: location_status 'stale', location_text kept, answer abstains
 
 
 EPISODE_SCHEMA = """
@@ -247,7 +257,35 @@ class EpisodeStoreMixin:
             raise ValueError("as_of must be nonnegative epoch milliseconds")
         return int(as_of)
 
-    def _projection(self, db, as_of=None):
+    @staticmethod
+    def _age_item(item, eval_ms):
+        """Clock-only ageing (B-11) of one projected item, evaluated at eval_ms.
+
+        Pure and idempotent: returns a copy. Only a 'placed' location ages (a
+        pickup, an uncertain outcome or a bad capture clock already says so).
+        age = eval_ms - observed_at_ms; age > AGE_ABSTAIN_MS -> location_status
+        'stale', stale_reason "age", location_text kept as history; otherwise
+        age > AGE_STALE_MS -> still 'placed', stale_reason "age". Both set
+        aged=True; everything else reads aged=False.
+        """
+        aged = dict(item, aged=False)
+        observed = item.get("observed_at_ms")
+        if eval_ms is None or observed is None or item.get("location_status") != "placed":
+            return aged
+        age = eval_ms - observed
+        if age > AGE_ABSTAIN_MS:
+            aged.update(location_status="stale", stale_reason="age", aged=True)
+        elif age > AGE_STALE_MS:
+            aged.update(stale_reason="age", aged=True)
+        return aged
+
+    def _projection(self, db, as_of=None, *, age=True):
+        """Items replayed from stored decisions up to as_of (default: everything).
+
+        With age=True (every reader) the items are aged at as_of when given, else at
+        the injected clock. _rebuild_projection passes age=False so current_items
+        never depends on wall-clock time.
+        """
         at = self._as_of_ms(as_of)
         rows = db.execute("""SELECT o.* FROM local_observations o WHERE o.profile_id=? AND o.record IS NOT NULL
             AND NOT EXISTS(SELECT 1 FROM item_tombstones t WHERE t.profile_id=o.profile_id AND t.item_id=o.item_id)
@@ -285,6 +323,8 @@ class EpisodeStoreMixin:
                 "observed_at_ms": row["observed_at_ms"] if row["observed_at_ms"] > 0 else None,
                 "location_text": observation.get("location_text") if placed else None,
                 "stale_reason": stale, "index_pending": False, "image_url": None,
+                # aged is an evaluated field: always False in storage, set by _age_item on read.
+                "aged": False,
                 "source": "local_evidence", "observation_id": row["observation_id"],
                 # The photo is the answer: the whole keyframe is the reference image and
                 # the target region travels with it (spec answer contract, reference_image).
@@ -294,10 +334,14 @@ class EpisodeStoreMixin:
             if row["item_id"] in items and (at is None or row["at_ms"] <= at):
                 items[row["item_id"]]["name"] = row["name"]
                 items[row["item_id"]]["source"] = "user_named_local_evidence"
+        if age:
+            eval_ms = at if at is not None else self._now_ms()
+            items = {item_id: self._age_item(item, eval_ms) for item_id, item in items.items()}
         return items
 
     def _rebuild_projection(self, db):
-        items = self._projection(db)
+        # Stored without ageing: the projection must not depend on wall-clock time.
+        items = self._projection(db, age=False)
         db.execute("DELETE FROM current_items WHERE profile_id=?", (self.profile_id,))
         for item_id, record in items.items():
             db.execute("INSERT INTO current_items VALUES(?,?,?)", (self.profile_id, item_id, _json(record)))
@@ -306,11 +350,23 @@ class EpisodeStoreMixin:
     def _pending(self, db):
         return bool(db.execute("SELECT 1 FROM episode_jobs WHERE profile_id=? AND status IN ('pending','processing') LIMIT 1", (self.profile_id,)).fetchone())
 
-    def list_items(self, query='', limit=50) -> list[dict]:
+    def list_items(self, query='', limit=50, *, as_of=None) -> list[dict]:
+        """The catalogue, aged at as_of (epoch ms) or at the injected clock.
+
+        Without as_of this reads the stored projection and ages it on the way out;
+        with as_of it replays stored decisions up to that time (the same view
+        answer_text uses), so items and answers agree at any evaluation time.
+        Neither path writes current_items.
+        """
         if not isinstance(query, str) or len(query) > 2000 or type(limit) is not int or not 1 <= limit <= 200:
             raise ValueError("Invalid catalogue query")
+        at = self._as_of_ms(as_of)
         with self._connection() as db:
-            items = [json.loads(row[0]) for row in db.execute("SELECT record FROM current_items WHERE profile_id=?", (self.profile_id,))]
+            if at is None:
+                now = self._now_ms()
+                items = [self._age_item(json.loads(row[0]), now) for row in db.execute("SELECT record FROM current_items WHERE profile_id=?", (self.profile_id,))]
+            else:
+                items = list(self._projection(db, at).values())
             pending = self._pending(db)
         words = self._query_words(query)
         items = [dict(item, index_pending=pending) for item in items if self._matches(item, words, query)]
@@ -323,14 +379,22 @@ class EpisodeStoreMixin:
     def _matches(self, item, words, query):
         return not words or query.strip() == item["item_id"] or words <= self._query_words(item["name"])
 
-    def get_item(self, item_id) -> dict:
+    def get_item(self, item_id, *, as_of=None) -> dict:
+        """One catalogue item aged at as_of or at the injected clock (see list_items)."""
         if not isinstance(item_id, str) or len(item_id) > 100:
             raise KeyError("Unknown item")
+        at = self._as_of_ms(as_of)
         with self._connection() as db:
-            row = db.execute("SELECT record FROM current_items WHERE profile_id=? AND item_id=?", (self.profile_id, item_id)).fetchone()
-            if row is None:
-                raise KeyError("Unknown item")
-            return dict(json.loads(row["record"]), index_pending=self._pending(db))
+            if at is None:
+                row = db.execute("SELECT record FROM current_items WHERE profile_id=? AND item_id=?", (self.profile_id, item_id)).fetchone()
+                if row is None:
+                    raise KeyError("Unknown item")
+                item = self._age_item(json.loads(row["record"]), self._now_ms())
+            else:
+                item = self._projection(db, at).get(item_id)
+                if item is None:
+                    raise KeyError("Unknown item")
+            return dict(item, index_pending=self._pending(db))
 
     def item_history(self, item_id) -> list[dict]:
         self.get_item(item_id)
@@ -392,20 +456,42 @@ class EpisodeStoreMixin:
             return dict(answer, shape="clarify", text="Which stored item do you mean?", members=members[:8], question="Which stored item?", options=[{"item_id": x["item_id"], "name": x["name"]} for x in members[:8]])
         item = members[0]
         shape = "hedged"
-        if item["identity_status"] == "trusted" and item["location_status"] == "placed":
+        # Clock-only staleness (B-11): the projection above is already aged at as_of
+        # (or now). Confident needs trusted + placed AND not aged; an aged placement
+        # is hedged with its observed date; beyond AGE_ABSTAIN_MS the historical
+        # location_text is not usable evidence, so the answer abstains without members.
+        if item["identity_status"] == "trusted" and item["location_status"] == "placed" and not item.get("aged"):
             message = f"The recorded location of {item['name']} is {item['location_text']}."
             shape = "confident"
+        elif item.get("stale_reason") == "age" and item["location_text"]:
+            if item["location_status"] == "stale":
+                return dict(answer, text=f"I have no recent evidence for {item['name']}.")
+            message = (f"I recorded {item['name']} at {item['location_text']} on {self._date_text(item['observed_at_ms'])}, "
+                       "but that was more than a day ago; it may have moved since.")
         elif item["location_text"]:
             message = f"Earlier evidence recorded {item['name']} at {item['location_text']}; its current location is uncertain."
         else:
             message = f"I have a stored sighting for {item['name']}, but cannot confirm its identity or current resting location."
         return dict(answer, shape=shape, text=message, members=members)
 
+    @staticmethod
+    def _date_text(observed_ms):
+        """UTC calendar date of an observation for answer text (deterministic across
+        machines; the store has no user time zone)."""
+        try:
+            return datetime.fromtimestamp(observed_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+        except (OverflowError, OSError, ValueError, TypeError):
+            return "an unknown date"
+
     def rebuild_all(self, *, as_of=None) -> dict:
         at = self._as_of_ms(as_of)
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            items = self._rebuild_projection(db) if at is None else self._projection(db, at)
+            if at is None:
+                now = self._now_ms()
+                items = {item_id: self._age_item(item, now) for item_id, item in self._rebuild_projection(db).items()}
+            else:
+                items = self._projection(db, at)
             return {"items": list(items.values()), "count": len(items), "as_of": at, "model_rerun": False,
                     "context_only": db.execute("SELECT count(*) FROM episode_jobs WHERE profile_id=? AND status='context_only'", (self.profile_id,)).fetchone()[0]}
 

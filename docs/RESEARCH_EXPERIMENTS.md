@@ -268,6 +268,10 @@ python -B server/test_personal_pipeline.py EventVerifierTests PublicFileSecurity
   decimal calculation; read/search tools inspect text. No application tests, Git
   mutation, paid calls, model/package installs, credentials or real media touched.
 
+## X-007 / CP2 — automatic capture path on synthetic inputs (observed here, 2026-10-08)
+
+Coordinator-run, Linux sandbox (Python 3.13.16, Node 22.22.0, Playwright 1.56.0 / chromium-1194). 215/215 methods, 0 skips: see `docs/CONTINUATION_HANDOFF.md` §5 for the per-suite table and `docs/BUILD_PLAN.md` "CP2 result" for the decisions. Fixtures are tester-authored synthetic goldens (`server/fixtures/cp2/`, basis string recorded in each file); thresholds `MOTION_ON/OFF`, `CURL_RATIO` and the lower-frame rule are initial values, not measurements. Blocked, not skipped: the real hand model (P-101 remains not run; licence UNVERIFIED, hash unrecorded). No camera, device, household footage, paid call or model download was used.
+
 ## Proposed experiment queue — historical proposals; no outcomes implied
 
 These entries preserve pre-build proposals, not a substitute for BUILD_CONTRACT.

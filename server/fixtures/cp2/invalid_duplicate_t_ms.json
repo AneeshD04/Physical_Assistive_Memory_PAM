@@ -1,0 +1,26 @@
+{
+ "name": "duplicate_t_ms",
+ "basis": "synthetic golden, authored by the tester 2026-10-08; thresholds are initial values",
+ "samples": [
+  {
+   "t_ms": 0,
+   "busy": false,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 100,
+   "busy": true,
+   "motion": false,
+   "frame_valid": true
+  },
+  {
+   "t_ms": 100,
+   "busy": true,
+   "motion": false,
+   "frame_valid": true
+  }
+ ],
+ "expected_stderr": "error: Controller time must increase\n",
+ "expected_exit": 1
+}
