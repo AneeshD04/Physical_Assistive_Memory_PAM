@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="same-origin">
+  <title>Pam · Your stored items</title>
+  <link rel="stylesheet" href="/assets/memory.css">
+  <script type="module" src="/assets/memory.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="header">
+    <span class="wordmark" role="img" aria-label="Pam"></span>
+    <span class="header-label">Your memory companion</span>
+    <button id="logout" class="secondary" hidden>Sign out</button>
+  </header>
+  <main id="main" tabindex="-1">
+    <section id="signin" class="sign-in card" aria-labelledby="signin-title">
+      <p class="eyebrow">A little help remembering</p>
+      <h1 id="signin-title">Welcome to Pam</h1>
+      <p>Sign in to ask about your stored items and review their evidence.</p>
+      <p class="muted">This prototype uses a shared local-service PIN, not a named caregiver account.</p>
+      <form id="login-form">
+        <label for="pin">Access PIN</label>
+        <input id="pin" name="pin" type="password" autocomplete="current-password" maxlength="128" required aria-describedby="auth-status">
+        <button id="login" type="submit" disabled>Sign in</button>
+      </form>
+      <p id="auth-status" role="status">Checking sign-in availability…</p>
+      <button id="session-retry" class="secondary" hidden>Check again</button>
+    </section>
+    <div id="app" hidden>
+      <nav class="navigation" aria-label="Main navigation">
+        <button data-view="chat" aria-current="page">Text chat</button>
+        <button data-view="items">Stored items</button>
+        <button data-view="camera">Camera</button>
+      </nav>
+      <div class="session-strip">
+        <span id="camera-summary">Camera off</span>
+        <span id="queue-status" role="status">Saved captures will sync after sign-in.</span>
+      </div>
+      <p id="app-status" class="notice" role="status" hidden></p>
+      <section id="view-chat" aria-labelledby="chat-title">
+        <div class="section-heading"><div><p class="eyebrow">Ask, without guessing</p><h1 id="chat-title" tabindex="-1">Text chat</h1></div><span class="badge">No microphone</span></div>
+        <div class="chat-layout">
+          <div class="card chat-card">
+            <div id="conversation" role="log" aria-label="Conversation" aria-live="polite" aria-relevant="additions">
+              <div class="message assistant"><h2>What would you like to find?</h2><p>Ask about an item you have stored. Pam will distinguish recorded evidence from an unknown or outdated location.</p></div>
+            </div>
+            <form id="chat-form">
+              <label for="chat-text">Your question</label>
+              <textarea id="chat-text" rows="3" maxlength="2000" placeholder="Where did I leave my glasses?" required></textarea>
+              <div class="form-row"><div><label for="chat-mode">Answer mode</label><select id="chat-mode"><option value="local">Local · no API key needed</option><option id="cloud-option" value="cloud" disabled>Cloud · unavailable</option></select></div><button id="chat-send" type="submit">Send question</button></div>
+              <p id="chat-status" role="status" class="muted"></p>
+            </form>
+          </div>
+          <aside class="card guidance"><h2>Evidence first</h2><p>A photo is an observation, not proof that an item is still there.</p><p>Provisional items have not been confirmed as distinct physical objects. A name you give an item does not verify its identity.</p><p id="cloud-status">Optional cloud chat is unavailable unless a provider and bounded policy are configured. Capture and local answers do not need it.</p></aside>
+        </div>
+      </section>
+      <section id="view-items" aria-labelledby="items-title" hidden>
+        <div class="section-heading"><div><p class="eyebrow">Your evidence, in one place</p><h1 id="items-title" tabindex="-1">Stored items</h1></div><button id="refresh-items" class="secondary">Refresh items</button></div>
+        <form id="search-form" class="search-row"><div><label for="search">Search stored items</label><input id="search" type="search" maxlength="200" placeholder="Search by a name or description"></div><button type="submit">Search</button></form>
+        <p id="items-status" role="status">Loading stored items…</p>
+        <div id="items-grid" class="items-grid"></div>
+        <details class="capabilities"><summary>Current capabilities and limitations</summary><ul id="capabilities"></ul></details>
+      </section>
+      <section id="view-camera" aria-labelledby="camera-title" hidden>
+        <div class="section-heading"><div><p class="eyebrow">Deliberate, visible capture</p><h1 id="camera-title" tabindex="-1">Camera</h1></div><span class="badge">Manual mark mode</span></div>
+        <p class="notice">Automatic hand recognition is unavailable: cleared model weights are not installed. Manual marking is a first checkpoint, not automatic daily tracking.</p>
+        <div class="camera-layout">
+          <div class="card"><div class="preview"><video id="preview" muted playsinline aria-label="Live camera preview"></video><p id="preview-placeholder">Camera is off. Nothing is being captured.</p></div><p id="camera-status" role="status">Start only when everyone in view has agreed to be recorded.</p><div class="button-row"><button id="camera-start">Start camera</button><button id="camera-pause" class="secondary" disabled>Pause camera</button><button id="camera-stop" class="secondary" disabled>Stop camera</button></div></div>
+          <div class="card"><h2>Mark an episode</h2><ol><li>Start the camera with the surface in view.</li><li>Before moving an item, choose <strong>Mark before moving</strong>.</li><li>Move the item, then choose <strong>Mark at rest &amp; save</strong>.</li></ol><p>No hand landmarks or automatic recognition are invented. Marks are hints; the local processor may find only context, not an item.</p><div class="stack"><button id="mark-before" disabled>Mark before moving</button><button id="mark-rest" disabled>Mark at rest &amp; save</button><button id="mark-cancel" class="secondary" disabled>Cancel episode</button></div><p id="episode-status" role="status">No episode in progress.</p></div>
+        </div>
+        <div class="card coverage"><h2>Coverage &amp; storage</h2><p>Keep this page visible and the screen unlocked. Backgrounding, locking, pauses and interruptions create coverage gaps. Pam does not promise all-day background capture.</p><p>Unsynced episodes stay in this browser until the server confirms durable retention. Browser storage can be cleared or evicted; it is not a backup. Use a trusted device.</p><p id="storage-status" role="status">Checking local retry storage…</p><button id="retry-queue" class="secondary">Retry saved captures</button><ul id="coverage-log" aria-label="Recent coverage gaps"></ul></div>
+      </section>
+    </div>
+  </main>
+  <dialog id="item-dialog" aria-labelledby="detail-title"><div class="dialog-heading"><h2 id="detail-title">Item details</h2><button id="detail-close" class="secondary">Close</button></div><p id="detail-status" role="status"></p><div id="detail-body"></div><form id="name-form"><label for="item-name">Name this item</label><input id="item-name" maxlength="120" required><button id="name-save" type="submit">Save name</button><p class="muted">Naming is a user note, not identity verification.</p></form><h3>Recorded history</h3><p class="muted">This view is a snapshot. Refresh to include new evidence.</p><button id="detail-refresh" class="secondary">Refresh details</button><ol id="history"></ol></dialog>
+  <noscript><p class="notice">Pam needs JavaScript for sign-in, stored items and camera controls. No camera starts without your action.</p></noscript>
+</body>
+</html>

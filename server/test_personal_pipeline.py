@@ -468,113 +468,18 @@ class EventVerifierTests(IsolatedCase):
         self.assertEqual(self.client.messages.parse.call_count, 3)
 
 
-class ApiFixture(IsolatedCase):
-    asgi = True
+# Approved first-milestone retirement mapping (docs/BUILD_CONTRACT.md):
+# API catalogue/history/image/name replace find/review routes. DB presence never
+# enables anonymous legacy mode. Packet ingress replaces the raw camera relay.
+# Deepgram grant/config/fake-agent and all non-memory services are retired;
+# their redaction/no-fallback oracles move to auth and optional cloud chat.
+# These 23 methods remain ordinary executable tests, not skips. The other test
+# classes and their temporal/static/SQLite assertions are unchanged by this port.
+import test_memory_bootstrap as bootstrap
 
-    def setUp(self):
-        super().setUp()
-        self.repo = self.root / "repo"
-        self.run = self.repo / "perception" / "runs" / "synthetic"
-        self.run.mkdir(parents=True)
-        (self.repo / "server" / "photos").mkdir(parents=True)
-        (self.repo / "phone").mkdir()
-        self.memory = self.run / "memory.jsonl"
-        self.memory.write_text(json.dumps({"event": "placed", "object": "pill bottle", "confidence": .99,
-            "logged_at": "2026-01-01T12:00:00", "location_description": LEGACY_MARKER}) + "\n", encoding="utf-8")
-        self.db = self.run / "objects.sqlite3"
-        self.artifacts = self.run / "object_evidence"
-        self.artifacts.mkdir()
-        system_keys = ("SYSTEMROOT", "WINDIR", "PATH", "TEMP", "TMP", "COMSPEC", "PATHEXT")
-        env = {key: os.environ[key] for key in system_keys if key in os.environ}
-        env.update(CAREGIVER_PIN=PIN, DEEPGRAM_API_KEY=LONG_KEY, PAM_DOSE_CHECK="off",
-                   PAM_OBJECT_DB=str(self.db), MEMORY_JSONL=str(self.memory), HOME_LAT="0", HOME_LON="0",
-                   LOCALAPPDATA=str(self.root / "appdata"), APPDATA=str(self.root / "appdata"),
-                   USERPROFILE=str(self.root / "home"))
-        self.enterContext(patch.dict(os.environ, env, clear=True))
-        self.install_read_guards()
-        self.store = ObjectStore(self.db, clock=lambda: self.now)
-        module_name = "_synthetic_personal_app_" + uuid.uuid4().hex
-        spec = importlib.util.spec_from_file_location(module_name, ROOT / "server" / "app.py")
-        self.app = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = self.app
-        self.addCleanup(sys.modules.pop, module_name, None)
-        spec.loader.exec_module(self.app)
-        self.caregiver = self.app.caregiver
-        self.enterContext(patch.multiple(self.app, ROOT=self.repo, HERE=self.repo / "server", PHONE=self.repo / "phone",
-            MEMORY_JSONL=self.memory, REMINDERS=self.run / "reminders.jsonl", CONTACTS=copy.deepcopy(CONTACTS),
-            CERT=self.root / "synthetic-cert.pem", KEY=self.root / "synthetic-key.pem", _subscribers=set(),
-            _last_fix={}, _last_frame=None, _last_frame_ts=0.0, _active_personal_camera=None))
-        self.enterContext(patch.multiple(self.caregiver, _sessions={}, _failures=[], _now=lambda: self.now,
-                                        _log=lambda message: None))
-        self.enterContext(patch.object(self.app, "log", lambda *args: None))
-        self.enterContext(patch.object(self.app.google_calendar, "calendar_service",
-                                       self.app.google_calendar.CalendarService(self.root / "synthetic-calendar.dat")))
-        self.enterContext(patch.object(self.app.setup, "ENV_PATH", self.root / "synthetic-setup.env"))
-        self.enterContext(patch.multiple(self.app.doses, LOG=self.run / "doses.jsonl",
-                                        CONTACTS=self.root / "synthetic-contacts.json"))
-        self.relay_open = self.enterContext(patch.object(self.app, "open_camera_relay",
-            new=AsyncMock(side_effect=AssertionError("Unexpected camera relay"))))
-        es = importlib.import_module("es")
-        self.legacy_search = self.enterContext(patch.object(es, "search_all",
-            side_effect=AssertionError("Personal queries must never fall back to Elasticsearch or JSONL")))
-        self.client = self.enterContext(TestClient(self.app.app, base_url="https://testserver", raise_server_exceptions=False))
-        self.block_socket_connects()
 
-    def install_read_guards(self):
-        exists, read_text, read_bytes, path_open = Path.exists, Path.read_text, Path.read_bytes, Path.open
-        real_contacts = ROOT / "server" / "contacts.json"
-
-        def protected(path):
-            path = Path(path).resolve()
-            if path.is_relative_to(self.root):
-                return False
-            if path.name in {".env", "contacts.json", "cert.pem", "key.pem", "google-calendar.dat"}:
-                return True
-            return path.is_relative_to(ROOT) and (path.suffix == ".jsonl" or
-                any(part in {"runs", "photos", "faces", "gallery"} for part in path.parts))
-
-        def safe_exists(path):
-            return False if protected(path) else exists(path)
-
-        def safe_read_text(path, *args, **kwargs):
-            if Path(path).resolve() == real_contacts:
-                return json.dumps(CONTACTS)
-            if protected(path):
-                raise AssertionError("Attempt to read real private data")
-            return read_text(path, *args, **kwargs)
-
-        def safe_read_bytes(path, *args, **kwargs):
-            if protected(path):
-                raise AssertionError("Attempt to read real private bytes")
-            return read_bytes(path, *args, **kwargs)
-
-        def safe_open(path, *args, **kwargs):
-            if protected(path):
-                raise AssertionError("Attempt to open real private data")
-            return path_open(path, *args, **kwargs)
-
-        for name, replacement in (("exists", safe_exists), ("read_text", safe_read_text),
-                                  ("read_bytes", safe_read_bytes), ("open", safe_open)):
-            self.enterContext(patch.object(Path, name, replacement))
-
-    def login(self):
-        response = self.client.post("/api/caregiver/login", json={"pin": PIN})
-        self.assertEqual(response.status_code, 200, response.text)
-        return response
-
-    def review(self, *, result=None, store=None, **candidate_changes):
-        store = self.store if store is None else store
-        candidate_changes.setdefault("track", str(uuid.uuid4()))
-        candidate = self.candidate(self.artifacts, **candidate_changes)
-        store.enqueue(candidate)
-        store.gallery(candidate["event_id"])
-        event = store.apply_result(candidate["event_id"], result or verification())
-        return candidate, event
-
-    def tracked(self):
-        candidate, event = self.review()
-        self.store.confirm_object(event["object_id"], name="Test bottle")
-        return candidate, event["object_id"]
+class ApiFixture(bootstrap.MemoryApiFixture):
+    pass
 
 
 class ObjectApiSecurityTests(ApiFixture):

@@ -907,3 +907,86 @@ python -B server/test_personal_pipeline.py EventVerifierTests PublicFileSecurity
   `ObjectApiSecurityTests`, 7 `CameraRelaySecurityTests`, 4 `TokenSecurityTests`.
   Synthetic-frame and worker-boundary tests now run and pass; API, relay and
   token assertions remain unverified until the app/auth split is completed.
+
+## Research provenance intake — 2026-10-07
+
+- `docs/RESEARCH_LOG.md` is the research index and decision/gate register;
+  `docs/RESEARCH_EVIDENCE.md` records source versions, hashes and rights gaps;
+  `docs/RESEARCH_EXPERIMENTS.md` preserves protocols, failures and reruns.
+  Reported observations, independently checked facts and predictions are distinct.
+- The supplied final review is an external input, not approval to replace Part 1,
+  purge artifacts or rewrite history. Part 1 was left unchanged; new architecture
+  gates await coordinator decisions. Missing raw logs or license primaries remain
+  missing evidence, not implicit passes or commercial/legal clearance.
+- Before the documentation additions, read-only Git checks confirmed clean `main`
+  at `d94cc5d`, three ahead of the local `origin/main` reference; no fetch was done.
+  This intake reran no application tests or model/camera experiments. X-005 in the
+  experiment ledger records the reported baseline and its 23 blocked test bodies.
+- npm registry metadata independently confirms `@mediapipe/tasks-vision@1.1.0`
+  was published `2026-10-06T17:55:06.100Z`. This verifies a recent package release,
+  not Safari performance, model-weight rights or compatibility. A-020 records the
+  primary URLs and metadata query; no package, WASM or model was downloaded.
+- External reports and the original ZIP were initially hashed, not copied into
+  the repo; that archival limitation was resolved by the coordinator below.
+
+## Continuation snapshot and current UI scope — 2026-10-07
+
+- Start continuation at `docs/CONTINUATION_HANDOFF.md`. It records code state,
+  all seven agents' findings, unresolved conflicts, the fresh 141-method baseline
+  (118 passed, 23 setup errors), corrected cost arithmetic and next checkpoints.
+- Latest explicit user correction: the browser SHOULD include an authenticated
+  stored-items/memories browser. The earlier request to omit it was a typo.
+- Current interaction scope is standard TEXT CHAT. Do not integrate Deepgram,
+  Voice Agent or speech features now. Legacy voice code remains to be retired;
+  this documentation update does not claim that implementation is complete.
+- Latest user requirement: capture, local perception/indexing, durable memory
+  updates and authenticated browsing must work with NO chatbot API key. Only
+  optional user-initiated cloud chat may require one. Lazy provider construction;
+  missing/invalid credentials, outages and exhausted chat budgets must not stop
+  memory workers. Preserve local-service auth independently of provider keys.
+  `T-NO-CHAT-KEY` is a required, not-yet-run integration gate in the handoff.
+  Safari background/screen-lock gaps must be reported, not hidden as coverage.
+- Supplied review Markdown is preserved under `docs/review-inputs-20261006/`;
+  the decision document's SHA-256 matches the original. Available verbatim current
+  agent Round-B responses are in `docs/agent-round-b-raw.tar.gz`, mapped in the
+  handoff. These are unapproved inputs and include corrected/rejected proposals.
+- No revision-5 gate has passed and no builder has started. Real iPhone tests are
+  deferred by the user. No new production code, packages or model weights were
+  changed by the handoff work. No push or destructive operation was performed.
+- The assistant cannot monitor remaining account quota. Preserve the handoff
+  proactively; `/session-stats` and supported CLI `/usage` show session usage,
+  not an account-balance feed available to the model.
+
+## Scoped software design gate and active build — 2026-10-07
+
+- The coordinator subsequently closed the DESIGN gate for the first functional
+  software milestone and started builders A/B/C plus the independent test lead.
+  Earlier “builders not started” notes describe the pre-build checkpoint, not now.
+  No completed production changes or post-CP0 verdict have been relayed to this
+  documentation checkpoint. CP0 remains 141 methods / 118 pass / 23 setup errors,
+  0 assertion failures and 0 skips; it is not an all-green result.
+- Authority is v4's broad principles plus latest user scope and
+  `docs/BUILD_CONTRACT.md` for the first milestone's exact APIs. Read that contract;
+  agent “freeze-ready” statements are not authority. No full v5/model/device/pilot
+  approval is implied. The canonical v4 file has only an additive scope pointer.
+- Required: authenticated Stored items and standard TEXT chat, no Deepgram/speech.
+  Core capture/local processing/persistence/catalogue and local answers need no
+  chatbot key. Only explicit optional cloud chat may need a provider and bounded
+  policy; keys alone never authorize spend. Actual iPhone testing remains later;
+  the small per-user subscription has no chosen price or launch market.
+- Milestone choices include PERSIST/FULL, non-destructive migration inspection,
+  explicit logical erasure/tombstones and private profile-scoped data, persisted
+  UUID retries with transport-SHA ACKs separate from semantic digests, causal
+  first-valid bursts with capture-resolution keyframes, distinct world/image
+  coordinates and retained cannot-links. No SQL-role fiction, forensic-erasure
+  claim, automatic real-certificate overwrite or history purge is authorized.
+- Unset models must be visibly unavailable/manual, never simulated recognition
+  presented as real. Automatic daily tracking still needs cleared local hand/image
+  adapters and measurements. Software fixtures cannot pass that later gate.
+- Builders own production only; tester owns tests, fixtures, independent oracles
+  and verdicts. Deepgram positive cases require explicit retirement/replacement
+  mapping, not skips; see the handoff. DOC owns documentation/provenance.
+- Parent preserved the supplied reviews and four available raw Round-B responses;
+  DOC rechecked their hashes. The handoff's corrected hypothetical cost table and
+  existing `fail()` rule remain: sent/unknown reservations are preserved, not
+  refunded merely by failure or lease expiry. No measured cloud margin is claimed.

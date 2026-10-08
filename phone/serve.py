@@ -31,7 +31,10 @@ First connection from the phone, once per laptop:
 import argparse
 import functools
 import http.server
+import ipaddress
+import os
 import socket
+import time
 import ssl
 import subprocess
 import sys
@@ -40,6 +43,15 @@ from urllib.parse import unquote, urlsplit
 
 HERE = Path(__file__).resolve().parent
 CERT, KEY = HERE / "cert.pem", HERE / "key.pem"
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(HERE.parent))
+from perception.private_files import private_append_fd
+
+TLS_ROTATION = ("TLS pair is incomplete, invalid, expired or not valid for this IP. "
+                "Refusing to overwrite it. Stop the service and manually archive both "
+                "cert.pem and key.pem, then rerun to generate a new pair; explicitly "
+                "approve the new certificate on your devices. No trust store was changed.")
 
 
 class PublicFiles(http.server.SimpleHTTPRequestHandler):
@@ -58,7 +70,7 @@ class PublicFiles(http.server.SimpleHTTPRequestHandler):
             if path == root:
                 path = (root / "index.html").resolve()
             relative = path.relative_to(root)
-            page = relative.as_posix() in {"index.html", "agent.html"}
+            page = relative.as_posix() in {"index.html", "agent.html", "memory.html"}
             asset = (len(relative.parts) > 1 and relative.parts[0] == "assets"
                      and path.suffix.lower() in self.ASSET_SUFFIXES
                      and not any(part.startswith(".") or ":" in part for part in relative.parts))
@@ -98,22 +110,70 @@ def ensure_cert(ip: str) -> None:
     ignored the common name for host matching for years and will reject a cert
     without a matching SAN even after you accept the warning.
     """
+    if not isinstance(ip, str) or len(ip) > 45 or "%" in ip:
+        raise ValueError("A bounded numeric IPv4 or IPv6 address is required.")
+    try:
+        ip = str(ipaddress.ip_address(ip))
+    except ValueError:
+        raise ValueError("A numeric IPv4 or IPv6 address is required.") from None
+    if CERT.is_symlink() or KEY.is_symlink():
+        raise FileExistsError(TLS_ROTATION)
+
+    def protect_key():
+        # Applies owner-only POSIX mode / protected Windows DACL before key bytes.
+        fd = private_append_fd(KEY)
+        os.close(fd)
+
+    def validate_pair():
+        try:
+            decoded = ssl._ssl._test_decode_cert(str(CERT))
+            sans = decoded.get("subjectAltName", ())
+            ips = {ipaddress.ip_address(value) for kind, value in sans if kind == "IP Address"}
+            if ipaddress.ip_address(ip) not in ips or ipaddress.ip_address("127.0.0.1") not in ips:
+                raise ValueError("SAN mismatch")
+            if ("DNS", "localhost") not in sans:
+                raise ValueError("Missing localhost SAN")
+            if not (ssl.cert_time_to_seconds(decoded["notBefore"]) <= time.time()
+                    < ssl.cert_time_to_seconds(decoded["notAfter"])):
+                raise ValueError("Invalid validity period")
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(CERT, KEY)
+        except Exception:
+            raise FileExistsError(TLS_ROTATION) from None
+
     if CERT.exists() and KEY.exists():
+        protect_key()
+        validate_pair()
         return
     if CERT.exists() or KEY.exists():
-        raise FileExistsError("Incomplete TLS pair; refusing to overwrite an existing certificate or key.")
+        raise FileExistsError(TLS_ROTATION)
+    # Reserve both names exclusively; no pre-existing file can be overwritten.
+    # On any failure leave the partial pair for explicit manual inspection/rotation.
+    for path in (KEY, CERT):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+        except OSError:
+            raise FileExistsError(TLS_ROTATION) from None
+    protect_key()
     print(f"generating a self-signed certificate for {ip} ...")
-    subprocess.run(
-        ["openssl", "req", "-config", "-", "-x509", "-newkey", "rsa:2048", "-sha256", "-nodes",
-         "-keyout", str(KEY), "-out", str(CERT), "-days", "365",
-         "-subj", "/CN=compass-laptop",
-         "-addext", f"subjectAltName=IP:{ip},IP:127.0.0.1,DNS:localhost",
-         "-addext", "basicConstraints=critical,CA:FALSE",
-         "-addext", "keyUsage=critical,digitalSignature,keyEncipherment",
-         "-addext", "extendedKeyUsage=serverAuth"],
-        check=True, capture_output=True, text=True,
-        input="[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=compass-laptop\n",
-    )
+    try:
+        subprocess.run(
+            ["openssl", "req", "-config", "-", "-x509", "-newkey", "rsa:2048", "-sha256", "-nodes",
+             "-keyout", str(KEY), "-out", str(CERT), "-days", "365",
+             "-subj", "/CN=compass-laptop",
+             "-addext", f"subjectAltName=IP:{ip},IP:127.0.0.1,DNS:localhost",
+             "-addext", "basicConstraints=critical,CA:FALSE",
+             "-addext", "keyUsage=critical,digitalSignature,keyEncipherment",
+             "-addext", "extendedKeyUsage=serverAuth"],
+            check=True, capture_output=True, text=True, timeout=30,
+            input="[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=compass-laptop\n",
+        )
+    except (subprocess.SubprocessError, OSError):
+        # Never stringify provider output: OpenSSL errors can contain private material.
+        raise RuntimeError("Certificate generation failed. " + TLS_ROTATION) from None
+    protect_key()
+    validate_pair()
     print(f"wrote {CERT.name} and {KEY.name}")
 
 
@@ -128,9 +188,8 @@ def main() -> None:
         ensure_cert(ip)
     except FileExistsError as e:
         sys.exit(str(e))
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        sys.exit(f"could not generate a certificate with openssl: {e}\n"
-                 f"Install openssl, or drop your own cert.pem/key.pem into {HERE}.")
+    except (subprocess.SubprocessError, OSError, RuntimeError, ValueError):
+        sys.exit("Could not prepare a private TLS certificate. " + TLS_ROTATION)
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(CERT, KEY)

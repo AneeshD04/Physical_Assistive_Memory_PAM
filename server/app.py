@@ -1,3 +1,18 @@
+"""Supported entry point for the standalone local-memory milestone."""
+from pathlib import Path as _Path
+import sys as _sys
+
+if __package__ in (None, ""):
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+
+from server.memory_app import app, create_app, main
+
+if __name__ == "__main__":
+    main()
+
+# Historical source is retained verbatim as inert text, not imported or executed.
+# This preserves its comments while retiring all old handlers and startup effects.
+_RETIRED_SOURCE = r'''
 """Pam — the voice-agent backend. One FastAPI app serving the phone UI and every
 function the Deepgram agent can call.
 
@@ -1311,3 +1326,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+'''
+del _RETIRED_SOURCE

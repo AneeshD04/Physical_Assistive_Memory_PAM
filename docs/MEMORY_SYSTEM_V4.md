@@ -2,6 +2,14 @@
      Part 1 (the spec) is authoritative. Part 2 is the review log; where they differ, Part 1 wins.
      Frozen for build: section 10 steps 1 and 2 are cleared to start. -->
 
+> **Scoped milestone overlay — 2026-10-07:** The v4 text below retains the broad
+> principles and review history; it has not been rewritten as a full v5 spec.
+> For the first functional software milestone, follow the latest user scope and
+> [BUILD_CONTRACT.md](BUILD_CONTRACT.md), which governs conflicting interface and
+> implementation proposals. The coordinator closed that **design** gate and started
+> builders/testing; this is not completed implementation or model/device/pilot
+> validation. See [CONTINUATION_HANDOFF.md](CONTINUATION_HANDOFF.md) for work state.
+
 # pam Memory Layer: Response to Review and v4 Direction
 
 Oct 3, 2026 · @aneesh

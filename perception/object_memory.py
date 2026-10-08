@@ -18,9 +18,11 @@ from typing import Literal
 try:
     from .capture import finite_number, location_at
     from .private_files import private_append_fd
+    from .episode_store import EpisodeStoreMixin, EPISODE_SCHEMA
 except ImportError:
     from capture import finite_number, location_at
     from private_files import private_append_fd
+    from episode_store import EpisodeStoreMixin, EPISODE_SCHEMA
 
 
 class InteractionEvidence(BaseModel):
@@ -99,7 +101,7 @@ def _private_file(path):
     os.close(fd)
 
 
-class ObjectStore:
+class ObjectStore(EpisodeStoreMixin):
     def __init__(self, path, profile_id="local", clock=time.time, create=True):
         self.path, self.profile_id, self.clock = Path(path).resolve(), str(profile_id), clock
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", self.profile_id):
@@ -108,7 +110,10 @@ class ObjectStore:
             raise FileNotFoundError(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as db:
+            # One additive transaction, including the version marker. Legacy records,
+            # spending reservations and in-flight leases are deliberately untouched.
             db.executescript("""
+                BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS objects (
                     object_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, name TEXT NOT NULL,
                     category TEXT NOT NULL, status TEXT NOT NULL, created_at REAL NOT NULL);
@@ -134,22 +139,32 @@ class ObjectStore:
                 CREATE TABLE IF NOT EXISTS decisions (
                     decision_id INTEGER PRIMARY KEY, profile_id TEXT NOT NULL, at REAL NOT NULL,
                     action TEXT NOT NULL, event_id TEXT, object_id TEXT, detail TEXT NOT NULL);
-                PRAGMA user_version=1;
-            """)
+            """ + EPISODE_SCHEMA)
+            if db.execute("PRAGMA user_version").fetchone()[0] < 2:
+                db.execute("PRAGMA user_version=2")
 
     @contextmanager
     def _connection(self):
+        # Reject a future SQLite schema before creating/changing a journal or ACL.
+        # SQLite's committed user_version is the big-endian header word at 60.
+        # The SQL check below remains authoritative after opening the connection.
+        if self.path.is_file():
+            with self.path.open("rb") as source:
+                header = source.read(100)
+            if header[:16] == b"SQLite format 3\x00" and len(header) == 100:
+                if int.from_bytes(header[60:64], "big") not in (0, 1, 2):
+                    raise ValueError("Unsupported object database version; do not overwrite it")
         _private_file(self.path)
         _private_file(Path(str(self.path) + "-journal"))
         db = sqlite3.connect(str(self.path), timeout=10)
         try:
             db.row_factory = sqlite3.Row
+            if db.execute("PRAGMA user_version").fetchone()[0] not in (0, 1, 2):
+                raise ValueError("Unsupported object database version; do not overwrite it")
             db.execute("PRAGMA journal_mode=PERSIST")
             db.execute("PRAGMA synchronous=FULL")
             db.execute("PRAGMA temp_store=MEMORY")
             db.execute("PRAGMA foreign_keys=ON")
-            if db.execute("PRAGMA user_version").fetchone()[0] not in (0, 1):
-                raise ValueError("Unsupported object database version; do not overwrite it")
             with db:
                 yield db
         finally:
