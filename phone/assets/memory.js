@@ -19,12 +19,38 @@ function safeImageURL(item) {
     return url.origin === location.origin && !url.username && !url.password && !url.search && !url.hash && url.pathname === expected ? expected : null;
   } catch { return null; }
 }
+function targetBox(item) {
+  // reference_image.bbox is [x1, y1, x2, y2] in the evidence image's own pixels.
+  const reference = item.reference_image;
+  const box = reference && typeof reference === 'object' ? reference.bbox : null;
+  if (!Array.isArray(box) || box.length !== 4 || !box.every(value => Number.isFinite(value) && value >= 0)) return null;
+  const [x1, y1, x2, y2] = box;
+  return x2 > x1 && y2 > y1 ? { x1, y1, x2, y2 } : null;
+}
 function image(item) {
   const url = safeImageURL(item);
   if (!url) return node('p', 'No evidence image available.', 'muted');
-  const img = node('img'); img.src = url; img.alt = `Recorded evidence for ${item.name || 'unnamed item'}; not a live view.`; img.loading = 'lazy'; img.decoding = 'async'; img.className = 'evidence';
-  img.addEventListener('error', () => img.replaceWith(node('p', 'Evidence image is unavailable or your session has expired.', 'muted')), { once: true });
-  return img;
+  const box = targetBox(item);
+  const verified = item.identity_status === 'trusted';
+  const figure = node('figure', null, 'evidence-figure');
+  const img = node('img'); img.src = url; img.loading = 'lazy'; img.decoding = 'async'; img.className = 'evidence';
+  img.alt = `Recorded evidence for ${item.name || 'unnamed item'}; not a live view.` + (box ? (verified ? ' The recorded item is outlined.' : ' The outlined region is where a change was recorded; the item identity is unverified.') : '');
+  img.addEventListener('error', () => figure.replaceWith(node('p', 'Evidence image is unavailable or your session has expired.', 'muted')), { once: true });
+  img.addEventListener('load', () => {
+    const width = img.naturalWidth, height = img.naturalHeight;
+    if (!(width > 0 && height > 0)) return;
+    // Size the figure to the image itself so the overlay percentages are exact.
+    figure.style.aspectRatio = `${width} / ${height}`;
+    figure.style.width = `min(100%, ${(340 * width / height).toFixed(1)}px)`;
+    if (!box || box.x2 > width || box.y2 > height) return;
+    const target = node('div', null, verified ? 'target' : 'target target-unverified');
+    target.setAttribute('aria-hidden', 'true');
+    target.style.left = `${(100 * box.x1 / width).toFixed(2)}%`; target.style.top = `${(100 * box.y1 / height).toFixed(2)}%`;
+    target.style.width = `${(100 * (box.x2 - box.x1) / width).toFixed(2)}%`; target.style.height = `${(100 * (box.y2 - box.y1) / height).toFixed(2)}%`;
+    figure.append(target);
+  }, { once: true });
+  figure.append(img);
+  return figure;
 }
 function describe(item, target) {
   target.append(node('p', `Identity: ${item.identity_status || 'unknown'}`, 'badge'));

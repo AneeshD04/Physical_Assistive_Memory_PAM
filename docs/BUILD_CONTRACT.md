@@ -72,7 +72,7 @@ A extends ObjectStore with:
 - `ingest_episode(raw: bytes) -> dict` (ack fields without server wrapper).
 - `process_pending(*, processor=None, limit=8) -> dict` (bounded, idempotent, fenced claims; defaults real localizer, never a provider).
 - `list_items(query='', limit=50) -> list[dict]`, `get_item(item_id) -> dict`, `item_history(item_id) -> list[dict]`.
-- `item_image(item_id) -> Path | None` (profile-scoped approved evidence only).
+- `item_image(item_id) -> bytes | None` (profile-scoped approved evidence only; the stored keyframe bytes, unmodified; decision 3 below).
 - `rename_item(item_id, name) -> dict` (explicit user naming, audit).
 - `answer_text(text, *, as_of=None) -> dict` (local, evidence-grounded).
 - `rebuild_all(*, as_of=None) -> dict`, `migration_plan() -> dict` (non-destructive inspection), `redact_item(item_id) -> dict` (explicit authorized logical deletion, tests only until privacy endpoint approved).
@@ -92,7 +92,7 @@ Ingest durability and processing are separate. B calls process_pending off the e
 
 GET /api/items?q=&limit= -> {items:[Item],capabilities:[...]}; GET /api/items/{id} -> Item; GET /api/items/{id}/history -> {observations:[...]}; GET /api/items/{id}/image -> authenticated no-store image or404; POST /api/items/{id}/name {name} -> Item. Use bounded text/query limits; IDs cannot expose another profile or arbitrary files.
 
-Item minimum fields: item_id, name, identity_status, relevance, location_status, observed_at_ms (or null), location_text (or null), stale_reason (or null), index_pending, image_url (or null), source. B adds only a validated relative image URL, never filesystem paths. All personal responses no-store. Photos are evidence for that candidate/member, not invented matches.
+Item minimum fields: item_id, name, identity_status, relevance, location_status, observed_at_ms (or null), location_text (or null), stale_reason (or null), index_pending, image_url (or null), source, reference_image (`{frame_id, bbox}` in evidence-image pixels, or null). `location_status` takes the spec vocabulary `placed | sighted | inferred | stale | unknown` (decision 1 below). B adds only a validated relative image URL, never filesystem paths. All personal responses no-store. Photos are evidence for that candidate/member, not invented matches.
 
 POST /api/chat {text,mode:'local'|'cloud'} -> Answer. text1..2000chars, mode defaults local. Answer minimum: shape confident|hedged|abstain|group|clarify, text, members:[Item], index_pending, question/options when clarifying. Local answer requires no chat keys; uncalibrated default cannot be confident. No matching evidence -> abstain without nearest-candidate image. Stale prior evidence -> hedged; no historical evidence -> abstain. Multiple clear query candidates -> bounded clarification; UI can resubmit selected item/name as text. Do not let cloud prose override ledger identity/location certainty.
 
@@ -105,6 +105,21 @@ C builds one app in memory.html with sign-in, Text chat, Stored items, Camera. N
 Camera getUserMedia requests audio:false. Capture-resolution bitmaps retained2s with <=20 active ring entries; separately <=8 selected keyframes and <=10 downscaled burst entries. Causal first-valid burst after observed busy/motion; no future midpoint. Close all resources on eviction/abort/pause/stop and track queue/byte caps. Model unavailable -> clearly labeled manual episode marking, not false automatic capture. Page visibility/track-ended/worker failure records coverage gaps. Serialized packets persist with their UUID/digest until matching durable ack; storage denial/full/expiry produces explicit coverage loss. Do not collect bystanders/real household footage during automated tests.
 
 A publishes pure controller reference and its exact state input/output early; C ports the same thresholds. Tester owns shared golden traces and executes both languages, not comparing two copied expected outputs.
+
+## Contract decisions after CP0 (architect, 2026-10-07)
+
+The three builder-versus-tester mismatches that left the bootstrap suite at 17/20 were contract gaps, not bugs. Decided and applied; both suites are green against them.
+
+1. **Location vocabulary.** The catalogue and projection use the spec's `location_status` set, `placed | sighted | inferred | stale | unknown`; the builder's `known` is retired. Location evidence and identity are independent fields: a provisional identity can carry a `sighted` location; only a trusted identity with a recorded surface is `placed`; an observed pickup is `stale`; an `uncertain` outcome or an implausible capture clock is `unknown`. `inferred` (containment) has no producer yet and is never emitted. The local text answer is `confident` only on trusted + `placed`.
+2. **Trusted-observation gate.** An observation is trusted only when the processor sets `identity_state == "trusted"` and its `calibration` record carries `approved: true` and a non-empty `calibration_id`. A `valid` flag, a confidence number or a `fixture_only` marker is not approval. The fixture processor sends exactly this record; it remains a code-only injection.
+3. **Superset versus conflict.** A revision is a superset only when it keeps every prior keyframe, burst frame, landmark sample and gap, the same anchors, capture geometry and `capture_mode`, and the same `outcome_hint`. A changed hint retracts the phone's earlier claim and is a conflict: retained, acknowledged as `conflict`, never reprocessed.
+4. **The photo is the answer.** `GET /api/items/{id}/image` returns the stored keyframe bytes unmodified (`item_image -> bytes | None`); nothing is written to disk to serve it, so no derived-crop media exists to redact. The target region travels as `reference_image = {frame_id, bbox}` on the item and the browser outlines it on the photo (dashed when identity is unverified). Identity crops are a later stage's in-memory concern.
+5. **Test oracle.** `wait_items` in the bootstrap fixture waits for `index_pending` to clear, not for an item count: a durable ack precedes processing in the app's own worker, so a count alone can return the projection from before the latest episode.
+6. **Builder seam caught at CP1.** B's asset allowlist in `server/memory_app.py` listed planned module names, not the files C shipped: `memory-camera.js` and `grayscale-jpeg.js` returned 404 from the combined app, so the page could not load at the supported entry point (only `phone/serve.py`'s suffix allowlist served it). The allowlist now names exactly what `memory.html` loads, and bootstrap `test_served_page_module_graph_is_complete` walks the page's stylesheet, script and ES-module imports through the app. A module C adds must be listed there.
+
+### Retirement map (legacy `server/test_personal_pipeline.py` API tests)
+
+The 23 legacy HTTP/WebSocket API methods (ObjectApiSecurityTests, CameraRelaySecurityTests, TokenSecurityTests) are retired in place with a method-by-method map at the top of `PortedApiSecurityTests` in that file: 12 are ported to the replacement routes through `bootstrap.MemoryApiFixture`'s shared `check_*` oracles, 10 are retired with the named bootstrap test that keeps their security coverage, and one is a recorded gap (review link/ignore corrections, a later milestone; rename is ported). The certificate tests keep their semantics and add one: an existing pair is never overwritten, and an invalid, incomplete, expired or wrong-IP pair now makes `ensure_cert` raise `FileExistsError(TLS_ROTATION)` instead of returning. That class is the one permitted subprocess in the suite: the real `openssl`, serve.py's exact command line, into a temporary directory (skipped visibly when `openssl` is not on PATH; serve.py cannot generate a pair there either).
 
 ## Acceptance and next stages
 

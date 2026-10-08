@@ -14,7 +14,7 @@ import threading
 import time
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from starlette.background import BackgroundTask
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,10 +24,12 @@ SESSION_TTL = 8 * 60 * 60
 COOKIE = "pam_session"
 ITEM_ID = re.compile(r"^[A-Za-z0-9_-]{1,160}$")
 # Explicit public resources, never a directory mount or extension-only whitelist.
+# Exactly the files phone/memory.html and its module graph load. The bootstrap
+# suite walks that graph through this app, so a module C adds must be listed
+# here or the page fails to load at the supported entry point.
 PUBLIC_ASSETS = frozenset({
-    "memory.css", "memory.js", "capture.js", "controller.js", "mirror.js",
-    "episode.js", "pam-logo.png", "memory-controller.js", "memory-capture.js",
-    "memory-mirror.js", "memory-api.js", "memory-queue.js",
+    "memory.css", "memory.js", "memory-camera.js", "memory-queue.js",
+    "controller.js", "grayscale-jpeg.js", "pam-logo.png",
 })
 
 
@@ -203,6 +205,12 @@ def create_app(database_path=None, profile_id="local", processor=None, clock=Non
         fields = ("item_id", "name", "identity_status", "relevance", "location_status",
                   "observed_at_ms", "location_text", "stale_reason", "index_pending", "source")
         result = {key: item.get(key) for key in fields}
+        # reference_image = {frame_id, bbox}: where the target is in the evidence image
+        # (capture-resolution pixels). Present only when the store recorded one.
+        reference = item.get("reference_image")
+        result["reference_image"] = (dict(reference) if isinstance(reference, dict)
+                                     and isinstance(reference.get("frame_id"), str)
+                                     and isinstance(reference.get("bbox"), list) else None)
         ident = item.get("item_id", "")
         result["image_url"] = (f"/api/items/{ident}/image" if isinstance(ident, str)
                                and ITEM_ID.fullmatch(ident) else None)
@@ -287,10 +295,11 @@ def create_app(database_path=None, profile_id="local", processor=None, clock=Non
 
     @app.get("/api/items/{ident}/image")
     async def image(ident: str):
-        path = await call_store("item_image", item_id(ident))
-        if path is None or not Path(path).is_file():
+        # The stored keyframe bytes, unmodified; nothing is written to disk to serve it.
+        data = await call_store("item_image", item_id(ident))
+        if not data:
             raise HTTPException(404, "Image not found.")
-        return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+        return Response(content=bytes(data), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     @app.post("/api/items/{ident}/name")
     async def rename(ident: str, request: Request):

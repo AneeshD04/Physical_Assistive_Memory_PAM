@@ -17,6 +17,7 @@ import itertools
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import sys
 import tempfile
@@ -213,7 +214,7 @@ class MemoryApiFixture(unittest.TestCase):
                 "outcome": "placed_on_surface", "continuity_id": "fixture-continuity-001",
                 "identity_state": identity, "location_text": "fixture left" if phase == 0 else "fixture right",
                 "confidence": 1.0, "confidence_basis": "TEST ONLY: manually authored synthetic pixel golden",
-                "calibration": {"valid": True, "fixture_only": True, "calibration_id": "synthetic-only-1"}}
+                "calibration": {"approved": True, "fixture_only": True, "calibration_id": "synthetic-only-1"}}
         return packet
 
     def post_packet(self, packet, *, client=None, raw=None):
@@ -252,11 +253,17 @@ class MemoryApiFixture(unittest.TestCase):
         return body["items"]
 
     def wait_items(self, client=None, *, minimum=1):
+        """The catalogue once local processing has drained: at least `minimum` items
+        and no index_pending flag. A durable ack precedes processing in the app's own
+        worker, so an item count alone can return the projection from before the
+        latest episode (a relocation would read as the old location)."""
         deadline = time.monotonic() + 3
         while True:
             items = self.catalogue(client)
-            if len(items) >= minimum or time.monotonic() >= deadline:
+            drained = not any(item["index_pending"] for item in items)
+            if (len(items) >= minimum and drained) or time.monotonic() >= deadline:
                 self.assertGreaterEqual(len(items), minimum, "Durable episode was not locally processed into catalogue evidence")
+                self.assertTrue(drained, "Local processing did not drain within the wait")
                 return items
             time.sleep(.02)
 
@@ -562,6 +569,29 @@ class BootstrapContractTests(MemoryApiFixture):
         response = client.post("/api/chat", json={"text": "where is my medication"}, headers={"origin": ORIGIN})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertNotEqual(response.json()["shape"], "confident")
+
+    def test_served_page_module_graph_is_complete(self):
+        # The combined app is the supported entry point: every stylesheet, script and
+        # ES-module import reachable from GET / must be served by the asset allowlist.
+        page = self.client.get("/")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("text/html", page.headers.get("content-type", ""))
+        pending = re.findall(r'(?:src|href)="(/assets/[^"]+)"', page.text)
+        self.assertTrue(pending, "memory.html references no /assets files")
+        seen = set()
+        while pending:
+            path = pending.pop()
+            if path in seen:
+                continue
+            seen.add(path)
+            with self.subTest(asset=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200, f"{path} is not served by the app")
+                if path.endswith(".js"):
+                    self.assertIn("javascript", response.headers.get("content-type", ""))
+                    for relative in re.findall(r"""from\s+['"](\.\/[^'"]+)['"]""", response.text):
+                        pending.append("/assets/" + relative[2:])
+        self.assertGreaterEqual(len(seen), 4)
 
 
 class PacketContractTests(unittest.TestCase):

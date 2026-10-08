@@ -32,8 +32,8 @@ Browser scope limitation: automatic collection works while the camera page is ac
 - Active project: `C:/Users/anees/My Programs/PAM`.
 - Origin: `https://github.com/AneeshD04/Physical_Assistive_Memory_PAM.git`.
 - Branch: `main`.
-- Last production-code commit: `d94cc5da1928384ed08bcca4e38811aade16d43a`.
-- Local branch is three commits ahead of the locally cached `origin/main` (`af11142`). No push or fetch was done to establish the remote's latest state.
+- Last production-code commit: `d94cc5da1928384ed08bcca4e38811aade16d43a` (Devin). The user then committed the whole milestone-1 working tree as `1fd24c8` ("Milestone 1 builder work") on 2026-10-07 22:15 and pushed; `main` and `origin/main` were equal at that point.
+- **CP1 (architect, 2026-10-07, after `1fd24c8`, uncommitted until the user commits):** the three bootstrap contract mismatches are decided and applied (`docs/BUILD_CONTRACT.md`, "Contract decisions after CP0"), the legacy pipeline API tests are retired in place with a method-by-method map, the certificate tests run the real `openssl`, and the browser outlines the target region on the evidence photo. Changed files: `perception/episode_store.py`, `server/memory_app.py`, `server/test_memory_bootstrap.py`, `server/test_personal_pipeline.py`, `phone/assets/memory.js`, `phone/assets/memory.css`, `docs/BUILD_CONTRACT.md`, this file. See section 5 for the reproduced counts.
 - Archive project: `C:/Users/anees/hackmit`. Do NOT edit it or add its application modules to PYTHONPATH to make PAM tests pass.
 - Existing archive virtual environment is used ONLY as an interpreter/dependency runtime: `C:/Users/anees/hackmit/perception/.venv/Scripts/python.exe`.
 - Before documentation work, the tree was clean at `d94cc5d`. There are now uncommitted research documents and a CLAUDE appendix. This handoff and preserved input archives are also uncommitted unless a later checkpoint explicitly says otherwise. Do not reset/clean the working tree: that would lose the handoff.
@@ -123,6 +123,20 @@ The current perception entry point still uses YOLOE/BoT-SORT and the old motion/
 `server/app.py` still imports absent legacy modules, beginning with `doses`; `server/object_api.py` imports absent `caregiver`. The app cannot import as currently checked out. There is no standalone auth shim yet. Old Deepgram/face/dose/calendar/etc routes still exist in source; their modules and behavior are not part of the desired memory-only product. Current user now explicitly requires text chat and NO Deepgram/speech integration.
 
 ## 5. Most recent independently reproduced baseline
+
+### CP1, 2026-10-07 (architect; Linux sandbox, Python 3.10.12, same package majors)
+
+**151 methods attempted, 151 passed, 0 errors, 0 skips** (capture 8, interaction 7, private_files 6, lifecycle 61, memory_bootstrap 21, personal_pipeline 48). Mutation check: reverting the `outcome_hint` superset rule and the `placed` vocabulary each fails exactly its bootstrap test. Still not an integration result for real vision: every observation in these suites is a fixture or a synthetic rectangle.
+
+| Suite | CP0 | CP1 | What changed |
+| --- | ---: | ---: | --- |
+| `server/test_memory_bootstrap.py` | 17 / 20 | 21 / 21 | three contract decisions (BUILD_CONTRACT "after CP0" 1-4), the `wait_items` oracle (5), and a new module-graph test that caught B's asset allowlist missing two of C's modules (6) |
+| `server/test_personal_pipeline.py` | 34 pass, 25 broken of 59 | 48 / 48 | 23 legacy API methods replaced by 12 ported + the retirement map; certificate tests updated for `validate_pair` |
+| other four suites | 82 / 82 | 82 / 82 | untouched |
+
+The legacy file ran 59 methods at CP0 because the tester had already pointed `ApiFixture` at the new server without finishing the port; the "36 pass / 23 setup errors" figure below predates that.
+
+### CP0 (testing lead)
 
 Testing lead CP0, code `d94cc5da1928384ed08bcca4e38811aade16d43a`:
 
@@ -309,6 +323,7 @@ Architecture/readiness gate is NOT passed. The lead called its RoundB 'not freez
 
 ### Immediate next steps
 
+0. (Done at CP1, 2026-10-07.) Steps 2 and 4 below are closed for this milestone: the contract decisions are recorded, the legacy API tests are ported or retired with a map, and all six suites pass. Remaining from the architect's review: the scoped purge (two `ultralytics`/CLIP lines in `perception/requirements.txt`, four dead deps in `server/requirements.txt`, `perception/blockers/eval_epic.py`, the inert `_RETIRED_SOURCE` string in `server/app.py`) is still awaiting the user's explicit authorization; `docs/agent-round-b-raw.tar.gz` is still a tarball; the MediaPipe `hand_landmarker.task` model-card licence still needs a human to open the PDF.
 1. Read this snapshot; verify git status without discarding uncommitted docs. Keep latest text-chat + memory-browser requirements explicit.
 2. Consolidate a short architecture decision matrix with remaining contradictions resolved and assumptions marked. Update existing canonical spec only under the approved scope; supplied reviews are not authority to purge.
 3. Finish TLS key enforcement and deliberate regeneration instructions. Existing pair must not be automatically overwritten on DHCP/expiry mismatch.

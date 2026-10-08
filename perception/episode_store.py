@@ -8,19 +8,15 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
-from pathlib import Path
 import re
 import uuid
 
 try:
     from .episode import parse_packet, jpeg_bytes, RevisionLimitError
     from .localizer import LocalObservation, localize
-    from .private_files import private_append_fd
 except ImportError:
     from episode import parse_packet, jpeg_bytes, RevisionLimitError
     from localizer import LocalObservation, localize
-    from private_files import private_append_fd
 
 
 def _json(value):
@@ -73,7 +69,10 @@ CREATE TABLE IF NOT EXISTS local_cannot_links (
 
 
 def _superset(old, new):
-    for field in ("schema_version", "episode_id", "device_id", "session_id", "clock_anchor", "capture", "analysis", "capture_mode"):
+    # Contract (2026-10-07): a revision is a superset only when it keeps every prior
+    # evidence frame and the same interpretation. A changed outcome_hint retracts the
+    # phone's earlier claim, so it is a conflict, not a revision.
+    for field in ("schema_version", "episode_id", "device_id", "session_id", "clock_anchor", "capture", "analysis", "capture_mode", "outcome_hint"):
         if old[field] != new[field]:
             return False
     if new["t_start_ms"] > old["t_start_ms"] or new["t_end_ms"] < old["t_end_ms"]:
@@ -83,6 +82,15 @@ def _superset(old, new):
         if not all(_json(value) in values for value in old[field]):
             return False
     return True
+
+
+def _calibration_approved(observation) -> bool:
+    """Contract (2026-10-07): an observation is trusted only when the processor says
+    identity_state == "trusted" AND its calibration record is explicitly approved and
+    named. A 'valid' flag, a confidence number or a fixture marker is not approval."""
+    calibration = observation.calibration
+    return (observation.identity_state == "trusted" and calibration.get("approved") is True
+            and isinstance(calibration.get("calibration_id"), str) and bool(calibration["calibration_id"].strip()))
 
 
 class EpisodeStoreMixin:
@@ -176,7 +184,7 @@ class EpisodeStoreMixin:
                     touched = []
                     for observation in observations:
                         # The default never claims calibration; trusted injection is a code-only boundary.
-                        trusted = observation.identity_state == "trusted" and observation.calibration.get("approved") is True
+                        trusted = _calibration_approved(observation)
                         if not trusted:
                             observation = observation.model_copy(update={"identity_state": "ambiguous" if observation.identity_state == "ambiguous" else "provisional", "outcome": "sighted", "actor": "unknown", "location_text": None})
                         record = observation.model_dump()
@@ -250,16 +258,26 @@ class EpisodeStoreMixin:
                 continue
             observation = json.loads(row["record"])
             trusted = observation["identity_state"] == "trusted"
-            placed = trusted and observation["outcome"] == "placed_on_surface" and observation.get("location_text")
+            placed = bool(trusted and observation["outcome"] == "placed_on_surface" and observation.get("location_text"))
             clock_bad = observation.get("clock_status") != "ok"
-            location_status = "known" if placed and not clock_bad else "unknown"
+            # Contract (2026-10-07): location_status uses the spec vocabulary
+            # placed | sighted | inferred | stale | unknown. 'inferred' (containment)
+            # has no producer yet and is never emitted here. Location evidence and
+            # identity are independent fields: a provisional identity can still have
+            # a sighting; only a trusted identity with a recorded surface is 'placed'.
             stale = None
             if observation["outcome"] == "picked_up":
                 location_status, stale = "stale", "Observed pickup; resting location is unknown"
-            elif not placed:
-                stale = "Only a sighting; placement and identity are unverified"
+            elif observation["outcome"] == "uncertain":
+                location_status, stale = "unknown", "Episode outcome was uncertain; no resting location recorded"
+            elif placed:
+                location_status = "placed"
+            else:
+                location_status = "sighted"
+                stale = ("Only a sighting; no resting placement recorded" if trusted
+                         else "Only a sighting; placement and identity are unverified")
             if clock_bad:
-                stale = "Capture clock is implausible; location time is uncertain"
+                location_status, stale = "unknown", "Capture clock is implausible; location time is uncertain"
             items[row["item_id"]] = {
                 "item_id": row["item_id"], "name": observation["label"],
                 "identity_status": observation["identity_state"], "relevance": "candidate",
@@ -268,6 +286,9 @@ class EpisodeStoreMixin:
                 "location_text": observation.get("location_text") if placed else None,
                 "stale_reason": stale, "index_pending": False, "image_url": None,
                 "source": "local_evidence", "observation_id": row["observation_id"],
+                # The photo is the answer: the whole keyframe is the reference image and
+                # the target region travels with it (spec answer contract, reference_image).
+                "reference_image": {"frame_id": observation["frame_id"], "bbox": list(observation["bbox"])},
             }
         for row in db.execute("SELECT item_id,name,at_ms FROM item_names WHERE profile_id=? AND name IS NOT NULL ORDER BY at_ms,name_id", (self.profile_id,)):
             if row["item_id"] in items and (at is None or row["at_ms"] <= at):
@@ -316,11 +337,15 @@ class EpisodeStoreMixin:
         with self._connection() as db:
             return [json.loads(row[0]) for row in db.execute("SELECT record FROM local_observations WHERE profile_id=? AND item_id=? AND record IS NOT NULL ORDER BY observed_at_ms,decided_at_ms,observation_id", (self.profile_id, item_id))]
 
-    def item_image(self, item_id) -> Path | None:
-        # A derived crop is cached only in a private profile-specific artifact path.
-        # Holding the transaction fences concurrent logical erasure while writing.
+    def item_image(self, item_id) -> bytes | None:
+        """The item's reference image: the stored keyframe bytes, unmodified.
+
+        Contract (2026-10-07): the photo is the answer, so the whole keyframe is
+        returned and the target region travels as reference_image.bbox on the item.
+        No derived crop is written to disk; identity crops are a later stage's
+        in-memory concern.
+        """
         with self._connection() as db:
-            db.execute("BEGIN IMMEDIATE")
             item = db.execute("SELECT record FROM current_items WHERE profile_id=? AND item_id=?", (self.profile_id, item_id)).fetchone()
             if item is None:
                 return None
@@ -333,35 +358,10 @@ class EpisodeStoreMixin:
                 return None
             packet = parse_packet(bytes(revision[0]))
             observation = json.loads(row["record"])
-            frame = next((f for f in packet.keyframes if f.frame_id == observation["frame_id"]), None)
-            if frame is None:
-                return None
-            import cv2
-            try:
-                from .episode import decode_jpeg
-            except ImportError:
-                from episode import decode_jpeg
-            image = decode_jpeg(frame.jpeg_b64)
-            x1, y1, x2, y2 = observation["bbox"]
-            crop = image[int(y1):math.ceil(y2), int(x1):math.ceil(x2)]
-            ok, encoded = cv2.imencode(".jpg", crop)
-            if not ok:
-                return None
-            media_id = hashlib.sha256((self.profile_id + ':' + item_id + ':' + row["observation_id"]).encode()).hexdigest()
-            path = self.path.parent / (self.path.name + "." + media_id + ".jpg")
-            if not path.exists():
-                fd = private_append_fd(path)
-                try:
-                    data = encoded.tobytes()
-                    while data:
-                        count = os.write(fd, data)
-                        if count <= 0:
-                            raise OSError("Incomplete private media write")
-                        data = data[count:]
-                    os.fsync(fd)
-                finally:
-                    os.close(fd)
-            return path
+        frame = next((f for f in packet.keyframes if f.frame_id == observation["frame_id"]), None)
+        if frame is None:
+            return None
+        return jpeg_bytes(frame.jpeg_b64)
 
     def rename_item(self, item_id, name) -> dict:
         if not isinstance(name, str) or not 1 <= len(name.strip()) <= 100 or any(ord(c) < 32 for c in name):
@@ -392,7 +392,7 @@ class EpisodeStoreMixin:
             return dict(answer, shape="clarify", text="Which stored item do you mean?", members=members[:8], question="Which stored item?", options=[{"item_id": x["item_id"], "name": x["name"]} for x in members[:8]])
         item = members[0]
         shape = "hedged"
-        if item["identity_status"] == "trusted" and item["location_status"] == "known":
+        if item["identity_status"] == "trusted" and item["location_status"] == "placed":
             message = f"The recorded location of {item['name']} is {item['location_text']}."
             shape = "confident"
         elif item["location_text"]:
@@ -438,16 +438,6 @@ class EpisodeStoreMixin:
                     episodes.update((r[0], r[1]) for r in db.execute("SELECT device_id,episode_id FROM local_observations WHERE profile_id=? AND item_id=?", (self.profile_id, target)))
                 changed = before != (len(episodes), len(affected))
             for target in affected:
-                for row in db.execute("SELECT observation_id FROM local_observations WHERE profile_id=? AND item_id=?", (self.profile_id, target)):
-                    media_id = hashlib.sha256((self.profile_id + ':' + target + ':' + row[0]).encode()).hexdigest()
-                    path = self.path.parent / (self.path.name + "." + media_id + ".jpg")
-                    if path.exists():
-                        fd = private_append_fd(path)
-                        try:
-                            os.ftruncate(fd, 0)
-                            os.fsync(fd)
-                        finally:
-                            os.close(fd)
                 db.execute("INSERT OR IGNORE INTO item_tombstones VALUES(?,?,?)", (self.profile_id, target, self._now_ms()))
                 db.execute("UPDATE local_observations SET record=NULL WHERE profile_id=? AND item_id=?", (self.profile_id, target))
                 db.execute("UPDATE item_names SET name=NULL WHERE profile_id=? AND item_id=?", (self.profile_id, target))

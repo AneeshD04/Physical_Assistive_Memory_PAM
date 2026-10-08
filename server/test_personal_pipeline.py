@@ -4,23 +4,29 @@
 
 Synthetic rectangles, temporary databases/JPEGs, injected verifiers, and ASGI only.
 No camera, model, real server, real credentials, TLS material, or provider calls.
-app.py is executed under file-read guards with synthetic configuration. The phone
-file handler receives BytesIO requests, not a listening socket. Confidence scores
-are fabricated gate inputs, not estimates of real-world model accuracy.
+The one subprocess is the real `openssl` in CertificateCreationTests, writing a
+throwaway pair into a temporary directory. The phone file handler receives
+BytesIO requests, not a listening socket. Confidence scores are fabricated gate
+inputs, not estimates of real-world model accuracy.
+
+The legacy HTTP/WebSocket API classes were retired on 2026-10-07; the retirement
+map above PortedApiSecurityTests names the replacement for every method. The
+served application is server/memory_app.py; its contract suite is
+server/test_memory_bootstrap.py, whose MemoryApiFixture oracles are reused here.
 """
 from __future__ import annotations
 
-import asyncio
 import base64
 import copy
 import functools
 import importlib
 import importlib.util
 import io
-import json
 import os
 from pathlib import Path
+import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -30,14 +36,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import uuid
 
 import cv2
-import httpx
 import numpy as np
-from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "server"))
-from perception.capture import decode_frame, encode_frame
 from perception.object_memory import ObjectStore, Verification
 from perception import personal_memory as pm
 
@@ -94,6 +97,10 @@ class FakeVerifier:
 
 class IsolatedCase(unittest.TestCase):
     asgi = False
+    # The one subprocess exception: a test class that sets this may run the real
+    # `openssl` binary (only that argv[0], only via subprocess.run, into its own
+    # temporary directory). Network stays forbidden either way.
+    allow_openssl = False
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="compass-personal-integration-")
@@ -105,8 +112,15 @@ class IsolatedCase(unittest.TestCase):
                                 new=AsyncMock(side_effect=AssertionError("External HTTP forbidden"))))
         self.enterContext(patch("urllib.request.urlopen", side_effect=AssertionError("External URL forbidden")))
         self.enterContext(patch("socket.create_connection", side_effect=AssertionError("Network forbidden")))
-        self.enterContext(patch("subprocess.run", side_effect=AssertionError("Subprocess forbidden")))
-        self.enterContext(patch("subprocess.Popen", side_effect=AssertionError("Subprocess forbidden")))
+        real_run = subprocess.run
+
+        def openssl_only(args, *extra, **kwargs):
+            if not (self.allow_openssl and isinstance(args, (list, tuple)) and args and args[0] == "openssl"):
+                raise AssertionError("Subprocess forbidden")
+            return real_run(args, *extra, **kwargs)
+        self.enterContext(patch("subprocess.run", side_effect=openssl_only))
+        if not self.allow_openssl:
+            self.enterContext(patch("subprocess.Popen", side_effect=AssertionError("Subprocess forbidden")))
         if not self.asgi:
             self.block_socket_connects()
 
@@ -468,377 +482,142 @@ class EventVerifierTests(IsolatedCase):
         self.assertEqual(self.client.messages.parse.call_count, 3)
 
 
-# Approved first-milestone retirement mapping (docs/BUILD_CONTRACT.md):
-# API catalogue/history/image/name replace find/review routes. DB presence never
-# enables anonymous legacy mode. Packet ingress replaces the raw camera relay.
-# Deepgram grant/config/fake-agent and all non-memory services are retired;
-# their redaction/no-fallback oracles move to auth and optional cloud chat.
-# These 23 methods remain ordinary executable tests, not skips. The other test
-# classes and their temporal/static/SQLite assertions are unchanged by this port.
+# ---------------------------------------------------------------------------
+# Retirement map for the legacy HTTP/WebSocket API tests (approved 2026-10-07,
+# docs/BUILD_CONTRACT.md "Retirement map"). server/app.py is now a shim over
+# server/memory_app.py, which serves only /api/auth/*, /api/health,
+# /api/episodes, /api/items*, /api/chat and the memory page. The scheduling
+# application's personal-memory routes (/api/objects, /api/find, reviews,
+# /api/location, /api/push, /api/es/index), the Deepgram grant (/api/dg-token,
+# /api/agent-config) and the /api/camera WebSocket relay are retired.
+#
+# Every legacy method is either PORTED to the same contract on the replacement
+# route (through bootstrap.MemoryApiFixture's shared check_* oracles, so the two
+# suites cannot drift), RETIRED with the bootstrap test that keeps its security
+# coverage, or a GAP a later milestone must close. Nothing was removed without a
+# named replacement. All ported methods are ordinary executable tests, not skips.
+#
+#   ObjectApiSecurityTests
+#   test_imported_app_uses_synthetic_configuration_only
+#       PORTED  test_app_starts_with_synthetic_configuration_and_no_provider_keys
+#   test_personal_routes_deny_unauthenticated_reads_and_writes
+#       PORTED  test_memory_routes_deny_unauthenticated_reads_and_writes; the
+#               legacy paths themselves: bootstrap test_retired_deepgram_and_
+#               nonmemory_routes_never_execute (404/410, no processing)
+#   test_missing_pin_and_expired_sessions_fail_closed
+#       PORTED  test_missing_pin_and_expired_sessions_fail_closed
+#   test_pending_review_confirmation_drives_find_history_and_evidence
+#       RETIRED the review queue and VLM verifier are not in the memory app;
+#               placement -> catalogue -> history -> restart is bootstrap
+#               test_T_NO_CHAT_KEY_real_app_store_process_restart_catalogue
+#   test_queued_pickup_find_response_exposes_no_stale_scene_image_or_map
+#       PORTED  test_no_reliable_evidence_never_returns_a_photo_or_a_sighting
+#   test_review_link_and_ignore_are_explicit_and_do_not_duplicate_instances
+#       GAP     link/ignore corrections are a later milestone (spec weeks 4-6).
+#               The rename half is PORTED: test_user_rename_is_explicit_and_
+#               does_not_duplicate_the_item. Non-duplication of co-visible
+#               outputs is the store's cannot-link rule (store level only).
+#   test_review_refuses_cross_origin_invalid_decisions_and_unverified_actor
+#       PORTED  test_cross_origin_and_client_asserted_trust_are_rejected
+#   test_image_route_restricts_root_indices_and_profile
+#       PORTED  test_image_route_is_profile_scoped_and_has_no_filesystem_surface
+#               (the image is served from stored packet bytes; no path exists)
+#   test_missing_or_corrupt_explicit_database_never_falls_back_to_legacy_memory
+#       PORTED  test_missing_or_corrupt_database_fails_closed_without_fallback
+#   test_sibling_database_activates_personal_mode_without_environment_override
+#       RETIRED one mode only: PAM_OBJECT_DB or setup_required; no sibling scan
+#   test_explicit_legacy_mode_still_uses_legacy_search
+#       RETIRED legacy search is no longer part of the served application
+#   test_location_denial_stopping_and_stale_fixes_clear_prior_location
+#       PORTED  test_location_fixes_in_packets_are_rejected (room/geofence has
+#               no source yet; the answer contract says "room unknown")
+#
+#   CameraRelaySecurityTests (WebSocket /api/camera -> perception relay)
+#   RETIRED as a transport: episodes arrive as HTTP packets on /api/episodes.
+#   test_unauthenticated_camera_never_opens_relay
+#   test_cross_origin_camera_is_rejected_before_opening_relay
+#   test_revoked_session_stops_camera_before_the_next_forward
+#       PORTED  test_camera_websocket_never_opens, plus bootstrap
+#               test_login_cookie_and_logout_revocation for revocation
+#   test_authenticated_cmp2_envelope_is_relayed_intact_not_as_raw_jpeg
+#   test_legacy_camera_keeps_raw_jpeg_compatibility_without_personal_database
+#       RETIRED no relay and no raw-JPEG compatibility mode remain
+#   test_personal_camera_rejects_raw_frames_before_forwarding
+#       PORTED  test_raw_jpeg_bodies_are_rejected_before_processing
+#   test_duplicate_frame_sequence_is_not_relayed_twice
+#       RETIRED bootstrap test_semantic_duplicate_echoes_this_transport_digest
+#
+#   TokenSecurityTests (Deepgram short-lived grant)
+#   RETIRED speech is out of scope for this build. /api/dg-token and
+#   /api/agent-config are in bootstrap RETIRED and never execute. The
+#   "never fall back to the long-lived key" property is kept as
+#   test_retired_grant_routes_never_read_provider_keys here.
+# ---------------------------------------------------------------------------
 import test_memory_bootstrap as bootstrap
+from starlette.websockets import WebSocketDisconnect
+try:
+    from starlette.testclient import WebSocketDenialResponse
+except ImportError:  # older starlette closes instead of denying
+    WebSocketDenialResponse = WebSocketDisconnect
 
 
-class ApiFixture(bootstrap.MemoryApiFixture):
-    pass
+class PortedApiSecurityTests(bootstrap.MemoryApiFixture):
+    """Legacy security expectations on the replacement routes. Oracles live in
+    bootstrap.MemoryApiFixture so the two suites share one contract."""
 
+    def test_app_starts_with_synthetic_configuration_and_no_provider_keys(self):
+        self.check_synthetic_startup()
 
-class ObjectApiSecurityTests(ApiFixture):
-    def test_imported_app_uses_synthetic_configuration_only(self):
-        self.assertEqual(self.app.CONTACTS, CONTACTS)
-        self.assertEqual(os.environ["DEEPGRAM_API_KEY"], LONG_KEY)
-        self.assertEqual(self.app.MEMORY_JSONL, self.memory)
-        self.assertFalse(Path(ROOT / "server" / ".env").exists())
-
-    def test_personal_routes_deny_unauthenticated_reads_and_writes(self):
-        reads = ["/api/find?q=pill+bottle", "/api/objects", "/api/objects/reviews",
-                 "/api/objects/missing/history", "/api/objects/events/missing/image", "/api/location",
-                 "/api/push", "/api/dg-token", "/api/agent-config", "/frames/anything.jpg", "/photos/anything"]
-        for path in reads:
-            with self.subTest(path=path):
-                response = self.client.get(path)
-                self.assertEqual(response.status_code, 401)
-                self.assertEqual(response.headers.get("cache-control"), "no-store")
-                self.assertNotIn(LEGACY_MARKER, response.text)
-        for path, body in (("/api/location", {"status": "denied"}),
-                           ("/api/objects/reviews/missing", {"action": "track"}),
-                           ("/api/es/index", {"object": "synthetic"})):
-            with self.subTest(path=path):
-                self.assertEqual(self.client.post(path, json=body).status_code, 401)
-        self.legacy_search.assert_not_called()
-        self.relay_open.assert_not_called()
+    def test_memory_routes_deny_unauthenticated_reads_and_writes(self):
+        self.check_unauthenticated()
 
     def test_missing_pin_and_expired_sessions_fail_closed(self):
-        self.login()
-        self.now += self.caregiver.SESSION_TTL_S + 1
-        self.assertEqual(self.client.get("/api/objects/reviews").status_code, 401)
-        with patch.dict(os.environ, {"CAREGIVER_PIN": ""}):
-            self.assertEqual(self.client.get("/api/find?q=medicine").status_code, 404)
-        self.legacy_search.assert_not_called()
+        self.check_expiry_and_missing_pin()
 
-    def test_pending_review_confirmation_drives_find_history_and_evidence(self):
-        candidate, event = self.review()
-        self.login()
-        self.assertEqual(self.client.get("/api/find?q=medicine").json()["objects"], [])
-        reviews = self.client.get("/api/objects/reviews")
-        self.assertEqual(reviews.status_code, 200)
-        self.assertEqual(reviews.headers["cache-control"], "no-store")
-        self.assertEqual([r["event_id"] for r in reviews.json()["reviews"]], [candidate["event_id"]])
-        self.assertNotIn(self.root.name, reviews.text)
-        tracked = self.client.post(f"/api/objects/reviews/{candidate['event_id']}",
-            json={"action": "track", "name": "Travel bottle"}, headers={"origin": "https://testserver"})
-        self.assertEqual(tracked.status_code, 200, tracked.text)
-        result = self.client.get("/api/find?q=medicine").json()
-        self.assertEqual(result["source"], "object_memory")
-        self.assertEqual(result["objects"][0]["object_id"], event["object_id"])
-        self.assertIn("last saw", result["say"])
-        self.assertNotIn(LEGACY_MARKER, json.dumps(result))
-        image = self.client.get(result["card"]["image"])
-        self.assertEqual(image.status_code, 200)
-        self.assertEqual(image.headers["cache-control"], "no-store")
-        self.assertTrue(image.content.startswith(b"\xff\xd8"))
-        history = self.client.get(f"/api/objects/{event['object_id']}/history")
-        self.assertEqual(history.status_code, 200)
-        self.assertEqual(len(history.json()["observations"]), 1)
-        self.assertNotIn(self.root.name, history.text)
-        self.legacy_search.assert_not_called()
+    def test_no_reliable_evidence_never_returns_a_photo_or_a_sighting(self):
+        self.check_no_evidence_abstains()
 
-    def test_queued_pickup_find_response_exposes_no_stale_scene_image_or_map(self):
-        first, object_id = self.tracked()
-        self.store.enqueue(self.candidate(self.artifacts, at=self.now + 1, action="picked_up",
-                                         track=first["track_id"], sequence=2))
-        self.login()
-        result = self.client.get("/api/find?q=medicine").json()
-        self.assertEqual(result["objects"][0]["state"], "uncertain")
-        self.assertIsNone(result["objects"][0]["scene"])
-        self.assertIsNone(result["objects"][0]["location"])
-        self.assertNotIn("image", result["card"])
-        self.assertNotIn("action", result["card"])
-        self.assertNotIn("synthetic table", result["say"])
-        self.assertEqual(result["objects"][0]["object_id"], object_id)
+    def test_user_rename_is_explicit_and_does_not_duplicate_the_item(self):
+        self.check_rename()
 
-    def test_review_link_and_ignore_are_explicit_and_do_not_duplicate_instances(self):
-        _, object_id = self.tracked()
-        candidate, _ = self.review(at=self.now + 1, result=verification(identity="uncertain"))
-        self.login()
-        linked = self.client.post(f"/api/objects/reviews/{candidate['event_id']}",
-                                  json={"action": "link", "object_id": object_id})
-        self.assertEqual(linked.status_code, 200, linked.text)
-        self.assertEqual(linked.json()["object"]["object_id"], object_id)
-        self.assertEqual(len(self.store.list_objects()), 1)
-        self.assertEqual(len(self.store.history(object_id)), 2)
-        ignored, _ = self.review(at=self.now + 2, result=verification(identity="uncertain"))
-        self.assertEqual(self.client.post(f"/api/objects/reviews/{ignored['event_id']}",
-                                         json={"action": "ignore"}).status_code, 200)
-        self.assertEqual(self.client.get(f"/api/objects/events/{ignored['event_id']}/image").status_code, 404)
+    def test_cross_origin_and_client_asserted_trust_are_rejected(self):
+        self.check_origin_and_forged_identity()
 
-    def test_review_refuses_cross_origin_invalid_decisions_and_unverified_actor(self):
-        candidate, _ = self.review()
-        self.login()
-        url = f"/api/objects/reviews/{candidate['event_id']}"
-        self.assertEqual(self.client.post(url, json={"action": "track"},
-                                         headers={"origin": "https://evil.invalid"}).status_code, 403)
-        for body, status in (({"action": "link"}, 409), ({"action": "track", "object_id": TRACK}, 409),
-                             ({"action": "delete"}, 422), ({"action": "track", "frames": []}, 422)):
-            with self.subTest(body=body):
-                self.assertEqual(self.client.post(url, json=body).status_code, status)
-        unknown, _ = self.review(result=verification(actor="unknown"))
-        self.assertEqual(self.client.post(f"/api/objects/reviews/{unknown['event_id']}",
-                                         json={"action": "track"}).status_code, 409)
-        self.assertEqual(self.store.list_objects(), [])
+    def test_image_route_is_profile_scoped_and_has_no_filesystem_surface(self):
+        self.check_profile_image_isolation()
 
-    def test_image_route_restricts_root_indices_and_profile(self):
-        outside = self.jpeg(self.run / "outside-evidence.jpg")
-        candidate, _ = self.review(frames=[str(outside)])
-        other = ObjectStore(self.db, profile_id="other-profile", clock=lambda: self.now)
-        foreign, foreign_event = self.review(store=other)
-        self.login()
-        self.assertEqual(self.client.get(f"/api/objects/events/{candidate['event_id']}/image").status_code, 404)
-        self.assertEqual(self.client.get(f"/api/objects/events/{foreign['event_id']}/image").status_code, 404)
-        self.assertEqual(self.client.get(f"/api/objects/{foreign_event['object_id']}/history").status_code, 404)
-        for index in (-1, 5):
-            self.assertEqual(self.client.get(f"/api/objects/events/{candidate['event_id']}/image?index={index}").status_code, 422)
-        self.assertNotIn(foreign["event_id"], self.client.get("/api/objects/reviews").text)
+    def test_missing_or_corrupt_database_fails_closed_without_fallback(self):
+        self.check_database_independent_auth()
+        self.check_corrupt_database()
 
-    def test_missing_or_corrupt_explicit_database_never_falls_back_to_legacy_memory(self):
-        import sqlite3
+    def test_location_fixes_in_packets_are_rejected(self):
+        self.check_invalid_location_payload()
 
-        connections = []
-        original_connect = sqlite3.connect
+    def test_raw_jpeg_bodies_are_rejected_before_processing(self):
+        self.check_raw_rejected()
 
-        class ObservedConnection(sqlite3.Connection):
-            closed = False
+    def test_camera_websocket_never_opens(self):
+        for authenticated in (False, True):
+            if authenticated:
+                self.login()
+            with self.subTest(authenticated=authenticated):
+                with self.assertRaises((WebSocketDisconnect, WebSocketDenialResponse)):
+                    with self.client.websocket_connect("/api/camera", headers={"origin": bootstrap.ORIGIN}):
+                        pass
+        self.assertEqual(self.processor.calls, [])
 
-            def close(self):
-                super().close()
-                self.closed = True
-
-        def tracked_connect(*args, **kwargs):
-            # Only these temporary test connections permit cross-thread cleanup.
-            # The real SQL/error path still runs; assert close() was called before
-            # fixture cleanup, then release any leak to avoid Windows file locks.
-            kwargs.update(factory=ObservedConnection, check_same_thread=False)
-            connection = original_connect(*args, **kwargs)
-            connections.append(connection)
-            self.addCleanup(connection.close)
-            return connection
-
-        self.login()
-        missing = self.root / "missing" / "objects.sqlite3"
-        corrupt = self.root / "corrupt.sqlite3"
-        corrupt.write_bytes(b"SYNTHETIC-NOT-A-SQLITE-DATABASE")
-        with patch.object(sqlite3, "connect", tracked_connect):
-            for path in (missing, corrupt):
-                with self.subTest(path=path.name), patch.dict(os.environ, {"PAM_OBJECT_DB": str(path)}):
-                    result = self.client.get("/api/find?q=medicine")
-                    self.assertGreaterEqual(result.status_code, 500)
-                    self.assertNotIn(LEGACY_MARKER, result.text)
-        self.legacy_search.assert_not_called()
-        self.assertTrue(all(connection.closed for connection in connections),
-                        "Database initialization failures must close their connections, including failed PRAGMAs")
-
-    def test_sibling_database_activates_personal_mode_without_environment_override(self):
-        self.tracked()
-        self.login()
-        with patch.dict(os.environ, {"PAM_OBJECT_DB": ""}):
-            result = self.client.get("/api/find?q=medicine")
-        self.assertEqual(result.status_code, 200)
-        self.assertEqual(result.json()["source"], "object_memory")
-        self.legacy_search.assert_not_called()
-
-    def test_explicit_legacy_mode_still_uses_legacy_search(self):
-        legacy_path = self.root / "legacy-only" / "memory.jsonl"
-        legacy_path.parent.mkdir()
-        legacy_path.write_text("", encoding="utf-8")
-        es = importlib.import_module("es")
-        with patch.dict(os.environ, {"PAM_OBJECT_DB": ""}), patch.object(self.app, "MEMORY_JSONL", legacy_path), \
-                patch.object(es, "search_all", return_value=([], "synthetic-legacy")) as search:
-            response = self.client.get("/api/find?q=keys")
-        self.assertEqual(response.status_code, 200)
-        search.assert_called_once_with("keys", legacy_path, limit=3)
-
-    def test_location_denial_stopping_and_stale_fixes_clear_prior_location(self):
-        self.login()
-        places = importlib.import_module("places")
-        with patch.object(places, "resolve", return_value={"place": "test place", "source": "known", "lat": 1, "lon": 2}) as resolve:
-            good = {"lat": 1.0, "lon": 2.0, "accuracy_m": 8.0, "observed_at": self.now - 1}
-            self.assertEqual(self.client.post("/api/location", json=good).status_code, 200)
-            self.assertFalse(resolve.call_args.kwargs["allow_google"])
-            self.assertEqual(self.app._last_fix["at"], good["observed_at"])
-            for status in ("denied", "stopped", "unavailable"):
-                self.app._last_fix.update(place="test place", source="known", at=self.now)
-                self.assertEqual(self.client.post("/api/location", json={"status": status}).status_code, 200)
-                self.assertEqual(self.app._last_fix, {})
-            self.app._last_fix.update(place="test place", source="known", at=self.now)
-            self.client.post("/api/location", json={**good, "observed_at": self.now - 1000})
-            self.assertEqual(self.app._last_fix, {})
-        self.assertEqual(resolve.call_count, 1)
-
-
-class FakeRelay:
-    def __init__(self):
-        self.sent = []
-        self.closed = False
-
-    async def send(self, data):
-        self.sent.append(data)
-
-    async def wait_closed(self):
-        await asyncio.Future()
-
-    async def close(self):
-        self.closed = True
-
-
-class CameraRelaySecurityTests(ApiFixture):
-    def relay(self):
-        relay = FakeRelay()
-        self.relay_open.side_effect = None
-        self.relay_open.return_value = relay
-        return relay
-
-    def packet(self, frame_id=1, session=CAMERA):
-        jpeg = cv2.imencode(".jpg", np.zeros((24, 32, 3), np.uint8))[1].tobytes()
-        packet = encode_frame(jpeg, {"session_id": session, "frame_id": frame_id,
-            "captured_at": time.time(), "location": {"lat": 1.0, "lon": 2.0, "accuracy_m": 8.0,
-                                                       "observed_at": time.time() - 1}})
-        return packet, jpeg
-
-    def test_unauthenticated_camera_never_opens_relay(self):
-        with self.client.websocket_connect("wss://testserver/api/camera") as ws:
-            message = ws.receive_json()
-            self.assertEqual(message["type"], "camera_error")
-            self.assertFalse(message["retry"])
-        self.relay_open.assert_not_called()
-
-    def test_authenticated_cmp2_envelope_is_relayed_intact_not_as_raw_jpeg(self):
-        self.login()
-        relay = self.relay()
-        packet, jpeg = self.packet()
-        with self.client.websocket_connect("wss://testserver/api/camera", headers={"origin": "https://testserver"}) as ws:
-            self.assertEqual(ws.receive_json()["type"], "camera_ready")
-            ws.send_bytes(packet)
-            self.assertEqual(ws.receive_json()["type"], "frame_received")
-        self.assertEqual(relay.sent, [packet])
-        self.assertNotEqual(relay.sent[0], jpeg)
-        self.assertEqual(self.app._last_frame, jpeg)
-        self.assertEqual(decode_frame(packet)[1]["time_source"], "capture")
-        self.assertTrue(relay.closed)
-
-    def test_personal_camera_rejects_raw_frames_before_forwarding(self):
-        self.login()
-        relay = self.relay()
-        _, jpeg = self.packet()
-        with self.client.websocket_connect("wss://testserver/api/camera") as ws:
-            self.assertEqual(ws.receive_json()["type"], "camera_ready")
-            ws.send_bytes(jpeg)
-            error = ws.receive_json()
-            self.assertEqual(error["type"], "camera_error")
-            self.assertFalse(error["retry"])
-        self.assertEqual(relay.sent, [])
-        self.assertIsNone(self.app._last_frame)
-
-    def test_legacy_camera_keeps_raw_jpeg_compatibility_without_personal_database(self):
-        relay = self.relay()
-        _, jpeg = self.packet()
-        with patch.dict(os.environ, {"PAM_OBJECT_DB": ""}), \
-                patch.object(self.app, "MEMORY_JSONL", self.root / "legacy-camera" / "memory.jsonl"):
-            with self.client.websocket_connect("wss://testserver/api/camera") as ws:
-                self.assertEqual(ws.receive_json()["type"], "camera_ready")
-                ws.send_bytes(jpeg)
-                self.assertEqual(ws.receive_json()["type"], "frame_received")
-        self.assertEqual(relay.sent, [jpeg])
-        self.assertEqual(self.app._last_frame, jpeg)
-
-    def test_duplicate_frame_sequence_is_not_relayed_twice(self):
-        self.login()
-        relay = self.relay()
-        first, _ = self.packet(1)
-        second, _ = self.packet(2)
-        with self.client.websocket_connect("wss://testserver/api/camera") as ws:
-            ws.receive_json()
-            ws.send_bytes(first)
-            ws.receive_json()
-            ws.send_bytes(first)
-            ws.send_bytes(second)
-            ws.close()
-            self.assertEqual(ws.receive()["type"], "websocket.close")
-        self.assertEqual(relay.sent, [first, second])
-
-    def test_revoked_session_stops_camera_before_the_next_forward(self):
-        self.login()
-        relay = self.relay()
-        packet, _ = self.packet()
-        with self.client.websocket_connect("wss://testserver/api/camera") as ws:
-            ws.receive_json()
-            self.assertEqual(self.client.post("/api/caregiver/logout").status_code, 200)
-            ws.send_bytes(packet)
-            self.assertEqual(ws.receive()["type"], "websocket.close")
-        self.assertEqual(relay.sent, [])
-
-    def test_cross_origin_camera_is_rejected_before_opening_relay(self):
-        self.login()
-        with self.client.websocket_connect("wss://testserver/api/camera", headers={"origin": "https://evil.invalid"}) as ws:
-            error = ws.receive_json()
-            self.assertEqual(error["type"], "camera_error")
-            self.assertFalse(error["retry"])
-        self.relay_open.assert_not_called()
-
-
-class TokenSecurityTests(ApiFixture):
-    def grant(self, response=None, error=None):
-        post = AsyncMock(return_value=response, side_effect=error)
-        provider = MagicMock()
-        provider.__aenter__ = AsyncMock(return_value=SimpleNamespace(post=post))
-        provider.__aexit__ = AsyncMock(return_value=False)
-        self.enterContext(patch.object(self.app.httpx, "AsyncClient", return_value=provider))
-        return post
-
-    def assertNoSecret(self, response):
-        self.assertNotIn(LONG_KEY, response.text)
-        self.assertNotIn(LONG_KEY, str(response.headers))
-        self.assertNotIn("UPSTREAM-PRIVATE-DETAIL", response.text)
-
-    def test_grant_403_never_falls_back_to_long_lived_api_key(self):
-        self.login()
-        post = self.grant(httpx.Response(403, text=LONG_KEY + " UPSTREAM-PRIVATE-DETAIL"))
-        response = self.client.get("/api/dg-token")
-        self.assertGreaterEqual(response.status_code, 400)
-        self.assertNoSecret(response)
-        self.assertEqual(response.headers.get("cache-control"), "no-store")
-        post.assert_awaited_once()
-        self.assertEqual(post.call_args.kwargs["headers"]["Authorization"], "Token " + LONG_KEY)
-
-    def test_upstream_errors_and_exceptions_do_not_echo_credentials_or_provider_body(self):
-        self.login()
-        post = self.grant()
-        for status in (401, 429, 500):
-            with self.subTest(status=status):
-                post.return_value = httpx.Response(status, text=LONG_KEY + " UPSTREAM-PRIVATE-DETAIL")
-                response = self.client.get("/api/dg-token")
-                self.assertGreaterEqual(response.status_code, 400)
-                self.assertNoSecret(response)
-        post.side_effect = httpx.ConnectError(LONG_KEY + " UPSTREAM-PRIVATE-DETAIL")
-        response = self.client.get("/api/dg-token")
-        self.assertGreaterEqual(response.status_code, 400)
-        self.assertNoSecret(response)
-
-    def test_success_returns_only_the_short_lived_grant_and_requests_bounded_ttl(self):
-        self.login()
-        post = self.grant(httpx.Response(200, json={"access_token": "synthetic-short-lived-grant", "other": LONG_KEY}))
-        response = self.client.get("/api/dg-token")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.text, "synthetic-short-lived-grant")
-        self.assertNoSecret(response)
-        self.assertEqual(response.headers.get("cache-control"), "no-store")
-        self.assertEqual(post.call_args.kwargs["json"], {"ttl_seconds": 60})
-
-    def test_legacy_mode_does_not_restore_the_long_lived_key_fallback(self):
-        self.grant(httpx.Response(403, text=LONG_KEY))
-        with patch.dict(os.environ, {"PAM_OBJECT_DB": ""}), \
-                patch.object(self.app, "MEMORY_JSONL", self.root / "legacy-only" / "memory.jsonl"):
-            response = self.client.get("/api/dg-token")
-        self.assertGreaterEqual(response.status_code, 400)
-        self.assertNoSecret(response)
+    def test_retired_grant_routes_never_read_provider_keys(self):
+        with patch.dict(os.environ, {"DEEPGRAM_API_KEY": LONG_KEY, "DEEPGRAM_PROJECT_ID": "synthetic-project"}):
+            for authenticated in (False, True):
+                if authenticated:
+                    self.login()
+                for path in ("/api/dg-token", "/api/agent-config"):
+                    with self.subTest(path=path, authenticated=authenticated):
+                        response = self.client.get(path, headers={"origin": bootstrap.ORIGIN})
+                        self.assertIn(response.status_code, (404, 410), response.text)
+                        self.assertNotIn(LONG_KEY, response.text)
+                        self.assertNotIn("synthetic-project", response.text)
+        self.assertEqual(self.processor.calls, [])
 
 
 class SQLiteResourceTests(IsolatedCase):
@@ -890,15 +669,30 @@ class MemoryConnection:
 
 
 class CertificateCreationTests(IsolatedCase):
+    """phone/serve.py TLS material.
+
+    Semantic approval 2026-10-07: an existing pair is still never overwritten, and
+    ensure_cert now also refuses to RETURN on a pair that is incomplete, invalid,
+    expired or not valid for this IP (FileExistsError carrying TLS_ROTATION), so the
+    server never starts on bad material. Generation is asserted through the real
+    openssl as the mock's side effect, which proves the exact command line serve.py
+    uses yields a pair its own validate_pair accepts (the duplicate-extension bug
+    would fail here).
+    """
+    allow_openssl = True
+
     def setUp(self):
         super().setUp()
         self.serve = importlib.import_module("phone.serve")
         self.cert, self.key = self.root / "cert.pem", self.root / "key.pem"
         self.enterContext(patch.multiple(self.serve, CERT=self.cert, KEY=self.key))
-        self.openssl_run = self.enterContext(patch.object(self.serve.subprocess, "run"))
+        # IsolatedCase installed the recording guard; it forwards openssl to the real binary.
+        self.openssl_run = subprocess.run
         self.enterContext(patch("builtins.print"))
 
     def test_generation_uses_explicit_configuration_and_leaf_extensions(self):
+        if shutil.which("openssl") is None:
+            self.skipTest("openssl is not on PATH; phone/serve.py cannot generate a certificate on this machine either")
         self.serve.ensure_cert("192.0.2.10")
         self.openssl_run.assert_called_once()
         args, kwargs = self.openssl_run.call_args.args[0], self.openssl_run.call_args.kwargs
@@ -911,11 +705,22 @@ class CertificateCreationTests(IsolatedCase):
         self.assertNotIn("x509_extensions", kwargs["input"])
         self.assertTrue(kwargs["check"])
         self.assertTrue(kwargs["capture_output"])
+        pair = (self.cert.read_bytes(), self.key.read_bytes())
+        # The generated pair is accepted on the next start without regeneration...
+        self.openssl_run.reset_mock()
+        self.serve.ensure_cert("192.0.2.10")
+        self.openssl_run.assert_not_called()
+        # ...and a different LAN IP is refused without touching either file.
+        with self.assertRaises(FileExistsError):
+            self.serve.ensure_cert("192.0.2.11")
+        self.openssl_run.assert_not_called()
+        self.assertEqual((self.cert.read_bytes(), self.key.read_bytes()), pair)
 
     def test_existing_pair_is_never_replaced(self):
         self.cert.write_text("SYNTHETIC-CERT", encoding="utf-8")
         self.key.write_text(LONG_KEY, encoding="utf-8")
-        self.serve.ensure_cert("192.0.2.10")
+        with self.assertRaises(FileExistsError):
+            self.serve.ensure_cert("192.0.2.10")
         self.openssl_run.assert_not_called()
         self.assertEqual(self.cert.read_text(encoding="utf-8"), "SYNTHETIC-CERT")
         self.assertEqual(self.key.read_text(encoding="utf-8"), LONG_KEY)
