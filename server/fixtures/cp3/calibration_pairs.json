@@ -1,0 +1,470 @@
+{
+ "description": "Tester fixture for perception.identity.calibrate (CP3). Hand-authored (cosine, same) pairs; NOT measurements of any model. The quantile is the split-conformal quantile over the SAME-pair nonconformities 1 - cosine with the standard finite-sample correction; different pairs are present only to check that they are ignored by the quantile and all fall outside it.",
+ "alpha": 0.05,
+ "embedder": "synthetic@1",
+ "pairs": [
+  {
+   "pair_id": "same-00",
+   "cosine": 0.99,
+   "same": true
+  },
+  {
+   "pair_id": "diff-00",
+   "cosine": -0.3,
+   "same": false
+  },
+  {
+   "pair_id": "same-17",
+   "cosine": 0.922,
+   "same": true
+  },
+  {
+   "pair_id": "diff-17",
+   "cosine": 0.101,
+   "same": false
+  },
+  {
+   "pair_id": "same-34",
+   "cosine": 0.854,
+   "same": true
+  },
+  {
+   "pair_id": "diff-34",
+   "cosine": 0.502,
+   "same": false
+  },
+  {
+   "pair_id": "same-11",
+   "cosine": 0.946,
+   "same": true
+  },
+  {
+   "pair_id": "diff-11",
+   "cosine": -0.04,
+   "same": false
+  },
+  {
+   "pair_id": "same-28",
+   "cosine": 0.878,
+   "same": true
+  },
+  {
+   "pair_id": "diff-28",
+   "cosine": 0.361,
+   "same": false
+  },
+  {
+   "pair_id": "same-05",
+   "cosine": 0.97,
+   "same": true
+  },
+  {
+   "pair_id": "diff-05",
+   "cosine": -0.182,
+   "same": false
+  },
+  {
+   "pair_id": "same-22",
+   "cosine": 0.902,
+   "same": true
+  },
+  {
+   "pair_id": "diff-22",
+   "cosine": 0.219,
+   "same": false
+  },
+  {
+   "pair_id": "same-39",
+   "cosine": 0.83,
+   "same": true
+  },
+  {
+   "pair_id": "diff-39",
+   "cosine": 0.62,
+   "same": false
+  },
+  {
+   "pair_id": "same-16",
+   "cosine": 0.926,
+   "same": true
+  },
+  {
+   "pair_id": "diff-16",
+   "cosine": 0.078,
+   "same": false
+  },
+  {
+   "pair_id": "same-33",
+   "cosine": 0.858,
+   "same": true
+  },
+  {
+   "pair_id": "diff-33",
+   "cosine": 0.479,
+   "same": false
+  },
+  {
+   "pair_id": "same-10",
+   "cosine": 0.95,
+   "same": true
+  },
+  {
+   "pair_id": "diff-10",
+   "cosine": -0.064,
+   "same": false
+  },
+  {
+   "pair_id": "same-27",
+   "cosine": 0.882,
+   "same": true
+  },
+  {
+   "pair_id": "diff-27",
+   "cosine": 0.337,
+   "same": false
+  },
+  {
+   "pair_id": "same-04",
+   "cosine": 0.974,
+   "same": true
+  },
+  {
+   "pair_id": "diff-04",
+   "cosine": -0.206,
+   "same": false
+  },
+  {
+   "pair_id": "same-21",
+   "cosine": 0.906,
+   "same": true
+  },
+  {
+   "pair_id": "diff-21",
+   "cosine": 0.196,
+   "same": false
+  },
+  {
+   "pair_id": "same-38",
+   "cosine": 0.83,
+   "same": true
+  },
+  {
+   "pair_id": "diff-38",
+   "cosine": 0.597,
+   "same": false
+  },
+  {
+   "pair_id": "same-15",
+   "cosine": 0.93,
+   "same": true
+  },
+  {
+   "pair_id": "diff-15",
+   "cosine": 0.054,
+   "same": false
+  },
+  {
+   "pair_id": "same-32",
+   "cosine": 0.862,
+   "same": true
+  },
+  {
+   "pair_id": "diff-32",
+   "cosine": 0.455,
+   "same": false
+  },
+  {
+   "pair_id": "same-09",
+   "cosine": 0.954,
+   "same": true
+  },
+  {
+   "pair_id": "diff-09",
+   "cosine": -0.088,
+   "same": false
+  },
+  {
+   "pair_id": "same-26",
+   "cosine": 0.886,
+   "same": true
+  },
+  {
+   "pair_id": "diff-26",
+   "cosine": 0.314,
+   "same": false
+  },
+  {
+   "pair_id": "same-03",
+   "cosine": 0.978,
+   "same": true
+  },
+  {
+   "pair_id": "diff-03",
+   "cosine": -0.229,
+   "same": false
+  },
+  {
+   "pair_id": "same-20",
+   "cosine": 0.91,
+   "same": true
+  },
+  {
+   "pair_id": "diff-20",
+   "cosine": 0.172,
+   "same": false
+  },
+  {
+   "pair_id": "same-37",
+   "cosine": 0.84,
+   "same": true
+  },
+  {
+   "pair_id": "diff-37",
+   "cosine": 0.573,
+   "same": false
+  },
+  {
+   "pair_id": "same-14",
+   "cosine": 0.934,
+   "same": true
+  },
+  {
+   "pair_id": "diff-14",
+   "cosine": 0.03,
+   "same": false
+  },
+  {
+   "pair_id": "same-31",
+   "cosine": 0.866,
+   "same": true
+  },
+  {
+   "pair_id": "diff-31",
+   "cosine": 0.432,
+   "same": false
+  },
+  {
+   "pair_id": "same-08",
+   "cosine": 0.958,
+   "same": true
+  },
+  {
+   "pair_id": "diff-08",
+   "cosine": -0.111,
+   "same": false
+  },
+  {
+   "pair_id": "same-25",
+   "cosine": 0.89,
+   "same": true
+  },
+  {
+   "pair_id": "diff-25",
+   "cosine": 0.29,
+   "same": false
+  },
+  {
+   "pair_id": "same-02",
+   "cosine": 0.982,
+   "same": true
+  },
+  {
+   "pair_id": "diff-02",
+   "cosine": -0.253,
+   "same": false
+  },
+  {
+   "pair_id": "same-19",
+   "cosine": 0.914,
+   "same": true
+  },
+  {
+   "pair_id": "diff-19",
+   "cosine": 0.148,
+   "same": false
+  },
+  {
+   "pair_id": "same-36",
+   "cosine": 0.846,
+   "same": true
+  },
+  {
+   "pair_id": "diff-36",
+   "cosine": 0.55,
+   "same": false
+  },
+  {
+   "pair_id": "same-13",
+   "cosine": 0.938,
+   "same": true
+  },
+  {
+   "pair_id": "diff-13",
+   "cosine": 0.007,
+   "same": false
+  },
+  {
+   "pair_id": "same-30",
+   "cosine": 0.87,
+   "same": true
+  },
+  {
+   "pair_id": "diff-30",
+   "cosine": 0.408,
+   "same": false
+  },
+  {
+   "pair_id": "same-07",
+   "cosine": 0.962,
+   "same": true
+  },
+  {
+   "pair_id": "diff-07",
+   "cosine": -0.135,
+   "same": false
+  },
+  {
+   "pair_id": "same-24",
+   "cosine": 0.894,
+   "same": true
+  },
+  {
+   "pair_id": "diff-24",
+   "cosine": 0.266,
+   "same": false
+  },
+  {
+   "pair_id": "same-01",
+   "cosine": 0.986,
+   "same": true
+  },
+  {
+   "pair_id": "diff-01",
+   "cosine": -0.276,
+   "same": false
+  },
+  {
+   "pair_id": "same-18",
+   "cosine": 0.918,
+   "same": true
+  },
+  {
+   "pair_id": "diff-18",
+   "cosine": 0.125,
+   "same": false
+  },
+  {
+   "pair_id": "same-35",
+   "cosine": 0.85,
+   "same": true
+  },
+  {
+   "pair_id": "diff-35",
+   "cosine": 0.526,
+   "same": false
+  },
+  {
+   "pair_id": "same-12",
+   "cosine": 0.942,
+   "same": true
+  },
+  {
+   "pair_id": "diff-12",
+   "cosine": -0.017,
+   "same": false
+  },
+  {
+   "pair_id": "same-29",
+   "cosine": 0.874,
+   "same": true
+  },
+  {
+   "pair_id": "diff-29",
+   "cosine": 0.384,
+   "same": false
+  },
+  {
+   "pair_id": "same-06",
+   "cosine": 0.966,
+   "same": true
+  },
+  {
+   "pair_id": "diff-06",
+   "cosine": -0.158,
+   "same": false
+  },
+  {
+   "pair_id": "same-23",
+   "cosine": 0.898,
+   "same": true
+  },
+  {
+   "pair_id": "diff-23",
+   "cosine": 0.243,
+   "same": false
+  }
+ ],
+ "expected": {
+  "n_same": 40,
+  "n_different": 40,
+  "alpha": 0.05,
+  "k": 39,
+  "quantile": 0.17,
+  "same_nonconformities_sorted": [
+   0.01,
+   0.014,
+   0.018,
+   0.022,
+   0.026,
+   0.03,
+   0.034,
+   0.038,
+   0.042,
+   0.046,
+   0.05,
+   0.054,
+   0.058,
+   0.062,
+   0.066,
+   0.07,
+   0.074,
+   0.078,
+   0.082,
+   0.086,
+   0.09,
+   0.094,
+   0.098,
+   0.102,
+   0.106,
+   0.11,
+   0.114,
+   0.118,
+   0.122,
+   0.126,
+   0.13,
+   0.134,
+   0.138,
+   0.142,
+   0.146,
+   0.15,
+   0.154,
+   0.16,
+   0.17,
+   0.17
+  ],
+  "arithmetic": [
+   "same-pair nonconformities 1 - cosine, sorted ascending (40 values):",
+   "positions 1..37 = 0.010, 0.014, 0.018, ..., 0.154 (0.010 + 0.004*i for i = 0..36);",
+   "position 38 = 0.160; position 39 = 0.170; position 40 = 0.170 (a deliberate tie, see below).",
+   "finite-sample level: k = ceil((n + 1) * (1 - alpha)) = ceil(41 * 0.95) = ceil(38.95) = 39.",
+   "quantile = the k-th smallest same-pair nonconformity = the 39th smallest = 0.170.",
+   "The tie at positions 39 and 40 makes the two common spellings of the same rule agree:",
+   "  (a) the k-th order statistic -> sorted[38] (0-based) = 0.170;",
+   "  (b) numpy.quantile(scores, k / n = 0.975, method='higher') -> sorted[ceil(0.975 * 39)] = sorted[39] = 0.170.",
+   "Wrong answers this fixture detects: no finite-sample correction, k = ceil(40 * 0.95) = 38 -> 0.160;",
+   "  plain numpy.quantile(scores, 0.95) (linear) -> 0.160 + 0.05 * 0.010 = 0.1605;",
+   "  mixing the different pairs into the quantile -> far above 0.17 (their nonconformities are 0.38 .. 1.30).",
+   "Every different pair has nonconformity >= 0.38 > 0.17, so none is inside the set at this quantile."
+  ]
+ }
+}

@@ -18,11 +18,17 @@ from typing import Literal
 try:
     from .capture import finite_number, location_at
     from .private_files import private_append_fd
-    from .episode_store import EpisodeStoreMixin, EPISODE_SCHEMA
+    from .episode_store import EpisodeStoreMixin, EPISODE_SCHEMA, ensure_episode_columns
 except ImportError:
     from capture import finite_number, location_at
     from private_files import private_append_fd
-    from episode_store import EpisodeStoreMixin, EPISODE_SCHEMA
+    from episode_store import EpisodeStoreMixin, EPISODE_SCHEMA, ensure_episode_columns
+
+# SQLite user_version values this code can open. 0/1 are legacy (v1 tables only),
+# 2 is the CP0-CP2 episode ledger, 3 adds the CP3 identity tables and the
+# local_observations.candidates column. Anything newer is refused before any write.
+SUPPORTED_VERSIONS = (0, 1, 2, 3)
+CURRENT_VERSION = 3
 
 
 class InteractionEvidence(BaseModel):
@@ -102,10 +108,14 @@ def _private_file(path):
 
 
 class ObjectStore(EpisodeStoreMixin):
-    def __init__(self, path, profile_id="local", clock=time.time, create=True):
+    def __init__(self, path, profile_id="local", clock=time.time, create=True, embedder=None):
+        """embedder (CP3, optional): a perception.identity.Embedder; None keeps
+        identity provisional and stores no vectors. The server passes one only
+        when its model manifest gate allows it; tests inject a deterministic one."""
         self.path, self.profile_id, self.clock = Path(path).resolve(), str(profile_id), clock
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", self.profile_id):
             raise ValueError("Invalid profile ID")
+        self.set_embedder(embedder)
         if not create and not self.path.is_file():
             raise FileNotFoundError(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -140,8 +150,10 @@ class ObjectStore(EpisodeStoreMixin):
                     decision_id INTEGER PRIMARY KEY, profile_id TEXT NOT NULL, at REAL NOT NULL,
                     action TEXT NOT NULL, event_id TEXT, object_id TEXT, detail TEXT NOT NULL);
             """ + EPISODE_SCHEMA)
-            if db.execute("PRAGMA user_version").fetchone()[0] < 2:
-                db.execute("PRAGMA user_version=2")
+            # CP3 columns on existing tables (guarded ALTER TABLE), then the marker.
+            ensure_episode_columns(db)
+            if db.execute("PRAGMA user_version").fetchone()[0] < CURRENT_VERSION:
+                db.execute(f"PRAGMA user_version={CURRENT_VERSION}")
 
     @contextmanager
     def _connection(self):
@@ -152,14 +164,14 @@ class ObjectStore(EpisodeStoreMixin):
             with self.path.open("rb") as source:
                 header = source.read(100)
             if header[:16] == b"SQLite format 3\x00" and len(header) == 100:
-                if int.from_bytes(header[60:64], "big") not in (0, 1, 2):
+                if int.from_bytes(header[60:64], "big") not in SUPPORTED_VERSIONS:
                     raise ValueError("Unsupported object database version; do not overwrite it")
         _private_file(self.path)
         _private_file(Path(str(self.path) + "-journal"))
         db = sqlite3.connect(str(self.path), timeout=10)
         try:
             db.row_factory = sqlite3.Row
-            if db.execute("PRAGMA user_version").fetchone()[0] not in (0, 1, 2):
+            if db.execute("PRAGMA user_version").fetchone()[0] not in SUPPORTED_VERSIONS:
                 raise ValueError("Unsupported object database version; do not overwrite it")
             db.execute("PRAGMA journal_mode=PERSIST")
             db.execute("PRAGMA synchronous=FULL")

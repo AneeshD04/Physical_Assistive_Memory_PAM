@@ -272,6 +272,10 @@ python -B server/test_personal_pipeline.py EventVerifierTests PublicFileSecurity
 
 Coordinator-run, Linux sandbox (Python 3.13.16, Node 22.22.0, Playwright 1.56.0 / chromium-1194). 215/215 methods, 0 skips: see `docs/CONTINUATION_HANDOFF.md` §5 for the per-suite table and `docs/BUILD_PLAN.md` "CP2 result" for the decisions. Fixtures are tester-authored synthetic goldens (`server/fixtures/cp2/`, basis string recorded in each file); thresholds `MOTION_ON/OFF`, `CURL_RATIO` and the lower-frame rule are initial values, not measurements. Blocked, not skipped: the real hand model (P-101 remains not run; licence UNVERIFIED, hash unrecorded). No camera, device, household footage, paid call or model download was used.
 
+## X-008 / CP3 — identity stage on a deterministic embedder (observed here, 2026-10-09)
+
+Coordinator-run, Linux sandbox (Python 3.13.16, Node 22, Playwright 1.56.0 / chromium-1194). 260/260 methods, 0 skips: see `docs/CONTINUATION_HANDOFF.md` §5 and `docs/BUILD_PLAN.md` "CP3 result". The embedder in every test is a seeded synthetic prototype generator (`server/fixtures/cp3/`), so the conformal coverage and the new/match/ambiguous outcomes are software-correctness results, not recognition accuracy. P-104 (CUTE or own-footage calibration with the real DINOv2 export) remains not run; the export and the calibration are human steps recorded in `docs/OVERSIGHT_CP3.md` §0.
+
 ## Proposed experiment queue — historical proposals; no outcomes implied
 
 These entries preserve pre-build proposals, not a substitute for BUILD_CONTRACT.

@@ -20,6 +20,9 @@ weights/
 *.task
 *.wasm
 phone/assets/models/
+# Server-side identity model (local ONNX export) and the upstream PyTorch weights
+server/models/
+*.pth
 
 # Run data: captured frames, ledgers, logs. Frames are photos of whoever ran it.
 perception/data/

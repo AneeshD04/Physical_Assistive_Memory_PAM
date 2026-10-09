@@ -240,18 +240,89 @@ P-101/P-103/P-105 on the user's device later.
 
 ## 3. CP3 to CP5 (scoped now, detailed at their start)
 
-**CP3 identity.** Builder A: `perception/identity.py` with an injectable embedder
-(`Embedder.embed(crop) -> np.ndarray`), foreground-masked mean-patch pooling, per-item
-banks, cosine scores, conformal prediction sets calibrated from a held-out set with a
-recorded `calibration_id` (this is what makes `calibration.approved` true), cannot-link
-enforcement, open-set `unknown`; the real DINOv2 ViT-S/14 embedder behind the same
-model-manifest gate as CP2 (Apache-2.0, Oversight records it); `group` and `clarify`
-answers with per-member provenance (B-14). Builder B: group/clarify over `/api/chat`,
-evidence per member. Builder C: group rendering, "which one?" selection, and the
-correction capture (`same as`, `not this one`) that closes the CP1 gap. Tester:
-synthetic deterministic embeddings, conformal behaviour, failed-registration keeps
-cannot-links (B-03), member precedence fixtures. Oversight: DINOv2 and SigLIP 2 weight
-licences at the primary source. Finance: laptop compute only; no change.
+### CP3 in detail: identity (architect, 2026-10-09)
+
+**Why this is next.** Today every observation is its own provisional candidate: the
+system cannot say that this morning's sighting of the glasses and this afternoon's are
+the same object, so it can never answer confidently about an item it has seen twice,
+and lookalikes (two refills) are never distinguished. CP3 adds the identity stage
+from Part 1 sections 3 and 5: an appearance embedding of the localized region, per-item
+banks, conformal "same object" sets with an explicit calibration gate, cannot-link
+enforcement, the `group` answer, and the two user corrections.
+
+**Interfaces (fixed by the architect; builders implement, tester tests).**
+
+*Embedder protocol* (`perception/identity.py`):
+`class Embedder: name: str; version: str; dim: int; def embed(self, crop: np.ndarray[H,W,3] uint8, mask: np.ndarray[H,W] bool | None) -> np.ndarray[float32, dim]` returning an L2-normalised vector. Production: `DinoV2Embedder` over ONNX Runtime (`dinov2_vits14.onnx`, 224 px, mean of patch tokens whose patch overlaps the mask by at least 50 %, falling back to all patches when the mask is None or covers under 4 patches), loaded only through the model manifest gate (same `scripts/fetch_models.py` + `docs/LICENSES.md` rule as CP2; capability `physical_instance_recognition`). When the asset is absent the store runs with `embedder=None`: no embedding, identity stays `provisional`, nothing is simulated. Tests inject a deterministic `Embedder`.
+
+*Bank and matcher*:
+`ItemBank(item_id)` holds `[{observation_id, frame_id, embedder: "name@version", vector}]`, max 32 vectors (oldest evicted), `score(query) -> float` = max cosine over the bank. `ConformalMatcher(calibration)` with nonconformity `1 - cosine`; a calibration record is `{calibration_id, embedder: "name@version", alpha: 0.05, quantile: q, n: int, source: "synthetic"|"cute"|"own-footage", created_ms, approved: bool}` stored in a new `calibrations` table (approved only via `approve_calibration(calibration_id, actor)`, audited; the processor's `calibration` dict in `LocalObservation` must name a `calibration_id` that exists and is approved for identity to be `trusted`; CP2 fixture semantics are kept for the bootstrap suite by treating a `fixture_only: true` record as a code-only injection, as today). `match(query, banks, excluded) -> {"set": [item_id...], "scores": {item_id: cosine}, "state": "new"|"match"|"ambiguous"}`: set = items with nonconformity ≤ q, minus `excluded`; size 0 → `new`, size 1 → `match`, size > 1 → `ambiguous`. `calibrate(pairs: list[(cosine, same: bool)], alpha) -> quantile` is the split-conformal quantile over the *same*-pair nonconformities with the standard finite-sample correction; the tester checks coverage on held-out synthetic pairs.
+
+*Cannot-links (B-03)*: observations co-visible in one frame can never be one item; the existing `local_cannot_links` table is consulted during matching: any item that holds an observation co-visible (same device, episode and frame) with the query observation is `excluded`. A failed registration or missing embedding never removes an existing cannot-link.
+
+*Integration* (`process_pending`): after `localize`, for every observation with a region: crop at capture resolution, mask from the localizer's diff mask (new optional field `LocalObservation.mask_rle: str | None`, run-length over the bbox), `embed`, `match`. `match` → reuse `item_id` (identity `trusted` if the calibration is approved and the embedder matches the calibration's, else `provisional`); `new` → new item; `ambiguous` → new observation stored with `identity_state: "ambiguous"` and `candidates: [item_id...]` (new column on `local_observations`), and the projection marks every candidate item `identity_status: "ambiguous"` with `lookalikes: [item_id...]`. Embeddings live in a new `embeddings` table keyed by observation_id (vector as float32 bytes, embedder name@version); projection rebuild replays stored embeddings and decisions, never re-embeds (open decision 5).
+
+*Answers* (`answer_text`): `group` when the matched members are mutual lookalikes (each is in the others' `lookalikes`) — text "I have N items that look alike; which one is yours?", `members` each with their own `reference_image`, `observed_at_ms`, `location_text` (only if that member's own location is placed/sighted) and `provenance: {"observation_id", "identity_status"}`; a group never upgrades any member's certainty (B-14). `clarify` stays for distinct items whose names match the words. `confident` requires a single matched member, trusted, placed, not aged.
+
+*Corrections* (`perception/episode_store.py`): `link_items(keep_id, other_id, actor) -> dict` ("same object": refuses with `ValueError("cannot-link")` if any cannot-link exists between them; merges banks and observations under `keep_id`, tombstones `other_id`, audit row `user_linked`); `unlink_observation(observation_id, actor) -> dict` ("not this one": moves that observation to a new item, adds a cannot-link between the two items, audit row `user_unlinked`); both recorded in a new `corrections` table that `rebuild_all` replays in order. `actor` is the session role string ("caregiver_pin"), never a named person (B-15).
+
+*Server* (Builder B): `POST /api/items/{id}/link {other_item_id}` → Item; `POST /api/items/{id}/observations/{obs}/unlink` → Item (the new one); `GET /api/items/{id}/evidence` → `{observations: [{observation_id, observed_at_ms, reference_image, image_url, identity_status, outcome, location_text}]}` with `GET /api/items/{id}/observations/{obs}/image` serving that observation's keyframe (same rules as the item image); 409 on cannot-link refusal with a safe message; `/api/chat` passes the `group` shape through with per-member fields; health `models` and capabilities include `physical_instance_recognition` from the same policy helper pattern as CP2 (`dinov2_vits14.onnx` provisioned + licence recorded + `PAM_ENABLE_IDENTITY_MODEL=1`).
+
+*Browser* (Builder C): `group` answers render the members' photos side by side with "I can't tell these apart — which one is yours?" and tapping a member resubmits the chat as a clarify selection (existing mechanism); item detail gains an evidence list (each observation's photo, time, status) and two controls, "Same as another item…" (pick from the catalogue, confirm, calls link) and "Not this one" on an evidence row (confirm, calls unlink); 409 shows the safe reason; identity badge shows `ambiguous` with the lookalike count.
+
+*Tester*: `server/test_cp3_identity.py` with a deterministic synthetic embedder (vectors from seeded per-instance prototypes plus bounded noise): new item on first sighting; re-match on a second sighting with the same calibration → one item, two observations; two lookalike prototypes inside the quantile → `ambiguous` with both candidates and a `group` chat answer with per-member provenance; cannot-link excludes a co-visible item from the set even when registration failed (B-03); `calibrate` coverage ≥ 1 − alpha on held-out synthetic pairs within tolerance; unapproved calibration never yields `trusted`; embedder absent → `provisional` only, capability false, no embedding rows; link/unlink corrections, 409 on cannot-link, replay after `rebuild_all` reproduces the same projection; `as_of` before a correction shows the pre-correction state. `server/test_cp3_api.py` for the routes (auth, origin, 404/409, evidence images profile-scoped). `phone/test/test_ui_smoke.py` extended: a seeded group answer renders N members and tapping one resolves; link and unlink from the detail view.
+
+*Oversight*: DINOv2 ViT-S/14 ONNX provenance (the weights are released as PyTorch; the export needs torch at dev time — record the exact script, commit of `facebookresearch/dinov2`, and hash of the exported file in `LICENSES.md`; no export runs in the sandbox); CUTE licence (CC BY 4.0) and attribution text for the calibration source; confirm no embedding leaves the device in the rig; `docs/OVERSIGHT_CP3.md`.
+
+*Finance*: DINOv2-S/14 CPU cost per crop on the laptop and in the hosted variant (2–4 crops per episode); storage of embeddings (384 floats × observations); update §2/§5 of `docs/FINANCE.md` if any cap changes.
+
+**CP3 acceptance.** `server/test_cp3_*.py` and the extended smoke test pass; all CP1/CP2 suites still pass; with no identity model present the app reports `physical_instance_recognition: false` and identity never exceeds `provisional`; with the deterministic embedder the full chain new → match → ambiguous → group → correction → replay is proven; no new runtime dependency beyond `onnxruntime` (recorded in `LICENSES.md`); no request leaves the origin.
+
+**Not in CP3.** Real DINOv2 accuracy on real objects (P-104 needs CUTE or own footage on the laptop), OCR, re-observation (CP4), room names.
+
+### CP3 result (2026-10-09)
+
+**Passed: 260/260 methods, 0 skips**, reproduced by the coordinator in a clean process:
+new `server/test_cp3_identity.py` 28 and `server/test_cp3_api.py` 13; `phone/test/test_ui_smoke.py`
+grown from 9 to 13 (group answer rendering and member choice, "Same as" and "Not this one"
+from the detail view, 409 reason shown); every CP1/CP2 suite unchanged. Oversight's diff
+review (`docs/OVERSIGHT_CP3.md`, pass 2) found the plan implemented with no fabricated
+capability, no vector or score on any route, and `onnxruntime` as the only new runtime
+dependency; its two medium findings (the cannot-link refusal wording, and `assign`
+inferring cannot-links the user never asserted) were fixed before this result.
+
+Decisions made during CP3 (binding; each has a test or a register row):
+
+1. The identity model is a **local export**: DINOv2 ViT-S/14 weights (Apache-2.0,
+   `facebookresearch/dinov2` at commit `7764ea0f`) are exported to ONNX on the laptop by
+   `scripts/export_dinov2_onnx.py` (dev-only `torch`/`onnx` in `requirements-dev.txt`);
+   the served app imports only `onnxruntime` (MIT, 1.30.0). The export records a
+   provenance sidecar and the embedder tag is `dinov2_vits14@<hash16>-r1` (recipe tag).
+2. Server-side models live in `server/models/` with their own manifest; the browser
+   `/assets/models/` route refuses `.onnx` and the server manifest refuses `.task`, so a
+   mislabelled file invalidates one inventory and never crosses to the other.
+3. `physical_instance_recognition.enabled` requires a provisioned, licence-recorded model,
+   `PAM_ENABLE_IDENTITY_MODEL=1` **and an approved calibration for the exact embedder tag**;
+   an enabled model without one still runs and reports "no approved calibration: identity
+   stays provisional", which is the correct state for the P-104 measurement.
+4. Calibration sources are a closed set `synthetic | cute | holoassist | own-footage`;
+   `synthetic` is never approved on the rig; CUTE calibrations carry the CC BY 4.0
+   attribution text from `docs/LICENSES.md`.
+5. `actor` on corrections and approvals is a closed server-chosen set
+   (`caregiver_pin | operator | test`); request bodies never carry it (B-15).
+6. A group answer carries `unresolved_observation_id`; tapping a member records only
+   "this sighting is that item" (`assign_observation`); it adds no cannot-link between the
+   candidates, so fragmented duplicates can still be merged later with "Same as".
+7. No route returns embeddings, scores or banks; history records are scrubbed of
+   numeric identity internals; embeddings never leave the device in the rig.
+8. Deferred to CP4 with a note in `OVERSIGHT_CP3.md` §7: hand-hull exclusion from the
+   identity crop, pinning the crop geometry into the embedder tag, the notices page,
+   and re-pinning `onnxruntime`.
+
+Human actions outstanding (`docs/OVERSIGHT_CP3.md` §0): create the export venv, clone
+DINOv2 at the pinned commit, download the checkpoint and record its hash, run the
+export, run `scripts/fetch_models.py`, then register and approve a real calibration
+before enabling the capability. Until then identity stays provisional by design.
 
 **CP4 retention.** Idle keyframe every 30 s in automatic mode to `POST /api/idle`; 24 h
 idle cache; landmark reduction (decided at CP2 with Oversight): landmarks stay processing

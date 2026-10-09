@@ -1,13 +1,18 @@
-# PAM finance model v1: cost per user-month, subscription sensitivity, caps
+# PAM finance model v1.1: cost per user-month, subscription sensitivity, caps
 
-Finance agent, 2026-10-08. Written for the coordinator after CP1 (`fbf6719`), before
-CP2 lands. Scope and authority: `BUILD_PLAN.md` §0 ("Finance: unit economics, cost caps
-the builders must respect") and §2 ("FINANCE.md v1"). This file proposes; the coordinator
-decides. Nothing here is a selected price, a measured margin or a commercial term
-(RESEARCH_LOG D-010, D-013, B-17, C-10).
+Finance agent. **v1** 2026-10-08, written for the coordinator after CP1 (`fbf6719`), before
+CP2 landed. **v1.1** 2026-10-09, after CP2, for the CP3 identity stage
+(`BUILD_PLAN.md` "CP3 in detail: identity", *Finance* line): adds §8 (CP3 delta: DINOv2
+compute, embedding storage, one-time export and calibration costs), Appendix B (its
+arithmetic), open questions 8–11, and three additive cross-reference notes marked
+"v1.1" in §2.2, §5 and §7. §1–7 and Appendix A are otherwise unchanged from v1. Scope and
+authority: `BUILD_PLAN.md` §0 ("Finance: unit economics, cost caps the builders must
+respect") and §2 ("FINANCE.md v1"). This file proposes; the coordinator decides. Nothing
+here is a selected price, a measured margin or a commercial term (RESEARCH_LOG D-010,
+D-013, B-17, C-10).
 
-Arithmetic was done with Python `Decimal` (the script is Appendix A of this file; every
-row below also shows its formula, so it can be re-run by hand).
+Arithmetic was done with Python `Decimal` (the scripts are Appendix A (v1) and Appendix B
+(v1.1) of this file; every row below also shows its formula, so it can be re-run by hand).
 The handoff's margin formula (`CONTINUATION_HANDOFF.md` §10) is reused unchanged; see §3.
 
 **Provenance warning that applies to every external price in this file.** In this session
@@ -21,6 +26,14 @@ date, and **must be re-read at that URL by a human before any number in this fil
 quoted outside the team.** The only prices with in-repo provenance are the Anthropic rates
 the round-B cost agent recorded on 2026-10-06 (`docs/agent-round-b-raw.tar.gz`,
 `45a3f1e1/content.txt` §1) and the measured 2026-09-19 VLM token counts in `CLAUDE.md`.
+
+*v1.1 session (2026-10-09):* `raw.githubusercontent.com` was reachable by curl through the
+egress proxy, so §8 cites two files fetched and hashed in session (the DINOv2 model card,
+whose SHA-256 matches `docs/LICENSES.md` §7, and a timm benchmark CSV). `huggingface.co`
+returned `403` at the proxy; `arxiv.org`, `aws.amazon.com` and `purl.stanford.edu` did not
+connect. No public **CPU** latency figure for ViT-S/14 was obtainable, so the per-crop
+time in §8 is an assumption bounded by FLOP arithmetic, not a quoted benchmark. The v1
+`[Q-UNVERIFIED]` prices were not re-read and keep their label.
 
 Labels used throughout: **[A]** assumption (ours), **[Q-UNVERIFIED]** quoted list price not
 verified in session, **[Q-REPO]** price recorded in this repository's research notes with
@@ -140,6 +153,12 @@ Capacity check: a 2-vCPU VM has 2 × 730 = 1,460 vCPU-h/month; at a 25 % target
 utilisation (evening peaks, unmeasured p95) that is 365 usable vCPU-h, i.e. ~337 users at
 the high workload. This file provisions **100 users per 2-vCPU/4 GB VM** [A], a ~3×
 safety factor for unmeasured workloads and the 24 h cache held on local disk.
+
+*v1.1 note (CP3):* the DINOv2 ViT-S/14 share of the 0.3 … 1.0 s "episode write path"
+line is broken out in §8.1: at the stated assumptions (2–4 crops × 60–150 ms) it is
+0.12–0.6 s per episode, i.e. inside this line, so the table above and the 100-users/VM
+provisioning are unchanged. The embeddings it stores are costed in §8.2 and amount to
+≤ $0.003/user-month; the sensitivity tables' `A_b = 0.50` absorbs them (§8.3).
 
 VM list prices (730 h/month; **all [Q-UNVERIFIED]**, access attempted 2026-10-08, blocked):
 
@@ -414,6 +433,29 @@ Caps 2–8 cost nothing on the rig but keep the rig's episode/packet accounting 
 the hosted variant, so a later move to hosting does not change the browser or the
 controller (`BUILD_PLAN.md` CP5 frame counters are the measurement hook).
 
+*v1.1 addendum (CP3, 2026-10-09): no cap changes.* The identity stage adds no cloud call
+and no object-store write, and every quantity it adds is already bounded by a cap above or
+by an interface parameter the architect fixed (§8.5 shows the arithmetic):
+
+- **Compute** rides on cap 2. Under the hard cap of 200 episodes/day, 4 crops × 150 ms is
+  at most 120 CPU-s/day = 1.0 vCPU-h/user-month, the same order as the whole v1 compute
+  line; at the design value of 50/day it is 0.05–0.25 vCPU-h ($0.001–0.005 at AWS rates).
+- **Embedding storage** rides on cap 6. One 384-float32 vector (1,536 B; ~1.7 KB as a
+  row) per observation is 0.43 % of the ~400 KB of keyframes an episode already stores;
+  cap 6's "≤ 2 GB durable evidence" is read as **including** the `embeddings` table and
+  the bank copies, with the **same retention window and tombstone/erasure semantics as the
+  observation the vector belongs to** (B-07): a tombstoned observation's vector must not
+  survive it in a bank. This is a reading of cap 6, not a new cap.
+- **Banks** are bounded by the architect's `ItemBank` cap of 32 vectors (48 KiB per item)
+  [D], which is the right place for that bound; no finance cap is added over it.
+- **Cap 7** (re-observation, CP4) assumed 0.1 s per 224 px DINOv2 compare; the CP3
+  assumption range (60–150 ms) brackets that, and the "≤ 2 s CPU per query" bound governs
+  either way. **Forward flag for CP4, not a CP3 change:** if CP4 adopts the MEMORY
+  review's arrival-time indexing of every idle frame at 518 px, that is 2,880 frames/day ×
+  0.24–0.9 s ≈ 5.8–21.6 vCPU-h/user-month, 5–20× the entire v1 compute line, and 100
+  users/VM becomes 16–53 (§8.5). CP4 must carry its own cap for it (index at 224 px, or
+  only on scene change, or lazily within cap 7's 2 s) before Finance accepts it.
+
 ---
 
 ## 6. What must be measured before any margin claim, and the riskiest assumptions
@@ -474,6 +516,180 @@ left off. None of this is a measured margin: it depends on 50 episodes/day, 20 M
 unverified list prices and an unmeasured support load, and must be recomputed from the
 CP5 counters and a pilot ticket log before anyone quotes it.
 
+*v1.1 (CP3): the bottom line does not move.* The identity stage changes the hosted metered
+cost by at most +$0.013/user-month even when its compute is counted on top of the v1
+budget it actually sits inside (§8.3): at P=10/S=3 the hosted margin is 51.50–51.61 %
+instead of 51.60 %, and no break-even price or user count in §3 changes by more than one
+cent or one household. The one CP3 number that could matter is conditional: if conformal
+calibration ever has to be done **per household** rather than once on CUTE plus pilot
+footage, it is a support cost of $1.20–1.60/user-month (12–16 margin points at P=10;
+§8.4), which is why open question 9 exists.
+
+---
+
+## 8. CP3 delta: the identity stage (v1.1, 2026-10-09)
+
+What CP3 adds (`BUILD_PLAN.md` "CP3 in detail: identity"): a DINOv2 ViT-S/14 embedding
+(ONNX Runtime, CPU) of the localized crop(s) of each episode, one 384-float32 vector
+stored per observation in a new `embeddings` table, per-item banks capped at 32 vectors,
+and a conformal matcher (a max-cosine over ≤ 32 vectors per candidate item: negligible).
+No cloud call, no object-store write, no new upload bytes: in the rig everything runs on
+the household laptop; in the hosted variant on the VM that already runs the localizer.
+Projection rebuilds replay stored vectors and never re-embed (architect's open decision
+5), so rebuilds cost no DINOv2 time.
+
+Inputs specific to this section:
+
+| Parameter | Value | Label and source |
+| --- | --- | --- |
+| Crops embedded per episode | 2 … 4 at 224 px | [D] `MEMORY_SYSTEM_V4.md` Part 1 tier table "2 to 4 crops at 224 px"; coordinator's CP3 brief |
+| CPU time per 224 px crop, modern x86 core, ONNX Runtime fp32 | **60 … 150 ms** | **[A] coordinator's assumed range; no public CPU benchmark was fetchable (header note).** Bounded by the FLOP arithmetic below |
+| Pessimistic per-crop time (burstable or shared vCPU) | 300 ms | [A] a t3 vCPU is one hyperthread, not "a modern core" ([Q-UNVERIFIED] https://aws.amazon.com/ec2/physicalcores/ ; https://aws.amazon.com/ec2/instance-types/t3/ , baseline 20 % per vCPU for t3.medium; not connectable 2026-10-09) |
+| Observations embedded per episode | 1 … 2 | [A] one target region; up to two rival regions each with a mask (PERCEPTION review §C). 4/episode shown only as a "stored every crop" contrast |
+| Vector | 384 × float32 = **1,536 B** | [D] `MODEL_CARD.md` "384 for ViT-S"; `BUILD_PLAN.md` `embeddings` table "float32 bytes" |
+| Row overhead (observation_id text, `embedder name@version`, SQLite record + index) | ~200 B → **~1,736 B/row** | [A] |
+| Bank cap | 32 vectors per item = 49,152 B = 48 KiB | [D] architect's `ItemBank` |
+| Episodes/day, days, retention, prices | 50; 30; 90 days; v1 rates | as §1–2 (all [A]/[D]/[Q-UNVERIFIED]) |
+
+**Why 60–150 ms is a defensible assumption (arithmetic, not a measurement).** From the
+model card's architecture (patch 14, width 384, 21 M params; depth 12 and MLP ratio 4 are
+the standard ViT-S values, [A]): at 224 px there are 16 × 16 + 1 = 257 tokens; linear
+layers cost 12 · N · D² per layer and attention 2 · N² · D, so one crop is 5.515 GMACs of
+linear work + 0.609 GMACs of attention = **6.12 GMACs ≈ 12.2 GFLOP**. Cross-check: the
+same formula without the attention term gives 29.40 GMACs at 518 px, against **29.46
+GMACs** published for `vit_small_patch14_dinov2` (22.06 M params) in timm's benchmark CSV
+(https://raw.githubusercontent.com/huggingface/pytorch-image-models/main/results/benchmark-infer-amp-nchw-pt210-cu121-rtx3090.csv ,
+fetched 2026-10-09, SHA-256 `b4fd25732fc610388c92974c00f7de82cd002ea0049c0afb3259de865345ab07`;
+that file's timing column is an RTX 3090 GPU number and is **not** used here). At a
+sustained 50 / 100 / 200 GFLOP/s of fp32 on one core, 12.2 GFLOP is 245 / 122 / 61 ms:
+the assumed 60–150 ms corresponds to 80–200 GFLOP/s, plausible for AVX2/AVX-512 GEMM
+kernels on one modern core [A]; the 300 ms pessimistic column is a hyperthread on a
+burstable instance. The PERCEPTION review's peer estimate for the same model at 518 px
+(4–6× the 224 px cost) was 60–200 ms on a 4-core laptop CPU (the review's own "[B]"
+label, i.e. an unmeasured belief), which implies ~10–50 ms per 224 px crop on four cores
+or ~40–200 ms of single-core time: the same order as the range assumed here, not a
+confirmation of it. **The number that replaces all of this is §6 item 2**, taken on the
+dev laptop and on a t3.medium-class VM at CP3 acceptance.
+
+### 8.1 Compute per user-month (hosted variant)
+
+Per-episode DINOv2 time = crops × ms/crop; per month × 1,500 episodes; vCPU-hour prices
+from §2.2 (AWS t3.medium $0.0416/h ÷ 2 vCPU = $0.0208; Hetzner €4.50 × 1.08 ÷ 2 ÷ 730 h =
+$0.00333; both [Q-UNVERIFIED]):
+
+| Case | s/episode | CPU-s/month | vCPU-h/user-month | $ AWS | $ Hetzner | Localizer headroom under the v1 1.0 s/episode line |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Low: 2 crops × 60 ms | 0.12 | 180 | **0.0500** | 0.0010 | 0.0002 | 0.88 s |
+| Mid: 3 crops × 100 ms | 0.30 | 450 | 0.1250 | 0.0026 | 0.0004 | 0.70 s |
+| High: 4 crops × 150 ms | 0.60 | 900 | **0.2500** | **0.0052** | 0.0008 | 0.40 s |
+| Pessimistic: 4 crops × 300 ms | 1.20 | 1,800 | 0.5000 | 0.0104 | 0.0017 | −0.20 s (exceeds the line on its own) |
+
+Reading: at the assumed range the identity stage is **0.05–0.25 vCPU-h/user-month**,
+inside the 0.125–0.4167 vCPU-h "episode write path" line that v1 already carried for
+"localizer + DINOv2", so it is not an addition to `A_b`; its dollar value as a share of
+the VM is **$0.001–0.005 per user-month** at AWS rates. The capacity check also holds
+even if it were additive: v1's high total 1.0833 vCPU-h + 0.25 = 1.333 → 274 users per
+2-vCPU VM at 25 % utilisation (219 under a 20 % t3 baseline); + 0.5 pessimistic → 231
+(184). The 100-users/VM provisioning stands. Latency is not a user-facing cost: the
+packet processor runs after the episode is stored, and a 0.6 s identity step per episode
+at 5,000 episodes/day per VM is 3,000 CPU-s/day, ~2 % of two vCPUs.
+
+### 8.2 Storage of embeddings
+
+| Case | Rows/month | MB/month | 90-day steady state | gp3 $0.08/GB | S3 $0.023/GB | Hetzner volume €0.044 × 1.08 | Snapshot $0.05/GB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 observation/episode | 1,500 | 2.60 | 7.8 MB | 0.00062 | 0.00018 | 0.00037 | 0.00039 |
+| 2 observations/episode (rival regions) | 3,000 | 5.21 | **15.6 MB** | **0.00125** | 0.00036 | 0.00074 | **0.00078** |
+| Every crop stored (4/episode; not the design) | 6,000 | 10.42 | 31.2 MB | 0.00250 | 0.00072 | 0.00148 | 0.00156 |
+
+Formula: rows × 1,736 B; 90-day steady state = 3 months of rows. The table lives in the
+SQLite ledger on the VM's block storage (gp3 column; the S3 column is shown only for
+contrast), so it adds **no PUT/GET requests** (cap 4 is untouched) and it is covered by
+the snapshot line. Bank copies: 48 KiB per item, 480 KiB for the rig's 10-item set, 9.8 MB
+at an improbable 200 items, bounded by the 32-vector cap regardless of tenure. Relative
+scale: a 1.7 KB row against ~400 KB of keyframes per episode is **0.43 %** of the bytes
+the episode already stores. On the rig the same bytes sit on the laptop disk; Oversight's
+CP3 condition that no embedding leaves the device holds by construction, so there is no
+upload or egress line.
+
+One future driver to name, not cap: an **embedder version change** (`name@version`) would
+re-embed the retained set once, 4.5–22.5 CPU-min per household (4,500–9,000 rows × 60–150
+ms), 7.5–37.5 CPU-h for 100 households on one VM: a scheduled background job, never
+on the query path.
+
+### 8.3 Effect on the hosted per-user cost table (variants b and c)
+
+Strictly additive items are the embedding rows and their snapshot (compute is inside the
+v1 line); the two lower rows count the compute on top anyway, to bound the error:
+
+| Case | Added $/user-month | `A_b` (from 0.4972) | P=10, S=3 hosted margin (v1: 51.60 % at `A_b` = 0.50) |
+| --- | ---: | ---: | ---: |
+| Storage + snapshot only (2 obs/episode) | +0.0023 | 0.4995 | 51.61 % |
+| Fully additive, high compute | +0.0075 | 0.5047 | 51.55 % |
+| Fully additive, pessimistic compute | +0.0127 | 0.5099 | 51.50 % |
+
+Formula for the margin row: (10 − 0.59 − `A_b` − 0.75 − 3) / 10. The sensitivity tables in
+§3 keep **`A_b = 0.50`** (it absorbs the design-consistent +0.0023) and the worst case
+**`A_b = 1.10`** covers the pessimistic row with $0.59 to spare. Variant (c) inherits the
+same delta on top of its chat line. Every break-even price in §3.2 moves by $0.0131 in
+the pessimistic case (ΔP* = ΔA / 0.971). In §3.3 the rows that already work (P=10–15,
+S=3) move by at most one household (hosted P=10/S=3: 26 → 26 at F=150, 703 → 704 at
+F=4,150); the rows whose contribution is near $1 move more in absolute terms because the
+divisor is small (hosted P=5/S=3 founder count 3,934 → 3,982; P=10/S=8: 165 → 168 and
+4,561 → 4,625, pessimistic case), which changes nothing about their reading: thousands
+of households to cover one founder draw, before and after.
+
+### 8.4 One-time costs: ONNX export and calibration data
+
+All [A]; engineering at a loaded $75/h, support at the v1 heavy rate $19.20/h; dollars for
+compute are zero because every step runs on a laptop (BUILD_PLAN: "no export runs in the
+sandbox"; the export needs torch at dev time only).
+
+| Item | Estimate | Basis |
+| --- | --- | --- |
+| ONNX export of `dinov2_vits14` + verification against the PyTorch outputs + hash/commit/script recorded in `LICENSES.md` | **$225–375 once** | 2–4 h engineering + 1 h Oversight review; weights Apache-2.0 (`LICENSES.md` §3, `VERIFIED-COMMERCIAL`) so no licence fee |
+| CUTE calibration set | **$375–675 once**; licence **$0** | CC BY 4.0 (`LICENSES.md` §4, `VERIFIED-COMMERCIAL`, attribution required in any report that uses it). 1 h to acquire and record attribution + 4–8 h to run `calibrate`, the held-out coverage check and `approve_calibration`. Embedding the set is ≤ 50 CPU-min on a laptop even at 20,000 images (the exact count is in the dataset record, not re-read here) |
+| Own-footage calibration, **global, one-time** (the rig's 10 items × 10 crops, P-104) | **≈ $492 once** | 10 pilot households × ~1 h of support (45 min guided, consented capture + 15 min consent paperwork) at $19.20 + 4 h engineering. The calibration record is one approved product-wide `calibration_id`, not a per-household artefact |
+| **Total one-time** | **$1,092–1,542** | amortised over 24 months: $0.46–0.64/user-month at 100 households, $0.07–0.10 at 648 (the founder break-even cohort), $0.05–0.06 at 1,000 |
+
+The conditional case that is not negligible: if P-104 finds that a household's own
+objects and lighting shift the nonconformity distribution enough that **per-household
+calibration** is required, then each onboarding gains 45–60 min of support, i.e. $14.40–
+19.20 once = **$1.20–1.60/user-month over the 12-month tenure assumed in §3.1, which is
+12–16 margin points at P=10** and would move `S=3` to ≈ 4.2–4.6. The in-app, self-serve
+alternative (the family photographs the item set during setup; no support minutes) costs
+nothing on this line, which is the finance reason to prefer it if the question arises.
+
+### 8.5 Caps: conclusion and the bounds that already exist
+
+No cap changes; see the v1.1 addendum in §5 for the reading of caps 2, 6 and 7. The
+numbers behind it: cap 2's hard limit (200 episodes/day) bounds CP3 compute at 800 crops ×
+0.15 s = 120 CPU-s/day = **1.0 vCPU-h/user-month** for the worst household; the 32-vector
+bank cap bounds bank bytes at 48 KiB/item; retention bounds the `embeddings` table at 3
+months of rows. The one exposure is not CP3's: a CP4 design that indexes every idle frame
+with the same embedder at 518 px would cost 2,880 × (0.24–0.9 s) per day = **5.8–21.6
+vCPU-h/user-month**, 5–20× the whole v1 compute line, dropping 100 users/VM to 53–16.
+Finance asks that CP4 state its own cap for that before it is built.
+
+### 8.6 The rig (variant a)
+
+Zero company spend, as before. The household pays the electricity: 900 CPU-s/month at the
+high case at an incremental ~15 W [A] is ~4 Wh, under $0.001 at $0.17/kWh, against the
+$3.06 the always-on laptop already costs. The support-relevant fact is different: the
+laptop now needs `onnxruntime` and an ONNX file of roughly 88 MB in fp32 (22.06 M params
+× 4 B [A, arithmetic from the timm row; the exported file is not measured]) provisioned
+by `scripts/fetch_models.py`; a missing or unprovisioned model is the
+"identity stays `provisional`, capability false" state, which the browser must explain
+(cap 9), or it becomes a support call.
+
+### 8.7 What replaces these numbers
+
+§6 item 2 already names the measurement (localizer ms and DINOv2 ms per episode on the
+server class actually used, p50/p95 under 100 concurrent households). CP3 adds: crops
+actually embedded per episode and observations per episode (1 vs 2), rows in
+`embeddings` per household-day after a synthetic run, the ONNX file size, and the hours
+the export and the CUTE calibration actually took. None of §8 is a measurement.
+
 ---
 
 ## Open questions for the coordinator
@@ -497,6 +713,27 @@ CP5 counters and a pilot ticket log before anyone quotes it.
 7. **Support model for the pilot**: who answers, by which channel, and will the ticket
    log record minutes per household so `S` becomes a measurement at the first pilot
    report?
+
+*Added in v1.1 (CP3):*
+
+8. **Per-crop CPU time is assumed, not measured.** 60–150 ms per 224 px crop is the
+   coordinator's range, bounded only by FLOP arithmetic (§8); no public CPU benchmark
+   could be fetched. Will CP3 acceptance include the §6 item 2 measurement on the dev
+   laptop **and** on a t3.medium-class VM (where a vCPU is one hyperthread of a
+   burstable core), with the crop count per episode recorded alongside it?
+9. **Calibration scope.** Is the approved `calibration_id` product-wide (CUTE plus the
+   pilot's own footage, one-time ≈ $1,100–1,500 all in) as the architect's interface
+   implies, or could P-104 force per-household calibration? The latter is $1.20–1.60 of
+   support per user-month (12–16 margin points at P=10) unless it is self-serve in the
+   app. Finance's preference is stated in §8.4; the decision is the architect's.
+10. **CP4 arrival-time indexing.** If CP4 adopts the MEMORY review's DINOv2-S index of
+    every idle frame at 518 px, compute is 5.8–21.6 vCPU-h/user-month, 5–20× the whole
+    v1 line (§8.5). Which bound will CP4 carry: index at 224 px, only on scene change,
+    or lazily at query time inside cap 7's 2 s?
+11. **Embedding retention.** Confirm that the `embeddings` table and bank copies follow
+    the observation's retention window and tombstone semantics (B-07) so cap 6 stays a
+    single number; a vector that outlives its tombstoned observation is both a privacy
+    defect and an unbounded storage line.
 
 ---
 
@@ -714,4 +951,160 @@ P = D("25")
 print("fee(25) =", q(fee(P)), "; residual with formula fee:", q(P - fee(P) - D('5') - H), "=>", pct((P - fee(P) - D('5') - H) / P), "%")
 print("residual with pre-rounded $1.03 fee:", q(P - D('1.03') - D('5') - H), "=>", pct((P - D('1.03') - D('5') - H) / P), "%")
 print("H=0.75 equals F_lean/200 users:", q(F_lean / D('200')))
+```
+
+## Appendix B: CP3 arithmetic (v1.1)
+
+The tables in §8 were produced by the script below (Python 3, `decimal` only, no floats). Run it with `python3 -I appendix_b.py` after pasting it to a file; it prints the FLOP sanity check, the compute, capacity and storage lines, the `A_b` and margin deltas, the one-time costs and the CP4 exposure.
+
+```python
+"""PAM FINANCE.md v1.1 Appendix B: CP3 identity-stage arithmetic. Decimal only; no floats.
+
+Every input is an assumption [A], a design parameter [D] or an unverified list price
+[Q-UNVERIFIED]; see docs/FINANCE.md section 8 for labels and sources.
+"""
+from decimal import Decimal as D, getcontext, ROUND_HALF_UP
+
+getcontext().prec = 28
+
+
+def q(x, places="0.0001"):
+    return x.quantize(D(places), rounding=ROUND_HALF_UP)
+
+
+def pct(x):
+    return (x * 100).quantize(D("0.01"), rounding=ROUND_HALF_UP)
+
+
+print("=== B.1 FLOP sanity check for ViT-S/14 at 224 px (architecture from MODEL_CARD.md) ===")
+DIM = D("384")        # [D] MODEL_CARD.md: embedding dimension 384
+LAYERS = D("12")      # [A] standard ViT-S depth (not printed in the model card)
+MLP_RATIO = D("4")    # [A] standard ViT-S MLP ratio
+PATCH = D("14")       # [D] MODEL_CARD.md: patch size 14
+IMG = D("224")
+n_patches = (IMG / PATCH) ** 2          # 16 x 16 = 256
+N = n_patches + 1                       # + CLS token = 257
+linear_per_layer = (D("3") + D("1") + D("2") * MLP_RATIO) * N * DIM * DIM   # qkv + proj + 2 MLP matmuls
+attn_per_layer = D("2") * N * N * DIM                                        # QK^T and AV
+patch_embed = n_patches * (D("3") * PATCH * PATCH) * DIM
+gmacs_linear = (linear_per_layer * LAYERS + patch_embed) / D("1e9")
+gmacs_attn = attn_per_layer * LAYERS / D("1e9")
+gmacs_total = gmacs_linear + gmacs_attn
+gflop_total = gmacs_total * 2
+print(f"tokens N={N}; linear GMACs (incl. patch embed) {q(gmacs_linear, '0.001')}; attention GMACs {q(gmacs_attn, '0.001')}; total {q(gmacs_total, '0.001')} GMACs = {q(gflop_total, '0.001')} GFLOP")
+# cross-check against timm's published 29.46 GMACs at 518 px (fvcore count, attention matmuls excluded)
+IMG518 = D("518")
+n518 = (IMG518 / PATCH) ** 2            # 37 x 37 = 1369
+N518 = n518 + 1
+linear518 = ((D("3") + D("1") + D("2") * MLP_RATIO) * N518 * DIM * DIM * LAYERS + n518 * (D("3") * PATCH * PATCH) * DIM) / D("1e9")
+print(f"same formula at 518 px, linear only: {q(linear518, '0.01')} GMACs vs timm CSV 29.46 GMACs (fetched 2026-10-09)")
+for gflops in (D("50"), D("100"), D("200")):
+    print(f"  at {gflops} GFLOP/s sustained fp32 -> {q(gflop_total / gflops * 1000, '1')} ms per crop")
+
+print()
+print("=== B.2 CP3 compute per user-month, hosted variant ===")
+EPISODES_DAY = D("50")   # [D]
+DAYS = D("30")           # [A]
+episodes_month = EPISODES_DAY * DAYS
+cases = [
+    ("low:  2 crops x 60 ms", D("2"), D("60")),
+    ("mid:  3 crops x 100 ms", D("3"), D("100")),
+    ("high: 4 crops x 150 ms", D("4"), D("150")),
+    ("pessimistic: 4 crops x 300 ms (shared/burstable vCPU)", D("4"), D("300")),
+]
+AWS_VCPU_H = D("0.0416") / D("2")                 # t3.medium $/h over 2 vCPU [Q-UNVERIFIED]
+HETZ_VCPU_H = D("4.50") * D("1.08") / D("2") / D("730")   # CX-class EUR 4.50 x 1.08 / 2 vCPU / 730 h [Q-UNVERIFIED]
+print(f"vCPU-hour price: AWS t3.medium ${q(AWS_VCPU_H, '0.00001')}  Hetzner ${q(HETZ_VCPU_H, '0.00001')}")
+V1_EP_LO, V1_EP_HI = D("0.3"), D("1.0")           # v1 write-path budget s/episode (localizer + DINOv2)
+results = {}
+for name, crops, ms in cases:
+    s_per_ep = crops * ms / D("1000")
+    cpu_s = episodes_month * s_per_ep
+    vcpu_h = cpu_s / D("3600")
+    results[name] = vcpu_h
+    print(f"{name}: {s_per_ep} s/episode x {episodes_month} episodes = {cpu_s} CPU-s = {q(vcpu_h)} vCPU-h; AWS ${q(vcpu_h * AWS_VCPU_H)}  Hetzner ${q(vcpu_h * HETZ_VCPU_H)}; localizer headroom under the 1.0 s v1 cap: {q(V1_EP_HI - s_per_ep, '0.01')} s")
+
+print()
+print("=== B.3 Capacity check (v1: 100 users per 2-vCPU VM, 25 % utilisation) ===")
+HOURS = D("730")
+v1_total_hi = D("1.0833")                          # v1 section 2.2 total vCPU-h/user-month, high
+usable_25 = D("2") * HOURS * D("0.25")
+usable_t3_baseline = D("2") * HOURS * D("0.20")    # t3.medium baseline 20 % per vCPU [Q-UNVERIFIED]
+for label, extra in (("CP3 inside the v1 budget (no addition)", D("0")),
+                     ("CP3 high added on top of v1 high", results["high: 4 crops x 150 ms"]),
+                     ("CP3 pessimistic added on top of v1 high", results["pessimistic: 4 crops x 300 ms (shared/burstable vCPU)"])):
+    tot = v1_total_hi + extra
+    print(f"{label}: {q(tot)} vCPU-h/user-month -> users per VM at 25 % util {q(usable_25 / tot, '1')}; under a 20 % t3 baseline {q(usable_t3_baseline / tot, '1')}")
+
+print()
+print("=== B.4 Embedding storage per user-month ===")
+EMB_BYTES = D("384") * D("4")                      # [D] 384 float32
+ROW_OVERHEAD = D("200")                            # [A] observation_id text, embedder name@version, SQLite record + index
+row_bytes = EMB_BYTES + ROW_OVERHEAD
+print(f"vector bytes {EMB_BYTES}; row estimate {row_bytes} B")
+S3, GP3, SNAP = D("0.023"), D("0.08"), D("0.05")   # [Q-UNVERIFIED]
+HETZ_VOL = D("0.044") * D("1.08")
+for label, obs_per_ep in (("1 observation/episode", D("1")), ("2 observations/episode (rival regions)", D("2")), ("every crop stored (4/episode; not the design)", D("4"))):
+    rows_month = episodes_month * obs_per_ep
+    mb_month = rows_month * row_bytes / D("1e6")
+    gb_90 = rows_month * 3 * row_bytes / D("1e9")
+    print(f"{label}: {rows_month} rows/month = {q(mb_month, '0.01')} MB/month; 90-day steady state {q(gb_90 * 1000, '0.1')} MB -> gp3 ${q(gb_90 * GP3, '0.00001')}  S3 ${q(gb_90 * S3, '0.00001')}  Hetzner volume ${q(gb_90 * HETZ_VOL, '0.00001')}  snapshot ${q(gb_90 * SNAP, '0.00001')}")
+bank_bytes = D("32") * EMB_BYTES
+print(f"per-item bank cap: 32 x {EMB_BYTES} = {bank_bytes} B = {q(bank_bytes / 1024, '0.1')} KiB per item; 10 items {q(bank_bytes * 10 / 1024, '0.1')} KiB; 200 items {q(bank_bytes * 200 / D('1e6'), '0.01')} MB")
+keyframe_bytes_per_ep = D("20000000") / EPISODES_DAY
+print(f"share of keyframe bytes: {row_bytes} / {keyframe_bytes_per_ep} per episode = {pct(row_bytes / keyframe_bytes_per_ep)} %")
+
+print()
+print("=== B.5 Effect on A_b and the P=10/S=3 hosted margin ===")
+A_b_v1 = D("0.4972")
+storage_add = D("0.00139") + D("0.00087")          # 2 obs/episode, gp3 + snapshot (worst design-consistent case)
+compute_hi = results["high: 4 crops x 150 ms"] * AWS_VCPU_H
+compute_pess = results["pessimistic: 4 crops x 300 ms (shared/burstable vCPU)"] * AWS_VCPU_H
+FEE10 = D("0.029") * 10 + D("0.30")
+for label, add in (("storage + snapshot only (compute inside v1 budget)", storage_add),
+                   ("fully additive, high compute", storage_add + compute_hi),
+                   ("fully additive, pessimistic compute", storage_add + compute_pess)):
+    A = A_b_v1 + add
+    m = (D("10") - FEE10 - A - D("0.75") - D("3")) / D("10")
+    print(f"{label}: +${q(add)} -> A_b = {q(A)}; P=10 S=3 margin {pct(m)} % (v1: 51.60 % at A_b=0.50)")
+
+print()
+print("=== B.6 One-time costs and the conditional per-household calibration ===")
+ENG_H = D("75")      # [A] loaded engineering hour
+SUP_H = D("19.20")   # [A] loaded support hour (v1 section 3.1 heavy case)
+onnx = (D("2") * ENG_H, D("4") * ENG_H)
+print(f"ONNX export + verification + hash/licence row: 2-4 h x ${ENG_H} + 1 h oversight = ${onnx[0] + ENG_H} - ${onnx[1] + ENG_H}")
+cute = (D("1") * ENG_H + D("4") * ENG_H, D("1") * ENG_H + D("8") * ENG_H)
+print(f"CUTE calibration (licence $0, CC BY 4.0): 1 h acquisition/attribution + 4-8 h calibrate/evaluate/approve = ${cute[0]} - ${cute[1]}")
+own = D("10") * D("1") * SUP_H + D("4") * ENG_H
+print(f"Own-footage pilot calibration, global, one-time: 10 households x 1 h x ${SUP_H} + 4 h x ${ENG_H} = ${q(own, '0.01')}")
+total_lo = onnx[0] + ENG_H + cute[0] + own
+total_hi = onnx[1] + ENG_H + cute[1] + own
+for users in (D("100"), D("648"), D("1000")):
+    um = users * D("24")
+    print(f"  one-time total ${q(total_lo, '0.01')}-${q(total_hi, '0.01')} amortised over {users} households x 24 months = ${q(total_lo / um)} - ${q(total_hi / um)} per user-month")
+per_hh_min = (D("45"), D("60"))
+for mins in per_hh_min:
+    once = mins / D("60") * SUP_H
+    monthly = once / D("12")
+    print(f"IF per-household calibration were required: {mins} min support at onboarding = ${q(once, '0.01')} once = ${q(monthly)} per user-month over a 12-month tenure = {pct(monthly / D('10'))} margin points at P=10")
+calib_imgs = D("20000")
+print(f"calibration-set embedding compute (bound): {calib_imgs} images x 0.15 s = {calib_imgs * D('0.15') / 60} CPU-minutes on a laptop, $0")
+
+print()
+print("=== B.7 Bounds that existing caps already give, and the CP4 exposure ===")
+HARD_EP_DAY = D("200")   # cap 2 hard cap, section 5
+crops_day_hard = HARD_EP_DAY * D("4")
+print(f"cap 2 hard 200 episodes/day x 4 crops = {crops_day_hard} crops/day x 0.15 s = {crops_day_hard * D('0.15')} CPU-s/day = {q(crops_day_hard * D('0.15') * DAYS / 3600)} vCPU-h/month (the most CP3 compute any household can cost under cap 2)")
+# re-embedding the retained set after an embedder version change (one-time per change)
+for rows in (D("4500"), D("9000")):
+    print(f"re-embed {rows} retained rows after an embedder version change: {q(rows * D('0.06') / 60, '0.1')}-{q(rows * D('0.15') / 60, '0.1')} CPU-min per household; x100 households per VM = {q(rows * D('0.06') * 100 / 3600, '0.1')}-{q(rows * D('0.15') * 100 / 3600, '0.1')} CPU-h")
+# CP4 forward flag: arrival-time DINOv2-S indexing of every idle frame at 518 px (MEMORY review E), NOT a CP3 cost
+IDLE_DAY = D("2880")
+for mult, ms in ((D("4"), D("60")), (D("6"), D("150"))):
+    s_frame = mult * ms / D("1000")
+    cpu_s_day = IDLE_DAY * s_frame
+    vcpu_h = cpu_s_day * DAYS / D("3600")
+    tot = v1_total_hi + vcpu_h
+    print(f"CP4 arrival indexing at 518 px, {s_frame} s/frame x {IDLE_DAY} idle frames/day: {cpu_s_day} CPU-s/day = {q(vcpu_h, '0.01')} vCPU-h/user-month; users per VM at 25 % util would be {q(usable_25 / tot, '1')}")
 ```

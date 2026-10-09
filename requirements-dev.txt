@@ -1,0 +1,13 @@
+# Development-only dependencies (docs/OVERSIGHT_CP3.md section 1.6). Never installed
+# into the served app's environment and never imported by server/ or perception/:
+# torch and onnx exist only for scripts/export_dinov2_onnx.py (dev-time ONNX export),
+# playwright only for phone/test/test_ui_smoke.py. Runtime dependencies stay in
+# server/requirements.txt and perception/requirements.txt.
+#
+# torch: install the CPU wheel from the PyTorch index, not PyPI's default (CUDA) build:
+#   pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
+# then: pip install -r requirements-dev.txt
+torch==2.14.1
+onnx==1.23.1
+onnxruntime==1.30.0
+playwright==1.63.0

@@ -23,6 +23,12 @@ catalogue can be checked end to end; it is not reachable through HTTP.
 
 If Chromium or the fake camera cannot run here the affected tests FAIL with the
 reason; nothing is skipped.
+
+CP3 (IdentitySmokeTests, at the end of this file): a second app with the synthetic
+embedder from server/test_cp3_identity.py injected, lookalike items seeded over the
+API, and the group answer, evidence list, "Not this one" and "Same as another item…"
+flows driven in the browser. The element ids/classes it expects are listed above
+that class.
 """
 from __future__ import annotations
 
@@ -36,6 +42,7 @@ import threading
 import time
 import unittest
 from urllib.parse import urlsplit
+import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -179,6 +186,16 @@ class SmokeFixture(unittest.TestCase):
     worker mode it needs. Tests are independent of each other's state except
     that they share the (initially empty) temporary database."""
     @classmethod
+    def make_processor(cls):
+        """The trusted processor injected into the app (a subclass may replace it)."""
+        return AnyPacketProcessor()
+
+    @classmethod
+    def app_kwargs(cls):
+        """Extra create_app keyword arguments (a subclass may add test seams)."""
+        return {}
+
+    @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(prefix="pam-ui-smoke-")
         cls.root = Path(cls.temp.name).resolve()
@@ -194,9 +211,10 @@ class SmokeFixture(unittest.TestCase):
         os.environ["PAM_AUTH_PIN"] = PIN
         import importlib
         module = importlib.import_module("server.app")
-        cls.processor = AnyPacketProcessor()
+        cls.processor = cls.make_processor()
         cls.app = module.create_app(database_path=cls.db, profile_id="local", processor=cls.processor, clock=None,
-                                    auth_pin=PIN, models_dir=cls.models_dir, licence_register=cls.register)
+                                    auth_pin=PIN, models_dir=cls.models_dir, licence_register=cls.register,
+                                    **cls.app_kwargs())
         cls.server = LocalServer(cls.app)
         cls.origin = cls.server.start()
         cls.requests = []
@@ -680,6 +698,347 @@ class SmokeTests(SmokeFixture):
         for expected in ("/", "/assets/memory.js", "/assets/memory-camera.js", "/assets/controller.js",
                          "/assets/motion.js", "/assets/hand-busy.js", "/api/auth/session", "/api/health", "/api/items", "/api/chat"):
             self.assertIn(expected, paths)
+        self.assertEqual(self.page_errors, [], self.page_errors)
+
+
+# --- CP3: identity in the browser --------------------------------------------------------
+# A second app with the deterministic synthetic embedder (server/test_cp3_identity.py)
+# injected through create_app(embedder=...), the CP3 fixture processor and an
+# approved synthetic calibration. Items are seeded over the API with colour-tagged
+# frames; the browser then has to render the group answer, the evidence list and
+# the two corrections. Element ids/classes the page must provide (Builder C):
+#   chat:   .group-members (container inside the assistant message), .group-member
+#           (one per member, data-item-id, contains an <img> of that member's photo,
+#           clickable: resubmits the chat for that item), text "which one is yours"
+#   detail: #evidence-list with .evidence-row per observation (data-observation-id,
+#           an <img> whose src is the observation image URL, a .unlink-observation
+#           button "Not this one"), #link-item button ("Same as another item…"),
+#           #confirm-dialog (<dialog>) with #link-target (<select>, option values are
+#           item ids, present for a link) and #confirm-ok / #confirm-cancel buttons;
+#           a refused link (409) shows its safe reason in #detail-status.
+#   badge:  an ambiguous item's card text carries "ambiguous" and "lookalike".
+IDENTITY_MODEL = "dinov2_vits14.onnx"
+IDENTITY_ENV = "PAM_ENABLE_IDENTITY_MODEL"
+
+
+class IdentitySmokeFixture(SmokeFixture):
+    @classmethod
+    def make_processor(cls):
+        import test_cp3_identity as identity
+        return identity.Cp3Processor()
+
+    @classmethod
+    def app_kwargs(cls):
+        import test_cp3_identity as identity
+        cls.embedder = identity.SyntheticEmbedder()
+        return {"embedder": cls.embedder}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.saved_identity_env = os.environ.get(IDENTITY_ENV)
+        super().setUpClass()
+        import test_cp3_identity as identity
+        cls.identity = identity
+        # The identity capability's policy inputs: a manifest naming the identity asset
+        # (synthetic bytes, never loaded: the injected embedder decides), a licence row
+        # and the env flag. The hand model stays unprovisioned (PAM_ENABLE_HAND_MODEL unset).
+        (cls.models_dir / IDENTITY_MODEL).write_bytes(b"SYNTHETIC-ONNX-BYTES-NOT-A-MODEL")
+        (cls.models_dir / "MANIFEST.json").write_text(json.dumps({"assets": [
+            {"name": IDENTITY_MODEL, "version": "vits14-export-1", "sha256": SHA, "licence": "Apache-2.0",
+             "url": "https://example.invalid/" + IDENTITY_MODEL, "fetched_at": "2026-10-09T00:00:00Z"}]}), encoding="utf-8")
+        cls.register.write_text("# synthetic register for the identity smoke test\n"
+                                f"| {IDENTITY_MODEL} | Apache-2.0 | synthetic | status: VERIFIED-COMMERCIAL |\n", encoding="utf-8")
+        os.environ[IDENTITY_ENV] = "1"
+        from perception.object_memory import ObjectStore
+        store = ObjectStore(cls.db, profile_id="local")
+        store.register_calibration(identity.calibration_record())
+        store.approve_calibration(identity.CAL_WIDE, identity.ACTOR)
+        cls.serial = 0
+        cls.phase = 0
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.saved_identity_env is None:
+            os.environ.pop(IDENTITY_ENV, None)
+        else:
+            os.environ[IDENTITY_ENV] = cls.saved_identity_env
+        super().tearDownClass()
+
+    # --- seeding over the API ---------------------------------------------------------
+    def post_tagged(self, api, regions, *, labels=None, locations=None):
+        identity = self.identity
+        type(self).serial += 1
+        type(self).phase += 1
+        wall_ms = int(time.time() * 1000) - 3600 * 1000  # observed within the last hour: never aged
+        packet = identity.cp3_packet(self.serial, rest=regions, phase=self.phase, wall_ms=wall_ms,
+                                     device=str(uuid.uuid5(uuid.NAMESPACE_URL, "pam-identity-smoke-device")),
+                                     session=str(uuid.uuid5(uuid.NAMESPACE_URL, "pam-identity-smoke-session")))
+        frame = identity.rest_frame_id(packet)
+        labels = [identity.GLASSES] * len(regions) if labels is None else labels
+        locations = [f"synthetic shelf {i}" for i in range(len(regions))] if locations is None else locations
+        self.processor.observations[packet["episode_id"]] = [
+            identity.cp3_observation(frame, reg, label=labels[i], location=locations[i]) for i, reg in enumerate(regions)]
+        response = api.post("/api/episodes", content=bootstrap.encode_packet(packet),
+                            headers={"origin": self.origin, "content-type": "application/json"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["ack"]["status"], "stored")
+        return packet
+
+    def wait_catalogue(self, api, predicate, what):
+        deadline = time.monotonic() + 15
+        items = []
+        while time.monotonic() < deadline:
+            items = api.get("/api/items").json()["items"]
+            if not any(item["index_pending"] for item in items) and predicate(items):
+                return items
+            time.sleep(0.1)
+        self.fail(f"{what}; catalogue: {[(i['name'], i['identity_status'], i.get('lookalikes')) for i in items]}")
+
+    def evidence(self, api, item_id):
+        response = api.get(f"/api/items/{item_id}/evidence")
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()["observations"]
+
+    def seed_lookalikes(self, api):
+        """A and B (tags 0 and 1) co-visible, then a lone tag-0 sighting: both ambiguous.
+        Idempotent per class: seeds once and returns the two ids (sorted by location)."""
+        if getattr(type(self), "pair", None):
+            return self.pair
+        identity = self.identity
+        self.post_tagged(api, [identity.region(identity.LEFT, 0), identity.region(identity.RIGHT, 1)],
+                         locations=["synthetic shelf left", "synthetic shelf right"])
+        items = self.wait_catalogue(api, lambda items: len([i for i in items if i["name"] == identity.GLASSES]) == 2, "two glasses expected")
+        self.post_tagged(api, [identity.region(identity.MIDDLE, 0)], locations=["synthetic shelf middle"])
+        items = self.wait_catalogue(api, lambda items: all(i["identity_status"] == "ambiguous" for i in items if i["name"] == identity.GLASSES),
+                                    "both glasses should be ambiguous lookalikes")
+        glasses = sorted((i for i in items if i["name"] == identity.GLASSES), key=lambda i: i["location_text"] or "")
+        self.assertEqual(len(glasses), 2, glasses)
+        type(self).pair = (glasses[0]["item_id"], glasses[1]["item_id"])
+        return self.pair
+
+    def open_detail(self, item_id):
+        page = self.page
+        self.show("items")
+        card = page.locator(f"#items-grid article[data-item-id='{item_id}']")
+        page.wait_for_function("id => Boolean(document.querySelector(`#items-grid article[data-item-id='${id}']`))", arg=item_id, timeout=15000)
+        card.locator("button", has_text="View evidence").first.click()
+        page.wait_for_selector("#item-dialog[open]", timeout=5000)
+        return card
+
+    def wait_rows(self, count, timeout=10000):
+        self.page.wait_for_function("n => document.querySelectorAll('#evidence-list .evidence-row').length === n", arg=count, timeout=timeout)
+        return self.page.locator("#evidence-list .evidence-row")
+
+    def confirm(self):
+        page = self.page
+        page.wait_for_selector("#confirm-dialog[open]", timeout=5000)
+        page.click("#confirm-ok")
+
+
+class IdentitySmokeTests(IdentitySmokeFixture):
+    def test_10_group_answer_renders_members_with_photos_and_tapping_one_resolves(self):
+        api = self.api()
+        a, b = self.seed_lookalikes(api)
+        health = api.get("/api/health").json()
+        capability = next(cap for cap in health["capabilities"] if cap["name"] == "physical_instance_recognition")
+        self.assertTrue(capability["enabled"], capability)
+        page = self.load(None)
+        self.ensure_signed_in()
+        # Stored items: both cards carry the ambiguous badge with the lookalike count.
+        self.show("items")
+        self.wait_text("#items-grid", self.identity.GLASSES, timeout=15000)
+        for item_id in (a, b):
+            card = page.locator(f"#items-grid article[data-item-id='{item_id}']")
+            self.assertEqual(card.count(), 1, item_id)
+            body = (card.text_content() or "").lower()
+            self.assertIn("ambiguous", body)
+            self.assertIn("lookalike", body)
+        self.show("chat")
+        page.fill("#chat-text", self.identity.ASK_GLASSES)
+        page.click("#chat-send")
+        self.wait_text("#chat-status", "Answer received.")
+        assistant = page.locator("#conversation .message.assistant").last
+        text = assistant.text_content() or ""
+        self.assertIn("Answer type: group", text)
+        self.assertIn("which one is yours", text.lower())
+        self.assertNotIn("last saw", text.lower())
+        members = assistant.locator(".group-members .group-member")
+        self.assertEqual(members.count(), 2, text)
+        seen = set()
+        for index in range(2):
+            member = members.nth(index)
+            item_id = member.get_attribute("data-item-id")
+            self.assertIn(item_id, (a, b))
+            seen.add(item_id)
+            image = member.locator("img")
+            self.assertEqual(image.count(), 1, "each member shows its own evidence photo")
+            self.assertEqual(image.get_attribute("src"), f"/api/items/{item_id}/image")
+        self.assertEqual(seen, {a, b})
+        page.wait_for_function("() => [...document.querySelectorAll('.group-members img')].every(img => img.complete && img.naturalWidth > 0)", timeout=10000)
+        # Tapping a member is the user's answer (coordinator ruling 5): the page records
+        # it with POST .../observations/{parked}/assign, then re-asks by item id; the
+        # answer is about that item alone and is not a group.
+        parked_before = {row["observation_id"] for row in self.evidence(api, a)} | {row["observation_id"] for row in self.evidence(api, b)}
+        answers_before = page.locator("#conversation .message.assistant").count()
+        requests_before = len(self.requests)
+        clicked = members.nth(0).get_attribute("data-item-id")
+        members.nth(0).click()
+        page.wait_for_function("n => document.querySelectorAll('#conversation .message.assistant').length > n", arg=answers_before, timeout=10000)
+        self.wait_text("#chat-status", "Answer received.")
+        # (every request is logged twice, by interception and by the request event)
+        assigns = [url for source, url in self.requests[requests_before:] if source == "route" and urlsplit(url).path.endswith("/assign")]
+        self.assertEqual(len(assigns), 1, f"exactly one assign call: {assigns}")
+        self.assertTrue(urlsplit(assigns[0]).path.startswith(f"/api/items/{clicked}/observations/"), assigns[0])
+        assign_statuses = {status for url, status in self.responses if url == assigns[0]}
+        self.assertEqual(assign_statuses, {200}, "the choice must be recorded")
+        resolved = page.locator("#conversation .message.assistant").last
+        resolved_text = resolved.text_content() or ""
+        self.assertNotIn("Answer type: group", resolved_text)
+        self.assertNotIn("Answer type: confident", resolved_text, "a group member's certainty is never upgraded by selecting it")
+        cards = resolved.locator("article.item-card")
+        self.assertEqual(cards.count(), 1, resolved_text)
+        self.assertEqual(cards.first.get_attribute("data-item-id"), clicked)
+        # The parked sighting is now the chosen item's evidence and the group is dissolved.
+        rows = {row["observation_id"] for row in self.evidence(api, clicked)}
+        self.assertEqual(len(rows - parked_before), 1, "the chosen item gained the parked observation")
+        other = b if clicked == a else a
+        self.assertEqual({row["observation_id"] for row in self.evidence(api, other)} - parked_before, set())
+        items = {i["item_id"]: i for i in api.get("/api/items").json()["items"]}
+        self.assertEqual([items[a]["lookalikes"], items[b]["lookalikes"]], [[], []])
+        page.fill("#chat-text", self.identity.ASK_GLASSES)
+        page.click("#chat-send")
+        page.wait_for_function("n => document.querySelectorAll('#conversation .message.assistant').length > n", arg=answers_before + 1, timeout=10000)
+        self.wait_text("#chat-status", "Answer received.")
+        again = page.locator("#conversation .message.assistant").last.text_content() or ""
+        self.assertNotIn("Answer type: group", again, "once resolved the two are distinct items again (clarify), not a group")
+        self.assertEqual(self.page_errors, [], self.page_errors)
+        api.close()
+
+    def test_20_evidence_rows_and_not_this_one_moves_the_observation_to_a_new_item(self):
+        identity = self.identity
+        api = self.api()
+        self.post_tagged(api, [identity.region(identity.LEFT, 2)], labels=[identity.BOTTLE], locations=["synthetic shelf back"])
+        self.wait_catalogue(api, lambda items: any(i["name"] == identity.BOTTLE for i in items), "bottle expected")
+        self.post_tagged(api, [identity.region(identity.RIGHT, 2)], labels=[identity.BOTTLE], locations=["synthetic shelf front"])
+        items = self.wait_catalogue(api, lambda items: any(i["name"] == identity.BOTTLE and i["location_text"] == "synthetic shelf front" for i in items),
+                                    "the second bottle sighting should re-match")
+        bottles = [i for i in items if i["name"] == identity.BOTTLE]
+        self.assertEqual(len(bottles), 1, bottles)
+        bottle = bottles[0]["item_id"]
+        rows_api = self.evidence(api, bottle)
+        self.assertEqual(len(rows_api), 2)
+        page = self.load(None)
+        self.ensure_signed_in()
+        self.open_detail(bottle)
+        rows = self.wait_rows(2)
+        srcs = set()
+        for index in range(2):
+            row = rows.nth(index)
+            observation_id = row.get_attribute("data-observation-id")
+            self.assertIn(observation_id, {r["observation_id"] for r in rows_api})
+            image = row.locator("img")
+            self.assertEqual(image.count(), 1, "each evidence row shows that observation's photo")
+            srcs.add(image.get_attribute("src"))
+            self.assertEqual(row.locator(".unlink-observation").count(), 1)
+            body = row.text_content() or ""
+            self.assertNotIn("Time not recorded", body)
+        self.assertEqual(srcs, {r["image_url"] for r in rows_api})
+        page.wait_for_function("() => [...document.querySelectorAll('#evidence-list img')].every(img => img.complete && img.naturalWidth > 0)", timeout=10000)
+        # "Not this one" on the second row, confirmed: the observation moves to a new item.
+        moved = rows.nth(1).get_attribute("data-observation-id")
+        rows.nth(1).locator(".unlink-observation").click()
+        self.confirm()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            items = api.get("/api/items").json()["items"]
+            bottles = [i for i in items if i["name"] == identity.BOTTLE]
+            if len(bottles) == 2:
+                break
+            time.sleep(0.1)
+        self.assertEqual(len(bottles), 2, bottles)
+        new_item = next(i["item_id"] for i in bottles if i["item_id"] != bottle)
+        self.assertEqual([r["observation_id"] for r in self.evidence(api, new_item)], [moved])
+        self.assertEqual(len(self.evidence(api, bottle)), 1)
+        self.assertNotIn(moved, [r["observation_id"] for r in self.evidence(api, bottle)])
+        # The dialog reflects the change without a reload: one row left on whichever item it shows.
+        self.wait_rows(1)
+        status = self.text("#detail-status")
+        self.assertNotIn("HTTP", status)
+        page.click("#detail-close")
+        self.show("items")
+        page.wait_for_function("() => document.querySelectorAll('#items-grid article').length >= 4", timeout=15000)
+        self.assertEqual(page.locator("#items-grid article", has_text=identity.BOTTLE).count(), 2)
+        type(self).bottle, type(self).unlinked = bottle, new_item
+        self.assertEqual(self.page_errors, [], self.page_errors)
+        api.close()
+
+    def test_30_same_as_another_item_shows_the_409_reason_then_merges(self):
+        identity = self.identity
+        api = self.api()
+        bottle, unlinked = getattr(type(self), "bottle", None), getattr(type(self), "unlinked", None)
+        self.assertTrue(bottle and unlinked, "test_20 seeds the unlinked pair this case relies on")
+        self.post_tagged(api, [identity.region(identity.MIDDLE, 3)], labels=[identity.BOTTLE], locations=["synthetic shelf side"])
+        items = self.wait_catalogue(api, lambda items: len([i for i in items if i["name"] == identity.BOTTLE]) == 3, "a third bottle expected")
+        third = next(i["item_id"] for i in items if i["name"] == identity.BOTTLE and i["item_id"] not in (bottle, unlinked))
+        page = self.load(None)
+        self.ensure_signed_in()
+        self.open_detail(unlinked)
+        self.wait_rows(1)
+        # Same as the item it was just unlinked from: refused (cannot-link) with a safe reason.
+        page.click("#link-item")
+        page.wait_for_selector("#confirm-dialog[open]", timeout=5000)
+        options = page.locator("#link-target option")
+        values = [options.nth(i).get_attribute("value") for i in range(options.count())]
+        self.assertIn(bottle, values)
+        self.assertIn(third, values)
+        self.assertNotIn(unlinked, values, "an item is never offered as its own match")
+        page.select_option("#link-target", bottle)
+        page.click("#confirm-ok")
+        page.wait_for_function("() => { const t = document.getElementById('detail-status').textContent || ''; return t.length > 0 && !t.includes('Loading'); }", timeout=10000)
+        status = self.text("#detail-status")
+        self.assertNotIn("409", status, "a status code is not a reason")
+        self.assertNotIn("Traceback", status)
+        self.assertTrue(len(status.strip()) > 10, status)
+        self.assertEqual(api.get(f"/api/items/{unlinked}").status_code, 200, "a refused link merges nothing")
+        self.assertEqual(len(self.evidence(api, bottle)), 1)
+        # Same as the third bottle: allowed; the two become one item with two evidence rows.
+        page.click("#link-item")
+        page.wait_for_selector("#confirm-dialog[open]", timeout=5000)
+        page.select_option("#link-target", third)
+        page.click("#confirm-ok")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if api.get(f"/api/items/{unlinked}").status_code == 404 or api.get(f"/api/items/{third}").status_code == 404:
+                break
+            time.sleep(0.1)
+        kept = third if api.get(f"/api/items/{third}").status_code == 200 else unlinked
+        gone = unlinked if kept == third else third
+        self.assertEqual(api.get(f"/api/items/{gone}").status_code, 404, "the merged-away item is gone")
+        self.assertEqual(len(self.evidence(api, kept)), 2)
+        items = api.get("/api/items").json()["items"]
+        self.assertEqual(len([i for i in items if i["name"] == identity.BOTTLE]), 2)
+        # The page shows the merged state (no reload): the dialog is closed or shows the kept item with two rows.
+        if page.locator("#item-dialog[open]").count():
+            self.wait_rows(2)
+            page.click("#detail-close")
+        self.show("items")
+        page.wait_for_function("id => !document.querySelector(`#items-grid article[data-item-id='${id}']`)", arg=gone, timeout=15000)
+        self.assertEqual(page.locator("#items-grid article", has_text=identity.BOTTLE).count(), 2)
+        self.assertEqual(self.page_errors, [], self.page_errors)
+        api.close()
+
+    def test_99_no_request_left_the_origin(self):
+        self.assertGreater(len(self.requests), 20, "interception saw too few requests to be meaningful")
+        self.assertEqual(self.foreign, [], f"requests left the origin: {self.foreign}")
+        paths = {urlsplit(url).path for _, url in self.requests}
+        for expected in ("/", "/api/chat", "/api/items"):
+            self.assertIn(expected, paths)
+        self.assertTrue(any(path.endswith("/evidence") for path in paths), "the detail view must load the evidence list")
+        self.assertTrue(any("/observations/" in path and path.endswith("/image") for path in paths), "evidence rows must load observation images")
+        self.assertTrue(any(path.endswith("/link") for path in paths))
+        self.assertTrue(any(path.endswith("/unlink") for path in paths))
+        self.assertTrue(any(path.endswith("/assign") for path in paths))
+        self.assertFalse(any(IDENTITY_MODEL in path for path in paths), "the identity model never leaves the server")
         self.assertEqual(self.page_errors, [], self.page_errors)
 
 

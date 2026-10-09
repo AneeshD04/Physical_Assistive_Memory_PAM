@@ -5,8 +5,10 @@ from typing import Literal
 from pydantic import Field, model_validator
 try:
     from .episode import EpisodePacket, StrictModel, decode_jpeg
+    from .identity import MAX_RLE_CHARS, RLE_SHAPE, crop_box, rle_from_mask
 except ImportError:
     from episode import EpisodePacket, StrictModel, decode_jpeg
+    from identity import MAX_RLE_CHARS, RLE_SHAPE, crop_box, rle_from_mask
 
 
 class LocalObservation(StrictModel):
@@ -15,6 +17,10 @@ class LocalObservation(StrictModel):
     bbox is capture-resolution [x1,y1,x2,y2]. calibration is an explicit
     provenance record, not an accuracy claim inferred from a confidence number.
     Continuity identifiers are scoped to the packet's device and session.
+    mask_rle (CP3, optional) is the changed-pixel mask inside the bbox as
+    identity.rle_from_mask output over the integer window identity.crop_box
+    gives for this bbox at capture resolution; it only steers embedding pooling
+    and is not stored with the observation.
     """
     frame_id: str = Field(min_length=1, max_length=100)
     bbox: list[float] = Field(min_length=4, max_length=4)
@@ -27,12 +33,15 @@ class LocalObservation(StrictModel):
     confidence: float = Field(default=0, ge=0, le=1)
     confidence_basis: str = Field(default="uncalibrated image region", max_length=600)
     calibration: dict = Field(default_factory=dict)
+    mask_rle: str | None = Field(default=None, max_length=MAX_RLE_CHARS)
 
     @model_validator(mode="after")
     def valid_box(self):
         x1, y1, x2, y2 = self.bbox
         if not (0 <= x1 < x2 and 0 <= y1 < y2):
             raise ValueError("Invalid region")
+        if self.mask_rle is not None and not RLE_SHAPE.fullmatch(self.mask_rle):
+            raise ValueError("Invalid mask RLE")
         return self
 
 
@@ -88,6 +97,15 @@ def localize(packet: EpisodePacket) -> list[LocalObservation]:
         x, y, w, h = cv2.boundingRect(contour)
         if w * h > mask.size * .25:
             continue
-        observations.append(LocalObservation(frame_id=last.frame_id, bbox=[x*sx, y*sy, (x+w)*sx, (y+h)*sy],
-                                             confidence_basis="registered OpenCV difference; not object or identity recognition"))
+        bbox = [x*sx, y*sy, (x+w)*sx, (y+h)*sy]
+        # CP3: the diff mask inside this region, resized (nearest) to the integer
+        # capture-resolution window the store will crop, as a bounded RLE. It only
+        # steers which patches the identity embedder pools; a mask too long to
+        # bound is dropped (None) and the embedder then pools every patch.
+        cx1, cy1, cx2, cy2 = crop_box(bbox, packet.capture.width, packet.capture.height)
+        region = cv2.resize(mask[y:y+h, x:x+w], (cx2 - cx1, cy2 - cy1), interpolation=cv2.INTER_NEAREST)
+        rle = rle_from_mask(region > 0)
+        observations.append(LocalObservation(frame_id=last.frame_id, bbox=bbox,
+                                             confidence_basis="registered OpenCV difference; not object or identity recognition",
+                                             mask_rle=rle if len(rle) <= MAX_RLE_CHARS else None))
     return observations

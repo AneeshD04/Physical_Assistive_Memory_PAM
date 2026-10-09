@@ -450,28 +450,48 @@ class FetchModelsScriptTests(ModelsFixture):
         self.assertEqual(code, 2, out)
         self.assertIn("refused", out)
         self.assertFalse(target.exists())
+        # CP3 (coordinator ruling 2): a pin with source "local-export" (the identity
+        # model, dest "server") is verified in place and never fetched; it has no url
+        # and a null sha256 until Oversight records the export, so it is reported as
+        # refused or missing, never as "would fetch".
+        local_exports = {name for name, asset in assets.items() if asset.get("source") == "local-export"}
+        self.assertEqual(local_exports, {"dinov2_vits14.onnx"}, assets.keys())
+        self.assertIsNone(assets["dinov2_vits14.onnx"].get("url"), "a local-export pin carries no url")
+        self.assertEqual(assets["dinov2_vits14.onnx"].get("dest"), "server")
+        server_target = self.root / "fetched-server"
+        fetchable = len(assets) - len(local_exports)
         # A synthetic register verifying everything does not help the hand model while
         # its sha256 is null: the entry is refused (exit 2) while the five verified
         # runtime files would be fetched. Dry run only: no network under this fixture.
         self.write_register("".join(f"| {name} | Apache-2.0 | synthetic | status: VERIFIED-COMMERCIAL |\n" for name in
                                     ("hand_landmarker.task", "vision_bundle.mjs", "vision_wasm_internal.js", "vision_wasm_internal.wasm",
-                                     "vision_wasm_nosimd_internal.js", "vision_wasm_nosimd_internal.wasm")))
-        code, out = self.invoke(module, "--dry-run", "--pins", str(pins), "--models-dir", str(target), "--licences", str(self.register))
+                                     "vision_wasm_nosimd_internal.js", "vision_wasm_nosimd_internal.wasm", "dinov2_vits14.onnx")))
+        code, out = self.invoke(module, "--dry-run", "--pins", str(pins), "--models-dir", str(target),
+                                "--server-models-dir", str(server_target), "--licences", str(self.register))
         self.assertEqual(code, 2, out)
         self.assertIn("refused  hand_landmarker.task", out)
         self.assertIn("null", out)
-        self.assertEqual(out.count("would fetch"), len(assets) - 1, out)
+        self.assertEqual(out.count("would fetch"), fetchable - 1, out)
         self.assertNotIn("would fetch  hand_landmarker.task", out)
+        for name in local_exports:
+            self.assertNotIn(f"would fetch  {name}", out, "a local-export pin is never fetched")
+            self.assertTrue(any(line.startswith(("refused  " + name, "missing  " + name)) for line in out.splitlines()),
+                            f"the local-export pin must be reported as refused or missing: {out}")
         self.assertFalse(target.exists(), "a dry run writes nothing")
+        self.assertFalse(server_target.exists(), "a dry run writes nothing (server destination)")
         # Against the REAL register (docs/LICENSES.md) the verdict is the same: the hand
         # model is refused and nothing is fetched in a dry run.
         real_register = ROOT / "docs" / "LICENSES.md"
         self.assertTrue(real_register.is_file(), "docs/LICENSES.md (Oversight) is missing")
-        code, out = self.invoke(module, "--dry-run", "--pins", str(pins), "--models-dir", str(target), "--licences", str(real_register))
+        code, out = self.invoke(module, "--dry-run", "--pins", str(pins), "--models-dir", str(target),
+                                "--server-models-dir", str(server_target), "--licences", str(real_register))
         self.assertEqual(code, 2, out)
         self.assertIn("refused  hand_landmarker.task", out)
+        self.assertNotIn("would fetch  dinov2_vits14.onnx", out)
         self.assertFalse(target.exists())
+        self.assertFalse(server_target.exists())
         self.assertFalse((ROOT / "phone" / "assets" / "models").exists(), "the script must not have touched the real models directory")
+        self.assertFalse((ROOT / "server" / "models" / "MANIFEST.json").exists(), "the script must not have written a server manifest into the tree")
 
     def test_dry_run_with_complete_pins_touches_nothing(self):
         module = self.script()

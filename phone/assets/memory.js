@@ -5,6 +5,9 @@ const text = (element, value) => { element.textContent = value == null ? '' : St
 function node(tag, content, className) { const element = document.createElement(tag); if (content != null) text(element, content); if (className) element.className = className; return element; }
 let authenticated = false, authGeneration = 0, currentView = 'chat', catalogueSequence = 0, detailSequence = 0;
 let selectedId = null, detailTrigger = null, lastCatalogue = '', storageReady = false, camera = null;
+// CP3: the item currently shown in the detail dialog (its DTO as last loaded) and
+// the action a confirmation dialog is waiting on (null when none is open).
+let detailItem = null, pendingConfirm = null;
 // The server's own verdict on automatic hand recognition (GET /api/health
 // capabilities); null until a health response names that capability.
 let handPolicy = null;
@@ -15,13 +18,25 @@ function dateLabel(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? 'Time not recorded' : date.toLocaleString();
 }
-function safeImageURL(item) {
-  if (typeof item.image_url !== 'string' || !item.image_url.startsWith('/api/items/') || item.image_url.startsWith('//')) return null;
+// A server-supplied image URL is used only when it is exactly the same-origin
+// path this page expects for that record: no other host, credentials, query,
+// fragment or path. Anything else renders as "no image", never as a request.
+function safePath(candidate, expected) {
+  if (typeof candidate !== 'string' || !candidate.startsWith('/api/items/') || candidate.startsWith('//')) return null;
   try {
-    const url = new URL(item.image_url, location.origin);
-    const expected = `/api/items/${encodeURIComponent(item.item_id)}/image`;
+    const url = new URL(candidate, location.origin);
     return url.origin === location.origin && !url.username && !url.password && !url.search && !url.hash && url.pathname === expected ? expected : null;
   } catch { return null; }
+}
+function safeImageURL(item) {
+  if (!item || typeof item.item_id !== 'string') return null;
+  return safePath(item.image_url, `/api/items/${encodeURIComponent(item.item_id)}/image`);
+}
+// CP3: an evidence row's photo is that observation's own keyframe,
+// GET /api/items/{id}/observations/{obs}/image, under the same discipline.
+function safeObservationImageURL(itemId, observation) {
+  if (typeof itemId !== 'string' || !observation || typeof observation.observation_id !== 'string' || observation.observation_id.length > 100) return null;
+  return safePath(observation.image_url, `/api/items/${encodeURIComponent(itemId)}/observations/${encodeURIComponent(observation.observation_id)}/image`);
 }
 function targetBox(item) {
   // reference_image.bbox is [x1, y1, x2, y2] in the evidence image's own pixels.
@@ -31,21 +46,20 @@ function targetBox(item) {
   const [x1, y1, x2, y2] = box;
   return x2 > x1 && y2 > y1 ? { x1, y1, x2, y2 } : null;
 }
-function image(item) {
-  const url = safeImageURL(item);
-  if (!url) return node('p', 'No evidence image available.', 'muted');
-  const box = targetBox(item);
-  const verified = item.identity_status === 'trusted';
+// One evidence photo with the recorded region outlined on it (dashed when the
+// identity is unverified). Shared by item cards, the detail view and CP3
+// evidence rows; the figure is sized to the image so the overlay is exact.
+function evidenceFigure({ url, box, verified, alt, maxHeight = 340, lazy = true }) {
   const figure = node('figure', null, 'evidence-figure');
-  const img = node('img'); img.src = url; img.loading = 'lazy'; img.decoding = 'async'; img.className = 'evidence';
-  img.alt = `Recorded evidence for ${item.name || 'unnamed item'}; not a live view.` + (box ? (verified ? ' The recorded item is outlined.' : ' The outlined region is where a change was recorded; the item identity is unverified.') : '');
+  const img = node('img'); img.src = url; if (lazy) img.loading = 'lazy'; img.decoding = 'async'; img.className = 'evidence';
+  img.alt = alt;
   img.addEventListener('error', () => figure.replaceWith(node('p', 'Evidence image is unavailable or your session has expired.', 'muted')), { once: true });
   img.addEventListener('load', () => {
     const width = img.naturalWidth, height = img.naturalHeight;
     if (!(width > 0 && height > 0)) return;
     // Size the figure to the image itself so the overlay percentages are exact.
     figure.style.aspectRatio = `${width} / ${height}`;
-    figure.style.width = `min(100%, ${(340 * width / height).toFixed(1)}px)`;
+    figure.style.width = `min(100%, ${(maxHeight * width / height).toFixed(1)}px)`;
     if (!box || box.x2 > width || box.y2 > height) return;
     const target = node('div', null, verified ? 'target' : 'target target-unverified');
     target.setAttribute('aria-hidden', 'true');
@@ -55,6 +69,17 @@ function image(item) {
   }, { once: true });
   figure.append(img);
   return figure;
+}
+function image(item) {
+  const url = safeImageURL(item);
+  if (!url) return node('p', 'No evidence image available.', 'muted');
+  const box = targetBox(item);
+  const verified = item.identity_status === 'trusted';
+  const alt = `Recorded evidence for ${item.name || 'unnamed item'}; not a live view.` + (box ? (verified ? ' The recorded item is outlined.' : ' The outlined region is where a change was recorded; the item identity is unverified.') : '');
+  return evidenceFigure({ url, box, verified, alt });
+}
+function lookalikeCount(item) {
+  return Array.isArray(item.lookalikes) ? item.lookalikes.filter(id => typeof id === 'string').length : 0;
 }
 // Clock-only staleness (CP2): the server ages a placed location by evaluation time
 // and sets stale_reason "age" with aged: true. "aged" may be absent on an older
@@ -68,7 +93,13 @@ function ageNotice(item) {
   return item.stale_reason ? `Note: ${item.stale_reason}` : null;
 }
 function describe(item, target) {
-  target.append(node('p', `Identity: ${item.identity_status || 'unknown'}`, 'badge'));
+  // CP3 identity badge: an ambiguous item names how many stored items it cannot
+  // be told apart from ("Identity: ambiguous · 1 lookalike"). A group never
+  // upgrades anyone; the badge only withholds confidence.
+  const lookalikes = lookalikeCount(item);
+  const ambiguous = item.identity_status === 'ambiguous';
+  target.append(node('p', `Identity: ${item.identity_status || 'unknown'}${lookalikes ? ` · ${lookalikes} lookalike${lookalikes === 1 ? '' : 's'}` : ''}`, ambiguous ? 'badge badge-ambiguous' : 'badge'));
+  if (ambiguous) target.append(node('p', `Pam cannot tell this item apart from ${lookalikes ? `${lookalikes} other stored item${lookalikes === 1 ? '' : 's'}` : 'another stored item'}, so it will ask which one is yours rather than guess. Open the details to correct a mix-up.`, 'notice'));
   target.append(node('p', `Location: ${item.location_status || 'unknown'}${item.aged === true ? ' · older evidence' : ''}`));
   target.append(node('p', item.location_text || 'No supported location is recorded.'));
   target.append(node('p', `Observed: ${dateLabel(item.observed_at_ms)}`, 'muted'));
@@ -83,6 +114,17 @@ function itemCard(item) {
   const button = node('button', 'View evidence & history', 'secondary'); button.dataset.itemId = item.item_id;
   button.addEventListener('click', () => openDetail(item.item_id, button)); card.append(button); return card;
 }
+// CP3: a refused correction (409) carries the server's own plain-language reason
+// as {detail}; it is shown verbatim when it is a short sentence and nothing else
+// (never a status code, a code token or a traceback). Anything else falls back
+// to the generic text.
+async function refusalReason(response) {
+  try {
+    const body = await response.json();
+    const detail = body && typeof body === 'object' && typeof body.detail === 'string' ? body.detail.trim() : '';
+    return detail && detail.length <= 400 && !/traceback|\n/i.test(detail) ? detail : null;
+  } catch { return null; }
+}
 async function api(path, options = {}) {
   const generation = authGeneration;
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 20000);
@@ -92,7 +134,7 @@ async function api(path, options = {}) {
     if (response.status === 401 && !path.endsWith('/login')) { expire(); throw new Error('Your session expired. Sign in again; saved captures remain queued.'); }
     if (!response.ok) {
       const messages = { 400: 'Please check the information and try again.', 401: 'That PIN was not accepted.', 403: 'Access was refused. Use the same-origin local application.', 404: 'This record is no longer available.', 409: 'The request conflicts with retained evidence.', 413: 'This request is too large.', 429: 'Too many attempts. Wait a moment before trying again.', 503: path === '/api/chat' ? 'Optional cloud chat is unavailable. Choose Local; capture and storage are unaffected.' : 'The local service is unavailable. Existing evidence has not been replaced.' };
-      throw new Error(messages[response.status] || `The request could not complete (HTTP ${response.status}). Try again.`);
+      throw new Error((response.status === 409 && await refusalReason(response)) || messages[response.status] || `The request could not complete (HTTP ${response.status}). Try again.`);
     }
     return await response.json();
   } catch (error) {
@@ -114,8 +156,9 @@ function resetPrivateUI() {
   authGeneration++; catalogueSequence++; detailSequence++;
   authenticated = false; queue.setAuthenticated(false);
   if (camera) void camera.stop('Signed out or session expired');
-  $('item-dialog').close(); selectedId = null;
-  $('detail-body').replaceChildren(); $('history').replaceChildren(); $('item-name').value = '';
+  closeConfirm(); $('item-dialog').close(); selectedId = null; detailItem = null;
+  $('detail-body').replaceChildren(); $('history').replaceChildren(); $('evidence-list').replaceChildren(); $('link-target').replaceChildren(); $('item-name').value = '';
+  $('link-item').disabled = true;
   $('items-grid').replaceChildren(); $('conversation').replaceChildren(); $('chat-text').value = ''; $('search').value = '';
   $('capabilities').replaceChildren(); lastCatalogue = ''; $('app').hidden = true; $('logout').hidden = true; $('signin').hidden = false;
   $('cloud-option').disabled = true; $('chat-mode').value = 'local'; notice('');
@@ -255,11 +298,37 @@ async function refreshItems() {
 }
 $('search-form').addEventListener('submit', event => { event.preventDefault(); void refreshItems(); });
 $('refresh-items').addEventListener('click', () => { void refreshItems(); void refreshHealth(); });
-async function loadDetail(id) {
-  const sequence = ++detailSequence; text($('detail-status'), 'Loading evidence and history…'); $('name-save').disabled = true;
+const OUTCOMES = { placed_on_surface: 'placed on a surface', picked_up: 'picked up', sighted: 'sighted', uncertain: 'outcome uncertain' };
+// CP3 evidence row: one observation of the item with its own photo (the recorded
+// region outlined), time, outcome, location and identity, plus "Not this one".
+function evidenceRow(item, observation, count) {
+  const li = node('li', null, 'evidence-row'); li.dataset.observationId = observation.observation_id;
+  const when = dateLabel(observation.observed_at_ms);
+  const url = safeObservationImageURL(item.item_id, observation);
+  const verified = observation.identity_status === 'trusted';
+  li.append(url
+    ? evidenceFigure({ url, box: targetBox(observation), verified, maxHeight: 200, lazy: false, alt: `Photo recorded ${when}; not a live view.${verified ? ' The recorded item is outlined.' : ' The outlined region is where a change was recorded; the identity is unverified.'}` })
+    : node('p', 'No photo is available for this observation.', 'muted'));
+  const body = node('div', null, 'evidence-body');
+  body.append(node('p', `${when} · ${OUTCOMES[observation.outcome] || observation.outcome || 'outcome not recorded'}`, 'evidence-when'));
+  body.append(node('p', observation.location_text || 'No supported location is recorded for this observation.'));
+  const candidates = Array.isArray(observation.candidates) ? observation.candidates.length : 0;
+  body.append(node('p', `Identity: ${observation.identity_status || 'unknown'}${candidates ? ` · could also be ${candidates} other stored item${candidates === 1 ? '' : 's'}` : ''}${observation.embedded === false ? ' · no appearance record' : ''}`, 'muted'));
+  const button = node('button', 'Not this one', 'secondary unlink-observation'); button.type = 'button'; button.dataset.observationId = observation.observation_id;
+  if (count < 2) { button.disabled = true; button.dataset.lone = '1'; body.append(node('p', 'This is the only observation of this item, so there is nothing to separate it from.', 'muted')); }
+  button.addEventListener('click', () => confirmUnlink(item, observation));
+  body.append(button); li.append(body);
+  return li;
+}
+async function loadDetail(id, outcome = null) {
+  const sequence = ++detailSequence; text($('detail-status'), 'Loading evidence and history…'); $('name-save').disabled = true; $('link-item').disabled = true; detailItem = null;
   try {
-    const [item, history] = await Promise.all([api(`/api/items/${encodeURIComponent(id)}`), api(`/api/items/${encodeURIComponent(id)}/history`)]);
+    const [item, history, evidence] = await Promise.all([
+      api(`/api/items/${encodeURIComponent(id)}`), api(`/api/items/${encodeURIComponent(id)}/history`),
+      // The evidence list is CP3; an older server without the route still shows the rest.
+      api(`/api/items/${encodeURIComponent(id)}/evidence`).catch(error => ({ error: error.message }))]);
     if (!authenticated || sequence !== detailSequence || selectedId !== id) return;
+    detailItem = item;
     text($('detail-title'), item.name || 'Unnamed item'); $('detail-body').replaceChildren(image(item)); describe(item, $('detail-body'));
     $('item-name').value = item.name || ''; $('history').replaceChildren();
     const observations = Array.isArray(history.observations) ? history.observations : [];
@@ -269,16 +338,103 @@ async function loadDetail(id) {
       li.append(node('p', `Identity: ${observation.identity_state || observation.identity_status || 'unknown'} · Actor: ${observation.actor || 'unknown'}`, 'muted'));
       $('history').append(li);
     }
-    text($('detail-status'), observations.length ? 'Evidence loaded. This is recorded history, not a live location.' : 'No recorded observations are available.'); $('name-save').disabled = false;
+    const rows = Array.isArray(evidence.observations) ? evidence.observations.filter(row => row && typeof row.observation_id === 'string').slice(0, 64) : [];
+    $('evidence-list').replaceChildren(...rows.map(row => evidenceRow(item, row, rows.length)));
+    if (!rows.length) $('evidence-list').append(node('li', evidence.error ? `The evidence list is unavailable: ${evidence.error}` : 'No recorded observations are available for this item.', 'muted'));
+    text($('detail-status'), `${outcome ? `${outcome} ` : ''}${observations.length || rows.length ? 'Evidence loaded. This is recorded history, not a live location.' : 'No recorded observations are available.'}`);
+    $('name-save').disabled = false; $('link-item').disabled = false; $('detail-refresh').disabled = false;
   } catch (error) { if (authenticated && sequence === detailSequence) text($('detail-status'), error.message); }
 }
 function openDetail(id, trigger) {
-  selectedId = id; detailTrigger = trigger; $('detail-body').replaceChildren(); $('history').replaceChildren(); $('item-name').value = '';
-  text($('detail-title'), 'Item details'); $('item-dialog').showModal(); void loadDetail(id);
+  selectedId = id; detailTrigger = trigger; detailItem = null; $('detail-body').replaceChildren(); $('history').replaceChildren(); $('evidence-list').replaceChildren(); $('item-name').value = '';
+  $('link-item').disabled = true; $('detail-refresh').disabled = false; text($('detail-title'), 'Item details'); $('item-dialog').showModal(); void loadDetail(id);
 }
+// --- CP3 corrections: every correction is confirmed in #confirm-dialog first -------------
+// openConfirm shows one plain-language sentence (and, for a link, the target
+// select); #confirm-ok runs the action, #confirm-cancel or Escape discards it.
+let confirmOpener = null;
+function openConfirm({ title, sentence, link = false, run, opener = document.activeElement }) {
+  text($('confirm-title'), title); text($('confirm-text'), sentence);
+  $('confirm-link-field').hidden = !link; pendingConfirm = run; confirmOpener = opener;
+  $('confirm-dialog').showModal();
+  (link ? $('link-target') : $('confirm-ok')).focus();
+}
+function closeConfirm() { pendingConfirm = null; if ($('confirm-dialog').open) $('confirm-dialog').close(); }
+$('confirm-cancel').addEventListener('click', closeConfirm);
+$('confirm-dialog').addEventListener('close', () => {
+  pendingConfirm = null;
+  // A nested modal does not hand focus back by itself: return it to the control
+  // that opened the confirmation (or the Evidence heading once that control is gone).
+  const opener = confirmOpener; confirmOpener = null;
+  if (document.activeElement !== document.body && !$('confirm-dialog').contains(document.activeElement)) return;
+  if (!$('item-dialog').open) return;
+  (opener?.isConnected && !opener.disabled && $('item-dialog').contains(opener) ? opener : $('evidence-title')).focus({ preventScroll: true });
+});
+$('confirm-ok').addEventListener('click', () => { const run = pendingConfirm; closeConfirm(); if (run) void run(); });
+function correctionBusy(busy) {
+  for (const button of [$('link-item'), $('name-save'), $('detail-refresh')]) button.disabled = busy;
+  for (const button of $('evidence-list').querySelectorAll('.unlink-observation')) button.disabled = busy || button.dataset.lone === '1';
+}
+// POST a correction for the item on show; on success reload the detail (which
+// may now be a different item) and the catalogue; on refusal show the server's
+// reason in #detail-status. The text while waiting says "Loading" so a reader
+// can tell it from a result.
+async function correct(path, body, { success, follow }) {
+  const id = selectedId; if (!id) return;
+  const sequence = ++detailSequence; correctionBusy(true); text($('detail-status'), 'Loading: checking this correction with the local service…');
+  try {
+    const item = await api(path, { method: 'POST', body: JSON.stringify(body) });
+    if (!authenticated || sequence !== detailSequence || selectedId !== id) return;
+    const next = follow && item && typeof item.item_id === 'string' ? item.item_id : id;
+    selectedId = next;
+    await loadDetail(next, success(item));
+    if (!authenticated || selectedId !== next) return;
+    correctionBusy(false); $('evidence-title').focus({ preventScroll: true }); void refreshItems();
+  } catch (error) {
+    if (!authenticated || sequence !== detailSequence || selectedId !== id) return;
+    text($('detail-status'), error.message); correctionBusy(false); $('evidence-title').focus({ preventScroll: true });
+  }
+}
+function confirmUnlink(item, observation) {
+  if (!selectedId || selectedId !== item.item_id) return;
+  const name = item.name || 'this item';
+  openConfirm({ title: 'Not this one',
+    sentence: `Tell Pam that the photo recorded ${dateLabel(observation.observed_at_ms)} does not show "${name}". That observation becomes a separate stored item, and Pam will keep the two apart from now on. Nothing is deleted.`,
+    run: () => correct(`/api/items/${encodeURIComponent(item.item_id)}/observations/${encodeURIComponent(observation.observation_id)}/unlink`, {},
+      { success: created => `Moved that observation to a new stored item${created && created.name ? ` ("${created.name}")` : ''}; it is no longer evidence for this item.` }) });
+}
+$('link-item').addEventListener('click', async () => {
+  const id = selectedId, item = detailItem; if (!id) return;
+  if (!item || item.item_id !== id) { text($('detail-status'), 'Refresh the details before linking this item.'); return; }
+  const opener = $('link-item'); opener.disabled = true;
+  try {
+    // A fresh, unfiltered catalogue so the choice is not limited by the search box.
+    const result = await api('/api/items?q=&limit=50');
+    if (!authenticated || selectedId !== id) return;
+    const lookalikes = new Set(Array.isArray(item.lookalikes) ? item.lookalikes : []);
+    const others = (Array.isArray(result.items) ? result.items : []).filter(other => other && typeof other.item_id === 'string' && other.item_id !== id);
+    others.sort((a, b) => Number(lookalikes.has(b.item_id)) - Number(lookalikes.has(a.item_id)));
+    if (!others.length) { text($('detail-status'), 'There is no other stored item to link with.'); return; }
+    $('link-target').replaceChildren(...others.map(other => {
+      const option = node('option', `${other.name || 'Unnamed item'} · ${other.location_text || `location ${other.location_status || 'unknown'}`} · ${dateLabel(other.observed_at_ms)}${lookalikes.has(other.item_id) ? ' · looks alike' : ''}`);
+      option.value = other.item_id; return option;
+    }));
+    openConfirm({ title: 'Same as another item', link: true, opener,
+      // Oversight F1: say what the action does, never why a refusal might come
+      // (a 409 shows the server's own reason verbatim).
+      sentence: `Pam will treat "${item.name || 'this item'}" and the item you choose below as one item and combine their evidence. You can undo this by marking an observation "Not this one". Nothing is deleted.`,
+      run: () => {
+        const other = $('link-target').value;
+        if (!other || other === selectedId) { text($('detail-status'), 'Choose a different stored item to link with.'); return; }
+        return correct(`/api/items/${encodeURIComponent(selectedId)}/link`, { other_item_id: other },
+          { follow: true, success: kept => `Linked: the two are now one stored item${kept && kept.name ? ` ("${kept.name}")` : ''}.` });
+      } });
+  } catch (error) { if (authenticated && selectedId === id) text($('detail-status'), error.message); }
+  finally { if (selectedId === id && detailItem) $('link-item').disabled = false; }
+});
 $('detail-close').addEventListener('click', () => $('item-dialog').close());
 $('item-dialog').addEventListener('close', () => {
-  detailSequence++; selectedId = null;
+  detailSequence++; selectedId = null; detailItem = null; closeConfirm();
   if (!authenticated) return;
   if (document.activeElement !== document.body && !$('item-dialog').contains(document.activeElement)) return;
   const replacement = detailTrigger?.isConnected ? detailTrigger : [...$('items-grid').querySelectorAll('button')].find(button => button.dataset.itemId === detailTrigger?.dataset.itemId);
@@ -298,16 +454,60 @@ function addMessage(role, message) {
   while ($('conversation').children.length > 40) $('conversation').firstElementChild.remove();
   return entry;
 }
-async function ask(question) {
+// CP3 group answer: the lookalike members' photos side by side, each a button.
+// Tapping one is the user's answer to "which one is yours": when the group names
+// an unresolved observation the choice is recorded (assign) first, then the chat
+// is re-asked with that member's item id (an exact-id question, the existing
+// clarify mechanism). Selecting a member never upgrades its certainty.
+function groupMember(member, state) {
+  const button = node('button', null, 'group-member'); button.type = 'button'; button.dataset.itemId = member.item_id;
+  const name = member.name || 'Unnamed item';
+  const url = safeImageURL(member);
+  if (url) { const img = node('img'); img.src = url; img.decoding = 'async'; img.alt = ''; button.append(img); }
+  else button.append(node('span', 'No photo available', 'muted'));
+  const meta = [member.location_text || (member.location_status ? `location ${member.location_status}` : null), dateLabel(member.observed_at_ms)].filter(Boolean).join(' · ');
+  button.append(node('span', name, 'member-name'), node('span', meta, 'member-meta'));
+  button.setAttribute('aria-label', `This one: ${name}, ${meta}`);
+  button.addEventListener('click', () => chooseMember(member, state, button));
+  return button;
+}
+async function chooseMember(member, state, button) {
+  if (!authenticated || $('chat-send').disabled) return;
+  const generation = authGeneration; let note = null;
+  if (typeof state.unresolved === 'string' && state.unresolved) {
+    $('chat-send').disabled = true; text($('chat-status'), 'Recording your choice…');
+    try {
+      await api(`/api/items/${encodeURIComponent(member.item_id)}/observations/${encodeURIComponent(state.unresolved)}/assign`, { method: 'POST', body: JSON.stringify({}) });
+      if (!authenticated || generation !== authGeneration) return;
+      state.unresolved = null; note = 'Your choice was recorded for that sighting.';
+    } catch (error) {
+      if (!authenticated || generation !== authGeneration) return;
+      note = `Your choice could not be recorded: ${error.message} Asking about the item you chose anyway.`;
+    } finally { $('chat-send').disabled = false; }
+  }
+  for (const other of button.parentElement?.querySelectorAll('.group-member') || []) other.setAttribute('aria-pressed', other === button ? 'true' : 'false');
+  await ask(member.item_id, { display: `${member.name || 'Unnamed item'} — this one`, note });
+}
+// question is the text sent; options.display is what the user's bubble shows
+// (a member tap sends the item id but reads as the chosen name); options.note
+// is a muted line under it.
+async function ask(question, options = {}) {
   if (!question.trim() || $('chat-send').disabled) return;
   $('chat-send').disabled = true; text($('chat-status'), 'Checking stored evidence…');
-  const generation = authGeneration; addMessage('user', question);
+  const generation = authGeneration; const asked = addMessage('user', options.display || question);
+  if (options.note) asked.append(node('p', options.note, 'muted'));
   try {
     const result = await api('/api/chat', { method: 'POST', body: JSON.stringify({ text: question, mode: $('chat-mode').value }) });
     if (!authenticated || generation !== authGeneration) return;
     const entry = addMessage('assistant', result.text || 'No answer is available from the stored evidence.');
     entry.append(node('p', `Answer type: ${result.shape || 'unknown'}${result.index_pending ? ' · processing pending' : ''}`, 'muted'));
-    if (result.shape !== 'abstain' && Array.isArray(result.members) && result.members.length) {
+    if (result.shape === 'group') {
+      entry.append(node('p', "I can't tell these apart — which one is yours? Tap the photo of your item.", 'group-prompt'));
+      const state = { unresolved: typeof result.unresolved_observation_id === 'string' ? result.unresolved_observation_id : null };
+      const members = node('div', null, 'group-members'); members.setAttribute('role', 'group'); members.setAttribute('aria-label', 'Items that look alike; choose yours');
+      for (const member of (Array.isArray(result.members) ? result.members : []).filter(member => member && typeof member.item_id === 'string').slice(0, 8)) members.append(groupMember(member, state));
+      entry.append(members);
+    } else if (result.shape !== 'abstain' && Array.isArray(result.members) && result.members.length) {
       const members = node('div', null, 'items-grid'); for (const item of result.members.slice(0, 8)) members.append(itemCard(item)); entry.append(members);
     }
     if (result.shape === 'clarify') {
