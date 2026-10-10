@@ -36,6 +36,18 @@ IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 # of its pixels are inside the mask; fewer than 4 such patches is too thin a basis.
 MASK_PATCH_OVERLAP = 0.5
 MIN_MASK_PATCHES = 4
+# CP4 (Oversight pass 2, F1): once a hand hull has been subtracted from the crop's
+# mask, the surviving mask must still cover this share of the padded crop (and
+# MIN_MASK_PATCHES patches); otherwise the region is refused, never pooled over
+# all patches (that fallback would embed the hand). Initial value, unmeasured.
+MIN_MASK_SHARE = 0.25
+
+
+class HandCoversRegion(ValueError):
+    """The hand hull leaves too little of the region to embed (str() is the
+    match reason the store records: "hand covers the region")."""
+    def __init__(self):
+        super().__init__("hand covers the region")
 BANK_MAX_VECTORS = 32
 DEFAULT_ALPHA = 0.05
 MIN_CALIBRATION_PAIRS = 20
@@ -74,6 +86,21 @@ def crop_box(bbox, width, height):
     ix1, iy1 = max(0, min(width - 1, math.floor(x1))), max(0, min(height - 1, math.floor(y1)))
     ix2, iy2 = max(ix1 + 1, min(width, math.ceil(x2))), max(iy1 + 1, min(height, math.ceil(y2)))
     return ix1, iy1, ix2, iy2
+
+
+# CP4 crop geometry (recipe r2): the identity crop is the bbox padded by CROP_PAD
+# of its own width/height on each side, clamped to the image. Initial value from
+# the build plan, unmeasured; changing it is a recipe change (bump RECIPE).
+CROP_PAD = 0.10
+
+
+def padded_crop_box(bbox, width, height, pad=CROP_PAD):
+    """crop_box of bbox grown by pad * (bbox width | height) on every side."""
+    x1, y1, x2, y2 = (float(v) for v in bbox)
+    if not all(math.isfinite(v) for v in (x1, y1, x2, y2)):
+        raise ValueError("Invalid region")
+    dx, dy = (x2 - x1) * pad, (y2 - y1) * pad
+    return crop_box([x1 - dx, y1 - dy, x2 + dx, y2 + dy], width, height)
 
 
 def rle_from_mask(mask) -> str:
@@ -121,7 +148,10 @@ class Embedder:
     from the decoder's BGR); mask is a bool array [H, W] over the same window or
     None. embed returns a float32 vector of length dim, L2-normalised. The tag
     "name@version" names the embedding space: a calibration and a stored vector
-    are only comparable within one tag.
+    are only comparable within one tag. An embedder MAY accept the keyword
+    hull_applied=bool (CP4 F1): the store passes it only to embedders whose embed
+    signature names it, after it has already refused insufficient masks itself
+    (mask_sufficient), so a test embedder without the keyword keeps working.
     """
     name: str = "embedder"
     version: str = "0"
@@ -147,24 +177,49 @@ def validate_embedder(embedder):
     return embedder
 
 
-def _patch_selection(mask, grid, patch):
+def _patch_selection(mask, grid, patch, hull_applied=False):
     """Boolean [grid*grid] of patches whose MASK_PATCH_OVERLAP share of pixels is
-    inside mask (already resized to grid*patch square), or None to use all."""
+    inside mask (already resized to grid*patch square), or None to use all.
+    With hull_applied, fewer than MIN_MASK_PATCHES qualifying patches raises
+    HandCoversRegion instead of falling back to all patches."""
     if mask is None:
         return None
     coverage = mask.reshape(grid, patch, grid, patch).astype(np.float32).mean(axis=(1, 3)).reshape(-1)
     selected = coverage >= MASK_PATCH_OVERLAP
-    return selected if int(selected.sum()) >= MIN_MASK_PATCHES else None
+    if int(selected.sum()) >= MIN_MASK_PATCHES:
+        return selected
+    if hull_applied:
+        raise HandCoversRegion()
+    return None
 
 
-def pool_patch_tokens(tokens, mask=None, *, grid=DINOV2_GRID, patch=DINOV2_PATCH, dim=DINOV2_DIM):
+def mask_sufficient(mask, hull_applied, *, grid=DINOV2_GRID, patch=DINOV2_PATCH) -> bool:
+    """CP4 F1 rule, evaluated by the store before any embedder is called: with a
+    hull applied, the surviving bool mask [H, W] must cover at least
+    MIN_MASK_SHARE of the crop AND select at least MIN_MASK_PATCHES patches once
+    resized (nearest) to the DINOv2 grid; without a hull the mask is always
+    sufficient (the all-patches fallback then applies inside the embedder)."""
+    if not hull_applied or mask is None:
+        return True
+    import cv2
+    mask = np.asarray(mask).astype(bool)
+    if mask.size == 0 or float(mask.mean()) < MIN_MASK_SHARE:
+        return False
+    square = cv2.resize(mask.astype(np.uint8) * 255, (grid * patch, grid * patch), interpolation=cv2.INTER_NEAREST) > 0
+    coverage = square.reshape(grid, patch, grid, patch).astype(np.float32).mean(axis=(1, 3))
+    return int((coverage >= MASK_PATCH_OVERLAP).sum()) >= MIN_MASK_PATCHES
+
+
+def pool_patch_tokens(tokens, mask=None, *, grid=DINOV2_GRID, patch=DINOV2_PATCH, dim=DINOV2_DIM, hull_applied=False):
     """Mean of the patch tokens under the mask, L2-normalised.
 
     tokens is the model output as [1, 1+N, dim] (CLS first, dropped) or
     [1, N, dim] with N = grid*grid; mask is a bool [grid*patch, grid*patch] array
     or None. Patches with at least MASK_PATCH_OVERLAP of their pixels in the mask
     are pooled; when the mask is None or fewer than MIN_MASK_PATCHES qualify, all
-    patches are pooled (initial rule, unmeasured).
+    patches are pooled (initial rule, unmeasured) UNLESS hull_applied is set: a
+    mask that a hand hull has thinned below MIN_MASK_PATCHES then raises
+    HandCoversRegion, because pooling every patch would embed the hand (CP4 F1).
     """
     tokens = np.asarray(tokens, dtype=np.float32)
     count = grid * grid
@@ -176,7 +231,7 @@ def pool_patch_tokens(tokens, mask=None, *, grid=DINOV2_GRID, patch=DINOV2_PATCH
         patches = tokens[0]
     else:
         raise ValueError("Unexpected number of patch tokens")
-    selected = _patch_selection(mask, grid, patch)
+    selected = _patch_selection(mask, grid, patch, hull_applied)
     pooled = patches.mean(axis=0) if selected is None else patches[selected].mean(axis=0)
     return l2_normalise(pooled)
 
@@ -187,7 +242,12 @@ def pool_patch_tokens(tokens, mask=None, *, grid=DINOV2_GRID, patch=DINOV2_PATCH
 # interpolation, normalisation, patch-overlap rule, fallback) must bump RECIPE: a
 # calibration quantile measured under the old recipe then no longer matches the tag
 # and is never applied to vectors produced by the new one.
-RECIPE = "r1"
+# r2 (CP4): the crop window is padded_crop_box (CROP_PAD on each side) and the hull
+# of any hand in the landmark sample within HAND_HULL_WINDOW_MS of the keyframe is
+# excluded from the pooling mask (perception/hand_hull.py). Calibrations recorded
+# under r1 carry the r1 tag and are therefore not active for r2; the store's
+# calibration lookup keys on the full embedder tag.
+RECIPE = "r2"
 
 
 def prepare_dinov2_input(crop, mask=None, *, size=DINOV2_INPUT):
@@ -260,10 +320,10 @@ class DinoV2Embedder(Embedder):
         self._input = inputs[0].name
         self._output = self._session.get_outputs()[0].name
 
-    def embed(self, crop, mask=None):
+    def embed(self, crop, mask=None, *, hull_applied=False):
         tensor, square_mask = prepare_dinov2_input(crop, mask)
         tokens = self._session.run([self._output], {self._input: tensor})[0]
-        return pool_patch_tokens(tokens, square_mask)
+        return pool_patch_tokens(tokens, square_mask, hull_applied=hull_applied)
 
 
 class ItemBank:

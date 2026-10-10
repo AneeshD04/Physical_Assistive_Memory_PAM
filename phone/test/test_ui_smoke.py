@@ -217,6 +217,7 @@ class SmokeFixture(unittest.TestCase):
                                     **cls.app_kwargs())
         cls.server = LocalServer(cls.app)
         cls.origin = cls.server.start()
+        cls.acknowledge_consent()
         cls.requests = []
         cls.foreign = []
         cls.posted_packets = []
@@ -243,6 +244,22 @@ class SmokeFixture(unittest.TestCase):
             cls.page.on("pageerror", lambda error: cls.page_errors.append(str(error)))
         except Exception as error:  # reported by every test, never skipped
             cls.launch_error = f"{type(error).__name__}: {error}"
+
+    @classmethod
+    def acknowledge_consent(cls):
+        """CP4 (coordinator ruling 1): capture is refused until the build's consent
+        version is acknowledged for the profile. Done once per server over the API (one
+        sign-in, charged to the shared rate limit), so the browser's camera gate is open
+        for the cases that start the camera; the Privacy view shows the acknowledged
+        state. The page's own "I understand" control is exercised by the Privacy case."""
+        import httpx
+        with httpx.Client(base_url=cls.origin, timeout=10) as client:
+            response = client.post("/api/auth/login", json={"pin": PIN}, headers={"origin": cls.origin})
+            if response.status_code != 200:
+                raise RuntimeError(f"sign-in for the consent acknowledgement failed: {response.status_code} {response.text}")
+            response = client.post("/api/consent", json={"acknowledge": bootstrap.CONSENT_VERSION}, headers={"origin": cls.origin})
+            if response.status_code != 200 or response.json().get("ok") is not True:
+                raise RuntimeError(f"consent acknowledgement failed: {response.status_code} {response.text}")
 
     @classmethod
     def _observe(cls, url, source):
@@ -324,6 +341,16 @@ class SmokeFixture(unittest.TestCase):
 
     def text(self, selector):
         return self.page.locator(selector).text_content() or ""
+
+    def pump(self, seconds=0.1):
+        """Sleep while letting Playwright dispatch events. The sync API runs the
+        context.route handler (which continues every page request to the server)
+        and the response/request listeners only while a Playwright call is in
+        progress, so a plain time.sleep() poll that waits for the server-side effect
+        of a browser request can stall for the whole deadline: the POST is parked
+        in the route handler until the next Playwright call. Every wait that
+        depends on a request the page sent must pump, not sleep."""
+        self.page.wait_for_timeout(int(seconds * 1000))
 
     def wait_text(self, selector, needle, timeout=10000):
         self.page.wait_for_function("([selector, needle]) => (document.querySelector(selector)?.textContent || '').includes(needle)",
@@ -520,7 +547,7 @@ class SmokeTests(SmokeFixture):
         self.wait_text("#episode-status", "Automatic episode saved locally", timeout=15000)
         deadline = time.monotonic() + 15
         while len(self.posted_packets) <= posted_before and time.monotonic() < deadline:
-            time.sleep(0.1)
+            self.pump(0.1)
         self.assertEqual(len(self.posted_packets), posted_before + 1, "exactly one POST /api/episodes")
         packet = self.posted_packets[-1]
         self.assertEqual(packet["capture_mode"], "automatic")
@@ -658,7 +685,7 @@ class SmokeTests(SmokeFixture):
         self.wait_text("#episode-status", "Automatic episode saved locally", timeout=15000)
         deadline = time.monotonic() + 15
         while len(self.posted_packets) <= posted_before and time.monotonic() < deadline:
-            time.sleep(0.1)
+            self.pump(0.1)
         self.assertEqual(len(self.posted_packets), posted_before + 1, "exactly one packet for the episode")
         packet = self.posted_packets[-1]
         roles = [frame["role"] for frame in packet["keyframes"]]
@@ -954,7 +981,7 @@ class IdentitySmokeTests(IdentitySmokeFixture):
             bottles = [i for i in items if i["name"] == identity.BOTTLE]
             if len(bottles) == 2:
                 break
-            time.sleep(0.1)
+            self.pump(0.1)
         self.assertEqual(len(bottles), 2, bottles)
         new_item = next(i["item_id"] for i in bottles if i["item_id"] != bottle)
         self.assertEqual([r["observation_id"] for r in self.evidence(api, new_item)], [moved])
@@ -1010,7 +1037,7 @@ class IdentitySmokeTests(IdentitySmokeFixture):
         while time.monotonic() < deadline:
             if api.get(f"/api/items/{unlinked}").status_code == 404 or api.get(f"/api/items/{third}").status_code == 404:
                 break
-            time.sleep(0.1)
+            self.pump(0.1)
         kept = third if api.get(f"/api/items/{third}").status_code == 200 else unlinked
         gone = unlinked if kept == third else third
         self.assertEqual(api.get(f"/api/items/{gone}").status_code, 404, "the merged-away item is gone")
@@ -1039,6 +1066,418 @@ class IdentitySmokeTests(IdentitySmokeFixture):
         self.assertTrue(any(path.endswith("/unlink") for path in paths))
         self.assertTrue(any(path.endswith("/assign") for path in paths))
         self.assertFalse(any(IDENTITY_MODEL in path for path in paths), "the identity model never leaves the server")
+        self.assertEqual(self.page_errors, [], self.page_errors)
+
+
+# --- CP4: idle keyframes, the Privacy view, erasure and the new renderings ------------------
+# A third app (real time, no injected clock) with the CP3 scripted processor so API-seeded
+# packets carry exactly the observations each case needs (nested placements for an
+# inferred item, a placement whose idle "gone" frame the worker turns into
+# negative_reobservation). The idle-keyframe case runs the fake camera in automatic mode
+# (fake worker ready, server capability enabled as in test_05) with every frame reporting
+# no hand, and drives time with Playwright's clock (page.clock) so the 30 s idle timer
+# elapses in a few real seconds. Element ids/classes the page must provide (Builder C):
+#   nav:      button[data-view=privacy], section #view-privacy
+#   privacy:  #retention-form with number inputs #retention-episodes-days,
+#             #retention-idle-hours, #retention-landmarks-hours, text #retention-consent
+#             (the consent version), submit #retention-save (confirmed in #confirm-dialog /
+#             #confirm-ok), status #retention-status; counts in #retention-counts as
+#             elements [data-count=idle_cached|idle_promoted|revisions_expired|
+#             landmarks_reduced] whose text is the integer; "Erase everything": input
+#             #erase-all-phrase, button #erase-all (disabled until the phrase is exactly
+#             "ERASE EVERYTHING"), confirmed in #confirm-dialog; the server report in
+#             #privacy-status
+#   detail:   #erase-item button in #item-dialog ("Erase this item"), confirmed in
+#             #confirm-dialog; afterwards the item is gone from #items-grid
+#   cards:    an inferred item's card text contains "probably with {container name}" and
+#             the container's location; a negative_reobservation item's card text contains
+#             "no longer there"
+#   camera:   #camera-summary carries the idle keyframe counter (the word "idle" next to
+#             the number of frames posted) while automatic capture runs
+PRIVACY_PIN_PHRASE = "ERASE EVERYTHING"
+IDLE_FIELDS = {"schema_version", "device_id", "session_id", "frame_id", "t_ms", "clock_anchor", "capture", "jpeg_b64", "motion_energy"}
+
+
+class PrivacySmokeFixture(SmokeFixture):
+    @classmethod
+    def make_processor(cls):
+        import test_cp3_identity as identity
+        return identity.Cp3Processor()
+
+    @classmethod
+    def setUpClass(cls):
+        cls.posted_idle = []
+        cls.idle_statuses = []
+        super().setUpClass()
+        import test_cp4_fixtures as fx
+        cls.fx = fx
+        cls.serial = 0
+        cls.phase = 0
+        cls.device = str(uuid.uuid5(uuid.NAMESPACE_URL, "pam-privacy-smoke-device"))
+        cls.session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "pam-privacy-smoke-session"))
+        if getattr(cls, "context", None) is not None:
+            cls.context.on("response", lambda response: cls.idle_statuses.append(response.status) if response.url == cls.origin + "/api/idle" else None)
+
+    @classmethod
+    def _route(cls, route, request):
+        if request.method == "POST" and request.url == cls.origin + "/api/idle":
+            try:
+                cls.posted_idle.append(json.loads(request.post_data or ""))
+            except ValueError:
+                cls.posted_idle.append({"error": "unparseable body"})
+        super()._route(route, request)
+
+    def api(self):
+        """One signed-in httpx client for the whole class: the erase-all PIN check shares
+        the sign-in rate limit (5 per client per minute), so logins are budgeted."""
+        client = getattr(type(self), "shared_api", None)
+        if client is None:
+            client = super().api()
+            type(self).shared_api = client
+        return client
+
+    @classmethod
+    def tearDownClass(cls):
+        client = getattr(cls, "shared_api", None)
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+        super().tearDownClass()
+
+    # --- seeding over the API (real time: wall anchors sit within the last hour) ----------
+    def seed(self, api, observations, *, minutes_ago=60, rest=None, **packet_kwargs):
+        fx = self.fx
+        type(self).serial += 1
+        type(self).phase += 1
+        wall_ms = int(time.time() * 1000) - minutes_ago * 60 * 1000
+        packet = fx.episode_packet(self.serial, rest=fx.golden("reference") if rest is None else rest, phase=self.phase,
+                                   device=self.device, session=self.session_id, wall_ms=wall_ms, **packet_kwargs)
+        frame = fx.rest_frame_id(packet)
+        scripted = []
+        for value in observations:
+            value = dict(value)
+            if value.get("frame_id") is None:
+                value["frame_id"] = frame
+            scripted.append(value)
+        self.processor.observations[packet["episode_id"]] = scripted
+        response = api.post("/api/episodes", content=bootstrap.encode_packet(packet),
+                            headers={"origin": self.origin, "content-type": "application/json"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["ack"]["status"], "stored")
+        return packet
+
+    def post_idle(self, api, name, *, minutes_ago):
+        fx = self.fx
+        packet = fx.idle_packet(fx.golden(name), device=self.device, session=self.session_id,
+                                wall_ms=int(time.time() * 1000) - minutes_ago * 60 * 1000)
+        response = api.post("/api/idle", content=bootstrap.encode_packet(packet), headers={"origin": self.origin, "content-type": "application/json"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIs(response.json()["retained"], True, response.text)
+        return packet
+
+    def wait_catalogue(self, api, predicate, what, timeout=15):
+        deadline = time.monotonic() + timeout
+        items = []
+        while time.monotonic() < deadline:
+            items = api.get("/api/items").json()["items"]
+            if not any(item["index_pending"] for item in items) and predicate(items):
+                return items
+            time.sleep(0.1)
+        self.fail(f"{what}; catalogue: {[(i['name'], i['location_status'], i.get('stale_reason')) for i in items]}")
+
+    def seed_renderings(self, api):
+        """The keys inside the basket, the basket moved (keys inferred); a bottle placed,
+        then an idle 'gone' frame the worker turns into negative_reobservation. Idempotent
+        per class. Returns {name: item}."""
+        if getattr(type(self), "rendered", None):
+            return self.rendered
+        fx = self.fx
+        basket, keys, bottle = "synthetic smoke basket", "synthetic smoke keys", "synthetic smoke bottle"
+        self.seed(api, [fx.observation(None, fx.BLOCK_BBOX, label=basket, location="fixture smoke counter", continuity_id="smoke-basket"),
+                        fx.observation(None, [68.0, 48.0, 92.0, 72.0], label=keys, location="fixture smoke counter", continuity_id="smoke-keys")], minutes_ago=60)
+        self.wait_catalogue(api, lambda items: {i["name"] for i in items} >= {basket, keys}, "basket and keys expected")
+        self.seed(api, [fx.observation(None, [8.0, 8.0, 56.0, 36.0], label=basket, location="fixture smoke shelf", continuity_id="smoke-basket")], minutes_ago=45)
+        self.wait_catalogue(api, lambda items: any(i["name"] == keys and i["location_status"] == "inferred" for i in items), "the keys should read inferred once the basket moved")
+        self.seed(api, [fx.observation(None, fx.BLOCK_BBOX, label=bottle, location="fixture smoke table")], minutes_ago=40)
+        self.wait_catalogue(api, lambda items: any(i["name"] == bottle and i["location_status"] == "placed" for i in items), "bottle expected")
+        self.post_idle(api, "gone", minutes_ago=20)
+        items = self.wait_catalogue(api, lambda items: any(i["name"] == bottle and i.get("stale_reason") == "negative_reobservation" for i in items),
+                                    "the worker should turn the idle 'gone' frame into negative_reobservation")
+        # The same frame shows the relocated basket (plain texture at its new place) still
+        # present: the worker promotes it into a "reobservation" sighting. Wait for that
+        # row deterministically (index_pending clear AND the row present) so no page load
+        # races the worker (Builder C's "1 evidence row instead of 2" report).
+        basket_id = next(i["item_id"] for i in items if i["name"] == basket)
+        deadline = time.monotonic() + 15
+        rows = []
+        while time.monotonic() < deadline:
+            catalogue = api.get("/api/items").json()["items"]
+            rows = api.get(f"/api/items/{basket_id}/evidence").json()["observations"]
+            if not any(i["index_pending"] for i in catalogue) and any(r.get("source") == "reobservation" for r in rows):
+                break
+            time.sleep(0.1)
+        self.assertTrue(any(r.get("source") == "reobservation" for r in rows), f"the basket never gained its idle sighting: {rows}")
+        type(self).basket_rows = rows
+        type(self).rendered = {i["name"]: i for i in items}
+        return self.rendered
+
+    def show_privacy(self):
+        self.page.click("nav button[data-view=privacy]")
+        self.page.wait_for_selector("#view-privacy:not([hidden])", timeout=5000)
+
+    def count(self, name):
+        text = self.text(f"#retention-counts [data-count='{name}']").strip()
+        self.assertRegex(text, r"^\d+$", f"{name} count must render as an integer, got {text!r}")
+        return int(text)
+
+
+class PrivacySmokeTests(PrivacySmokeFixture):
+    def test_10_privacy_view_shows_retention_and_counts_and_an_edit_persists(self):
+        api = self.api()
+        # An idle frame dated before every placement the later cases seed (90 min ago):
+        # it is cached (counted) but never re-observed against them. A frame dated AFTER
+        # a later-seeded placement would be a legitimate sighting at that later time and
+        # change what test_20 can expect (the order effect Builder C reported).
+        self.post_idle(api, "present", minutes_ago=90)
+        page = self.load(None)
+        self.ensure_signed_in()
+        self.show_privacy()
+        page.wait_for_function("() => (document.getElementById('retention-episodes-days') || {}).value === '30'", timeout=10000, polling=100)
+        self.assertEqual(page.input_value("#retention-episodes-days"), "30", "coordinator ruling 8: the 30-day default")
+        self.assertEqual(page.input_value("#retention-idle-hours"), "24")
+        self.assertEqual(page.input_value("#retention-landmarks-hours"), "72")
+        self.assertIn("rig-2026-10", self.text("#retention-consent"))
+        self.wait_text("#privacy-consent-state", "Acknowledged")
+        self.assertIn("not guaranteed", self.text("#privacy-disclosure"), "the disclosure is shown verbatim (ruling 9)")
+        page.wait_for_function("() => /^\\d+$/.test((document.querySelector('#retention-counts [data-count=idle_cached]') || {}).textContent || '')", timeout=10000, polling=100)
+        self.assertEqual(self.count("idle_cached"), 1)
+        for name in ("idle_promoted", "revisions_expired", "landmarks_reduced"):
+            self.assertEqual(self.count(name), 0, name)
+        # Edit episodes_days with confirmation; the PUT is observed and the value persists.
+        page.fill("#retention-episodes-days", "60")
+        page.click("#retention-save")
+        self.confirm_dialog()
+        page.wait_for_function("() => /saved|updated|retention/i.test(document.getElementById('retention-status').textContent || '') && !/loading|saving/i.test(document.getElementById('retention-status').textContent || '')", timeout=10000, polling=100)
+        status = self.text("#retention-status")
+        self.assertNotIn("HTTP", status)
+        self.assertEqual(api.get("/api/retention").json()["retention"]["episodes_days"], 60, "the edit persisted on the server")
+        puts = [(url, status) for url, status in self.responses if url == self.origin + "/api/retention"]
+        self.assertTrue(any(status == 200 for _, status in puts), puts)
+        page.reload(wait_until="load")
+        self.ensure_signed_in()
+        self.show_privacy()
+        page.wait_for_function("() => (document.getElementById('retention-episodes-days') || {}).value === '60'", timeout=10000, polling=100)
+        # Out-of-range input is refused by the page or the server without changing the setting.
+        page.fill("#retention-episodes-days", "3")
+        page.click("#retention-save")
+        if page.locator("#confirm-dialog[open]").count():
+            page.click("#confirm-ok")
+        self.pump(0.8)
+        self.assertEqual(api.get("/api/retention").json()["retention"]["episodes_days"], 60, "an out-of-range value never persists")
+        self.assertEqual(self.page_errors, [], self.page_errors)
+
+    def confirm_dialog(self):
+        self.page.wait_for_selector("#confirm-dialog[open]", timeout=5000)
+        self.page.click("#confirm-ok")
+
+    def test_20_inferred_and_negative_reobservation_items_render_honestly(self):
+        api = self.api()
+        rendered = self.seed_renderings(api)
+        keys, bottle = rendered["synthetic smoke keys"], rendered["synthetic smoke bottle"]
+        self.assertEqual(keys["inference"]["container"], rendered["synthetic smoke basket"]["item_id"])
+        page = self.load(None)
+        self.ensure_signed_in()
+        self.show("items")
+        page.wait_for_function("id => Boolean(document.querySelector(`#items-grid article[data-item-id='${id}']`))", arg=keys["item_id"], timeout=15000)
+        keys_card = page.locator(f"#items-grid article[data-item-id='{keys['item_id']}']")
+        body = keys_card.text_content() or ""
+        self.assertIn("probably with", body.lower())
+        self.assertIn("synthetic smoke basket", body)
+        self.assertIn("fixture smoke shelf", body)
+        self.assertNotIn("Location: placed", body)
+        bottle_card = page.locator(f"#items-grid article[data-item-id='{bottle['item_id']}']")
+        self.assertEqual(bottle_card.count(), 1)
+        body = bottle_card.text_content() or ""
+        self.assertIn("no longer there", body.lower())
+        self.assertNotIn("Location: placed", body)
+        self.show("chat")
+        page.fill("#chat-text", "where are my synthetic smoke keys")
+        page.click("#chat-send")
+        self.wait_text("#chat-status", "Answer received.")
+        text = page.locator("#conversation .message.assistant").last.text_content() or ""
+        self.assertIn("Answer type: hedged", text)
+        self.assertIn("I think", text)
+        self.assertIn("synthetic smoke basket", text)
+        self.assertNotIn("last saw at fixture smoke counter", text)
+        # F3: a promoted idle still is labelled as such in the evidence list, never as a
+        # hand event. The basket's rows: the nested placement, the relocation and the
+        # idle sighting (seeded and awaited over the API, so the count is deterministic).
+        basket = rendered["synthetic smoke basket"]["item_id"]
+        expected_rows = len(self.basket_rows)
+        self.assertGreaterEqual(expected_rows, 3, self.basket_rows)
+        self.show("items")
+        page.wait_for_function("id => Boolean(document.querySelector(`#items-grid article[data-item-id='${id}']`))", arg=basket, timeout=15000)
+        page.locator(f"#items-grid article[data-item-id='{basket}'] button", has_text="View evidence").first.click()
+        page.wait_for_selector("#item-dialog[open]", timeout=5000)
+        page.wait_for_function("n => document.querySelectorAll('#evidence-list .evidence-row').length === n", arg=expected_rows, timeout=15000)
+        badges = page.locator("#evidence-list .evidence-row .badge-idle")
+        self.assertEqual(badges.count(), sum(1 for r in self.basket_rows if r.get("source") == "reobservation"), "one idle badge per promoted still")
+        self.assertIn("Seen while idle (automatic still), not a hand event", badges.first.text_content() or "")
+        hand_rows = page.locator("#evidence-list .evidence-row:not(:has(.badge-idle))")
+        self.assertEqual(hand_rows.count(), expected_rows - badges.count())
+        page.click("#detail-close")
+        self.assertEqual(self.page_errors, [], self.page_errors)
+
+    def test_30_erase_this_item_removes_it_from_stored_items(self):
+        api = self.api()
+        rendered = self.seed_renderings(api)
+        bottle = rendered["synthetic smoke bottle"]["item_id"]
+        page = self.load(None)
+        self.ensure_signed_in()
+        self.show("items")
+        page.wait_for_function("id => Boolean(document.querySelector(`#items-grid article[data-item-id='${id}']`))", arg=bottle, timeout=15000)
+        page.locator(f"#items-grid article[data-item-id='{bottle}'] button", has_text="View evidence").first.click()
+        page.wait_for_selector("#item-dialog[open]", timeout=5000)
+        erase = page.locator("#item-dialog #erase-item")
+        self.assertEqual(erase.count(), 1, "the detail view offers Erase this item")
+        page.wait_for_function("() => !document.getElementById('erase-item').disabled", timeout=10000, polling=100)
+        erase.click()
+        self.confirm_dialog()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and api.get(f"/api/items/{bottle}").status_code != 404:
+            self.pump(0.1)
+        erase_responses = [(url, status) for url, status in self.responses if urlsplit(url).path == f"/api/items/{bottle}/erase"]
+        self.assertEqual(api.get(f"/api/items/{bottle}").status_code, 404,
+                         f"the item is erased on the server; erase responses: {erase_responses}; detail-status: {self.text('#detail-status')!r}; "
+                         f"app-status: {self.text('#app-status')!r}; confirm open: {page.locator('#confirm-dialog[open]').count()}; console: {self.console[-6:]}")
+        if page.locator("#item-dialog[open]").count():
+            page.click("#detail-close")
+        self.show("items")
+        page.wait_for_function("id => !document.querySelector(`#items-grid article[data-item-id='${id}']`)", arg=bottle, timeout=15000)
+        self.assertNotIn("synthetic smoke bottle", self.text("#items-grid"))
+        self.assertIn("synthetic smoke keys", self.text("#items-grid"), "unrelated items stay")
+        statuses = {status for url, status in self.responses if urlsplit(url).path == f"/api/items/{bottle}/erase"}
+        self.assertEqual(statuses, {200}, "exactly the erase route was used, successfully")
+        self.assertEqual(self.page_errors, [], self.page_errors)
+
+    def test_40_erase_everything_requires_the_typed_phrase(self):
+        api = self.api()
+        self.seed_renderings(api)
+        self.assertGreaterEqual(len(api.get("/api/items").json()["items"]), 2)
+        page = self.load(None)
+        self.ensure_signed_in()
+        self.show_privacy()
+        page.wait_for_selector("#erase-all", timeout=10000)
+        page.wait_for_selector("#erase-all-phrase", timeout=10000)
+        page.wait_for_selector("#erase-all-pin", timeout=10000)
+        self.assertTrue(page.locator("#erase-all").is_disabled(), "disabled until the phrase and the PIN are typed")
+        calls_before = sum(1 for source, url in self.requests if source == "route" and urlsplit(url).path == "/api/erase-all")
+        page.fill("#erase-all-pin", PIN)
+        page.fill("#erase-all-phrase", "erase everything")
+        self.pump(0.3)
+        self.assertTrue(page.locator("#erase-all").is_disabled(), "the wrong case is not the phrase")
+        page.fill("#erase-all-phrase", PRIVACY_PIN_PHRASE[:-1])
+        self.pump(0.3)
+        self.assertTrue(page.locator("#erase-all").is_disabled(), "a prefix is not the phrase")
+        page.fill("#erase-all-phrase", PRIVACY_PIN_PHRASE)
+        page.fill("#erase-all-pin", "")
+        self.pump(0.3)
+        self.assertTrue(page.locator("#erase-all").is_disabled(), "the phrase alone is not enough (ruling 4: the PIN travels with the request)")
+        self.assertEqual(sum(1 for source, url in self.requests if source == "route" and urlsplit(url).path == "/api/erase-all"), calls_before, "no request without the phrase and the PIN")
+        page.fill("#erase-all-pin", PIN)
+        page.wait_for_function("() => !document.getElementById('erase-all').disabled", timeout=5000, polling=100)
+        page.click("#erase-all")
+        self.confirm_dialog()
+        # Ruling 10: VACUUM INTO runs before the response; wait for the page's status first.
+        page.wait_for_function("() => (document.getElementById('privacy-status').textContent || '').trim().length > 0 && !/loading|erasing/i.test(document.getElementById('privacy-status').textContent || '')", timeout=20000, polling=100)
+        status = self.text("#privacy-status")
+        self.assertNotIn("HTTP", status)
+        statuses = {status for url, status in self.responses if urlsplit(url).path == "/api/erase-all"}
+        self.assertEqual(statuses, {200}, "the erase-all request succeeded once")
+        self.assertEqual(api.get("/api/items").json()["items"], [], "everything is erased on the server")
+        self.assertEqual(page.input_value("#erase-all-pin"), "", "the PIN is not kept in the page")
+        self.show("items")
+        self.wait_text("#items-status", "0 stored items", timeout=15000)
+        self.assertEqual(page.locator("#items-grid article").count(), 0)
+        type(self).rendered = None
+        self.assertEqual(self.page_errors, [], self.page_errors)
+
+    def test_50_idle_keyframe_is_posted_in_automatic_mode_without_a_hand(self):
+        self.provision_server()
+        api = self.api()
+        hand = next(cap for cap in api.get("/api/health").json()["capabilities"] if cap["name"] == HAND_CAPABILITY)
+        self.assertTrue(hand["enabled"], hand)
+        # Fake timers from here on (the page's timers, Date and performance.now); the clock
+        # keeps flowing at real-time rate and run_for() advances it on demand.
+        self.page.clock.install()
+        page = self.load("ready")
+        self.ensure_signed_in()
+        self.show("camera")
+        page.wait_for_function("() => !document.getElementById('automatic-toggle').disabled", timeout=10000, polling=100)
+        hands = self.golden_hands()
+        page.evaluate("script => { window.__pamFake.script = script; window.__pamFake.replies = 0; }", [hands["no_hand"]])
+        posted_before = len(self.posted_idle)
+        episodes_before = len(self.posted_packets)
+        page.click("#camera-start")
+        self.wait_text("#camera-status", "manual marks only", timeout=15000)
+        page.check("#automatic-toggle")
+        self.wait_text("#camera-status", "automatic capture (hand model fake-0.0)")
+        time.sleep(2.5)   # real time: the no-hand condition must hold for at least 2 s
+        simulated = 0
+        while simulated < 35000 and len(self.posted_idle) == posted_before:
+            page.clock.run_for(500)
+            simulated += 500
+        self.assertGreaterEqual(len(self.posted_idle), posted_before + 1, f"no POST /api/idle within {simulated} ms of simulated time")
+        self.assertLessEqual(len(self.posted_idle) - posted_before, 2, "at most one idle keyframe per 30 s")
+        body = self.posted_idle[-1]
+        self.assertEqual(set(body), IDLE_FIELDS, body.keys())
+        self.assertEqual(body["schema_version"], 1)
+        for key in ("device_id", "session_id"):
+            self.assertEqual(str(uuid.UUID(body[key])), body[key].lower())
+        self.assertIsInstance(body["frame_id"], str)
+        self.assertTrue(body["frame_id"])
+        self.assertIsInstance(body["t_ms"], int)
+        self.assertEqual(set(body["clock_anchor"]), {"mono_ms", "wall_ms"})
+        self.assertIsInstance(body["motion_energy"], (int, float))
+        self.assertTrue(0 <= body["motion_energy"] <= 1)
+        self.assertLess(body["motion_energy"], 0.035, "a static clip is not moving")
+        import base64
+        jpeg = base64.b64decode(body["jpeg_b64"])
+        self.assertTrue(jpeg.startswith(b"\xff\xd8"))
+        self.assertLessEqual(len(jpeg), 256 * 1024)
+        import cv2
+        import numpy as np
+        image = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_UNCHANGED)
+        self.assertEqual(image.shape[:2], (body["capture"]["height"], body["capture"]["width"]), "a capture-resolution frame")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and len(self.idle_statuses) < len(self.posted_idle) - posted_before:
+            self.pump(0.1)
+        self.assertTrue(self.idle_statuses, "the server answered the idle post")
+        self.assertEqual(set(self.idle_statuses), {200}, self.idle_statuses)
+        connection = sqlite3.connect(f"file:{self.db}?mode=ro", uri=True)
+        try:
+            rows = connection.execute("SELECT frame_id, promoted FROM idle_frames").fetchall()
+        finally:
+            connection.close()
+        self.assertIn(body["frame_id"], {row[0] for row in rows}, "the frame is in the idle cache")
+        page.wait_for_function("() => /idle/i.test(document.getElementById('camera-summary').textContent || '')", timeout=10000, polling=100)
+        summary = self.text("#camera-summary")
+        self.assertRegex(summary.lower(), r"idle\D{0,24}[1-9]\d*|[1-9]\d*\D{0,24}idle", f"the camera summary counts idle keyframes: {summary!r}")
+        self.assertEqual(len(self.posted_packets), episodes_before, "no episode packet without a hand")
+        self.assertEqual(page.evaluate("() => window.__pamFake.errors"), [])
+        page.click("#camera-stop")
+        self.wait_text("#camera-status", "Camera off")
+        self.assertEqual(self.page_errors, [], self.page_errors)
+
+    def test_99_no_request_left_the_origin(self):
+        self.assertGreater(len(self.requests), 20, "interception saw too few requests to be meaningful")
+        self.assertEqual(self.foreign, [], f"requests left the origin: {self.foreign}")
+        paths = {urlsplit(url).path for _, url in self.requests}
+        for expected in ("/", "/api/items", "/api/retention", "/api/erase-all", "/api/idle", "/api/consent"):
+            self.assertIn(expected, paths)
+        self.assertTrue(any(path.endswith("/erase") for path in paths))
         self.assertEqual(self.page_errors, [], self.page_errors)
 
 

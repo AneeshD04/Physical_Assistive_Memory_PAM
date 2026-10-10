@@ -35,6 +35,7 @@
         <button data-view="chat" aria-current="page">Text chat</button>
         <button data-view="items">Stored items</button>
         <button data-view="camera">Camera</button>
+        <button data-view="privacy">Privacy</button>
       </nav>
       <div class="session-strip">
         <span id="camera-summary">Camera off</span>
@@ -68,18 +69,53 @@
       <section id="view-camera" aria-labelledby="camera-title" hidden>
         <div class="section-heading"><div><p class="eyebrow">Deliberate, visible capture</p><h1 id="camera-title" tabindex="-1">Camera</h1></div><span id="camera-mode-badge" class="badge">Manual mark mode</span></div>
         <p id="automatic-notice" class="notice">Automatic hand recognition is unavailable until a cleared hand model is provisioned on this server. Manual marking is a first checkpoint, not automatic daily tracking.</p>
+        <section id="consent-gate" class="card consent-gate" aria-labelledby="consent-gate-title" hidden><h2 id="consent-gate-title">Before the camera can start</h2><p id="consent-text" class="disclosure">Checking the camera disclosure…</p><p id="consent-status" role="status" class="muted">The camera stays off until this disclosure is acknowledged on this server.</p><button id="consent-acknowledge" type="button" disabled>I understand</button></section>
         <div class="camera-layout">
           <div class="card"><div class="preview"><video id="preview" muted playsinline aria-label="Live camera preview"></video><p id="preview-placeholder">Camera is off. Nothing is being captured.</p></div><p id="camera-status" role="status">Start only when everyone in view has agreed to be recorded.</p><div class="button-row"><button id="camera-start">Start camera</button><button id="camera-pause" class="secondary" disabled>Pause camera</button><button id="camera-stop" class="secondary" disabled>Stop camera</button></div>
             <div class="toggle-block"><div class="toggle-row"><input id="automatic-toggle" type="checkbox" role="switch" aria-describedby="automatic-description" disabled><label for="automatic-toggle">Automatic capture</label></div><p id="automatic-description" class="muted">Unavailable: checking whether a hand model is provisioned on this server.</p></div></div>
           <div class="card"><h2>Mark an episode</h2><ol><li>Start the camera with the surface in view.</li><li>Before moving an item, choose <strong>Mark before moving</strong>.</li><li>Move the item, then choose <strong>Mark at rest &amp; save</strong>.</li></ol><p>No hand landmarks or automatic recognition are invented. Marks are hints; the local processor may find only context, not an item. With automatic capture on, an episode starts when a hand looks busy and ends when the item rests; that is a heuristic, not verified recognition.</p><div class="stack"><button id="mark-before" disabled>Mark before moving</button><button id="mark-rest" disabled>Mark at rest &amp; save</button><button id="mark-cancel" class="secondary" disabled>Cancel episode</button></div><p id="episode-status" role="status">No episode in progress.</p></div>
         </div>
-        <div class="card coverage"><h2>Coverage &amp; storage</h2><p>Keep this page visible and the screen unlocked. Backgrounding, locking, pauses and interruptions create coverage gaps. Pam does not promise all-day background capture.</p><p>Unsynced episodes stay in this browser until the server confirms durable retention. Browser storage can be cleared or evicted; it is not a backup. Use a trusted device.</p><p id="storage-status" role="status">Checking local retry storage…</p><button id="retry-queue" class="secondary">Retry saved captures</button><ul id="coverage-log" aria-label="Recent coverage gaps"></ul></div>
+        <div class="card coverage"><h2>Coverage &amp; storage</h2><p>Keep this page visible and the screen unlocked. Backgrounding, locking, pauses and interruptions create coverage gaps. Pam does not promise all-day background capture.</p><p>Unsynced episodes stay in this browser until the server confirms durable retention. Browser storage can be cleared or evicted; it is not a backup. Use a trusted device.</p><p>With automatic capture on, while nothing is happening and no hand is in view, one still is sent to the local service every 30 seconds so Pam can check whether items are still where they were. Those stills are not kept in this browser; one that fails to send is a coverage gap, not evidence.</p><p id="storage-status" role="status">Checking local retry storage…</p><button id="retry-queue" class="secondary">Retry saved captures</button><ul id="coverage-log" aria-label="Recent coverage gaps"></ul></div>
+      </section>
+      <section id="view-privacy" aria-labelledby="privacy-title" hidden>
+        <div class="section-heading"><div><p class="eyebrow">What Pam keeps, and for how long</p><h1 id="privacy-title" tabindex="-1">Privacy</h1></div><button id="refresh-privacy" class="secondary" type="button">Refresh</button></div>
+        <p id="privacy-status" class="notice" role="status" aria-live="polite" hidden></p>
+        <div class="privacy-layout">
+          <section class="card" aria-labelledby="disclosure-title"><h2 id="disclosure-title">Camera disclosure</h2><p id="privacy-disclosure" class="disclosure">Checking the camera disclosure…</p><p id="privacy-consent-state" role="status" class="muted">Checking the acknowledgement state…</p><button id="privacy-acknowledge" type="button" disabled>I understand</button></section>
+          <section class="card" aria-labelledby="retention-title"><h2 id="retention-title">Retention windows</h2><p class="muted">Disclosure version in force: <span id="retention-consent">unknown</span>. Changes apply on this local service only and are recorded in its audit log.</p>
+            <form id="retention-form" novalidate>
+              <div><label for="retention-episodes-days">Memories and their photos, in days (7 to 365)</label><input id="retention-episodes-days" name="episodes_days" type="number" inputmode="numeric" min="7" max="365" step="1" required disabled></div>
+              <div><label for="retention-idle-hours">Idle stills, in hours (1 to 72)</label><input id="retention-idle-hours" name="idle_hours" type="number" inputmode="numeric" min="1" max="72" step="1" required disabled></div>
+              <div><label for="retention-landmarks-hours">Hand positions, in hours (1 to 168)</label><input id="retention-landmarks-hours" name="landmarks_hours" type="number" inputmode="numeric" min="1" max="168" step="1" required disabled></div>
+              <button id="retention-save" type="submit" disabled>Save retention settings</button>
+              <p id="retention-status" role="status" class="muted">Loading retention settings…</p>
+            </form></section>
+          <section class="card" aria-labelledby="counts-title"><h2 id="counts-title">What is stored now</h2>
+            <dl id="retention-counts" class="counts" aria-label="Retention counts">
+              <div><dt>Idle stills in the cache</dt><dd data-count="idle_cached">–</dd></div>
+              <div><dt>Idle stills kept with an item</dt><dd data-count="idle_promoted">–</dd></div>
+              <div><dt>Memories whose photos expired</dt><dd data-count="revisions_expired">–</dd></div>
+              <div><dt>Episodes with hand positions reduced</dt><dd data-count="landmarks_reduced">–</dd></div>
+              <div><dt>Episodes erased</dt><dd data-count="revisions_erased">–</dd></div>
+            </dl>
+            <p id="idle-counters" class="muted">This browser: idle stills: 0 sent · 0 dropped</p>
+            <p id="counts-status" role="status" class="muted">Loading counts…</p></section>
+          <section class="card erase-card" aria-labelledby="erase-title"><h2 id="erase-title">Erase everything</h2>
+            <p>Removes every memory, photo, idle still, hand position, name, correction and appearance record from this local service's database, and the captures waiting in this browser. It cannot be undone. Traces may remain on the device or in backups; this is a removal from the app's database, not a forensic wipe.</p>
+            <form id="erase-all-form" novalidate>
+              <div><label for="erase-all-phrase">Type ERASE EVERYTHING to continue</label><input id="erase-all-phrase" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="40"></div>
+              <div><label for="erase-all-pin">Access PIN</label><input id="erase-all-pin" type="password" autocomplete="current-password" maxlength="128"></div>
+              <button id="erase-all" type="submit" class="danger" disabled>Erase everything</button>
+              <p id="erase-all-status" role="status" class="muted">The button enables once the exact phrase and your PIN are entered. The PIN is sent with the request and never stored in this page.</p>
+            </form></section>
+        </div>
       </section>
     </div>
   </main>
   <dialog id="item-dialog" aria-labelledby="detail-title"><div class="dialog-heading"><h2 id="detail-title">Item details</h2><button id="detail-close" class="secondary">Close</button></div><p id="detail-status" role="status" aria-live="polite"></p><div id="detail-body"></div><form id="name-form"><label for="item-name">Name this item</label><input id="item-name" maxlength="120" required><button id="name-save" type="submit">Save name</button><p class="muted">Naming is a user note, not identity verification.</p></form>
     <section class="evidence-section" aria-labelledby="evidence-title"><div class="dialog-heading"><h3 id="evidence-title" tabindex="-1">Evidence</h3><button id="link-item" class="secondary" type="button" disabled>Same as another item…</button></div><p class="muted">Each photo is one recorded observation of this item. If a photo shows a different object, choose <strong>Not this one</strong>. If two stored items are really the same object, choose <strong>Same as another item…</strong> and pick the other one. Corrections are recorded, never deleted, and Pam asks before applying one.</p><ol id="evidence-list" aria-label="Recorded observations"></ol></section>
-    <h3>Recorded history</h3><p class="muted">This view is a snapshot. Refresh to include new evidence.</p><button id="detail-refresh" class="secondary">Refresh details</button><ol id="history"></ol></dialog>
+    <h3>Recorded history</h3><p class="muted">This view is a snapshot. Refresh to include new evidence.</p><button id="detail-refresh" class="secondary">Refresh details</button><ol id="history"></ol>
+    <section class="erase-section" aria-labelledby="erase-item-title"><h3 id="erase-item-title">Erase this item</h3><p class="muted">Removes this item's photos, observations, name, corrections and appearance record from the local database, together with any item Pam cannot separate from it. Pam asks first. It cannot be undone, and traces may remain on the device or in backups.</p><button id="erase-item" class="danger" type="button" disabled>Erase this item</button></section></dialog>
   <dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-text"><h2 id="confirm-title">Please confirm</h2><p id="confirm-text"></p><div id="confirm-link-field" hidden><label for="link-target">Which stored item is the same object?</label><select id="link-target"></select><p class="muted">Lookalikes are listed first. An item is never offered as its own match.</p></div><div class="confirm-actions"><button id="confirm-cancel" class="secondary" type="button">Cancel</button><button id="confirm-ok" type="button">Confirm</button></div></dialog>
   <noscript><p class="notice">Pam needs JavaScript for sign-in, stored items and camera controls. No camera starts without your action.</p></noscript>
 </body>

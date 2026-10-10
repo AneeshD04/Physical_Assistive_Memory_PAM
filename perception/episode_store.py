@@ -1,25 +1,50 @@
 """Additive keyless episode ledger. Legacy v1 records are never reinterpreted.
 
-Evidence/decisions are append-only through ordinary APIs. Redaction is a separate,
-audited logical erasure, not a promise about filesystem remnants or backups.
+Evidence/decisions are append-only through ordinary APIs. Erasure (erase_item,
+erase_profile; redact_item is the CP1 alias) is a separate, audited operation that
+rewrites personal content to non-identifying stubs and, for a whole profile,
+rebuilds the database file with VACUUM INTO. That reduces residue in the live file;
+it is not a forensic guarantee about filesystem remnants, journals already
+overwritten, or backups, and nothing here claims one.
+
+CP4 adds idle keyframes (a rolling cache, not evidence), re-observation
+(perception/reobservation.py), containment -> inferred locations, retention tiers
+with landmark reduction, and the explicit v1 migration. Windows, thresholds and
+caps in this module are INITIAL VALUES from the build plan unless a measurement is
+cited next to them.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import math
+import os
 import re
+import sqlite3
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 try:
-    from .episode import parse_packet, jpeg_bytes, decode_jpeg, RevisionLimitError
+    from .episode import parse_packet, parse_idle, jpeg_bytes, decode_jpeg, RevisionLimitError
     from .localizer import LocalObservation, localize
-    from .identity import ConformalMatcher, ItemBank, crop_box, l2_normalise, mask_from_rle, validate_embedder
+    from .identity import (ConformalMatcher, ItemBank, HandCoversRegion, crop_box, padded_crop_box, l2_normalise,
+                           mask_from_rle, mask_sufficient, validate_embedder)
+    from .hand_hull import hand_hull_mask, nearest_sample
+    from .hand_busy import hand_busy
+    from .reobservation import ReobservationMixin, inside_fraction, CONTAINMENT_INSIDE
+    from .private_files import private_append_fd
+    from .consent import CONSENT_VERSION
 except ImportError:
-    from episode import parse_packet, jpeg_bytes, decode_jpeg, RevisionLimitError
+    from episode import parse_packet, parse_idle, jpeg_bytes, decode_jpeg, RevisionLimitError
     from localizer import LocalObservation, localize
-    from identity import ConformalMatcher, ItemBank, crop_box, l2_normalise, mask_from_rle, validate_embedder
+    from identity import (ConformalMatcher, ItemBank, HandCoversRegion, crop_box, padded_crop_box, l2_normalise,
+                          mask_from_rle, mask_sufficient, validate_embedder)
+    from hand_hull import hand_hull_mask, nearest_sample
+    from hand_busy import hand_busy
+    from reobservation import ReobservationMixin, inside_fraction, CONTAINMENT_INSIDE
+    from private_files import private_append_fd
+    from consent import CONSENT_VERSION
 
 
 class CannotLinkError(ValueError):
@@ -34,6 +59,37 @@ CALIBRATION_ID = re.compile(r"[A-Za-z0-9._:-]{1,100}")
 # session role that made it, never to a named person. Anything else is refused.
 ACTORS = ("caregiver_pin", "operator", "test")
 MAX_CANDIDATES = 32
+
+# CP4 idle keyframe cache (build plan): a rolling cache, never evidence until a
+# frame is promoted by a positive re-observation. Expiry uses the retention row's
+# idle_hours (default IDLE_TTL_MS); the caps are per device (daily count) and per
+# profile (bytes, oldest unpromoted evicted first).
+IDLE_TTL_MS = 24 * 3600 * 1000
+IDLE_MAX_PER_DAY = 2880
+IDLE_CACHE_BYTES = 200 * 1024 * 1024
+# Retention tiers (coordinator fix round: episodes_days default 30; validated
+# ranges in set_retention). consent_version is the build constant
+# perception.consent.CONSENT_VERSION, not a settable field.
+RETENTION_DEFAULTS = {"episodes_days": 30, "idle_hours": 24, "landmarks_hours": 72}
+RETENTION_RANGES = {"episodes_days": (7, 365), "idle_hours": (1, 72), "landmarks_hours": (1, 168)}
+RETENTION_BATCH = 64
+# A superseded accepted revision (a newer accepted revision of the same episode
+# exists) keeps its packet bytes this long, then they are NULLed ('superseded').
+SUPERSEDED_TTL_MS = 72 * 3600 * 1000
+# erase_profile needs this exact confirmation (or True) from the caller; the
+# server's route checks the user's typed text before calling the store.
+ERASE_PROFILE_CONFIRM = "ERASE EVERYTHING"
+# After erase_profile, a capture whose wall time is earlier than erased_at_ms
+# minus this tolerance is refused (ValueError "captured before erasure"). The
+# tolerance exists because a phone's clock can lag the laptop's by minutes; the
+# trade-off is that a mirrored packet captured within the last five minutes
+# before the erasure would be accepted again, which the browser covers by
+# clearing its own mirror on erase-all (coordinator decision).
+ERASED_BEFORE_TOLERANCE_MS = 5 * 60 * 1000
+MIGRATION_V1_ID = "v1_observations"
+LEGACY_OUTCOMES = {"placed": "placed_on_surface", "picked_up": "picked_up", "sighted": "sighted"}
+# A live observation row: not redacted (record NULL) and not an erasure stub.
+LIVE = "record IS NOT NULL AND erased=0"
 
 
 def _check_actor(actor):
@@ -125,14 +181,62 @@ CREATE TABLE IF NOT EXISTS corrections (
  correction_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('link','unlink','assign')),
  at_ms INTEGER NOT NULL, actor TEXT NOT NULL, payload TEXT NOT NULL,
  UNIQUE(profile_id,correction_id));
+CREATE TABLE IF NOT EXISTS idle_frames (
+ profile_id TEXT NOT NULL, device_id TEXT NOT NULL, frame_id TEXT NOT NULL, session_id TEXT NOT NULL,
+ t_wall_ms INTEGER NOT NULL, received_ms INTEGER NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
+ jpeg BLOB, motion_energy REAL NOT NULL, expires_at_ms INTEGER NOT NULL,
+ promoted INTEGER NOT NULL DEFAULT 0, consent_version TEXT, PRIMARY KEY(profile_id,device_id,frame_id));
+CREATE INDEX IF NOT EXISTS idle_frames_time ON idle_frames(profile_id,device_id,t_wall_ms);
+CREATE TABLE IF NOT EXISTS reobservations (
+ profile_id TEXT NOT NULL, item_id TEXT NOT NULL, device_id TEXT NOT NULL, frame_id TEXT NOT NULL,
+ t_wall_ms INTEGER NOT NULL, result TEXT NOT NULL CHECK(result IN ('present','gone','unknown')),
+ region_diff REAL, registered INTEGER NOT NULL DEFAULT 0, embedded INTEGER NOT NULL DEFAULT 0,
+ decided_ms INTEGER NOT NULL, gated INTEGER NOT NULL DEFAULT 0, bbox TEXT, PRIMARY KEY(profile_id,item_id,device_id,frame_id));
+CREATE INDEX IF NOT EXISTS reobservations_item ON reobservations(profile_id,item_id,t_wall_ms);
+CREATE TABLE IF NOT EXISTS containment (
+ containment_no INTEGER PRIMARY KEY AUTOINCREMENT, profile_id TEXT NOT NULL,
+ inner_item TEXT NOT NULL, outer_item TEXT NOT NULL, since_ms INTEGER NOT NULL, frame_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS retention (
+ profile_id TEXT PRIMARY KEY, consent_version TEXT NOT NULL, episodes_days INTEGER NOT NULL,
+ idle_hours INTEGER NOT NULL, landmarks_hours INTEGER NOT NULL, updated_ms INTEGER NOT NULL,
+ acknowledged_version TEXT, erased_at_ms INTEGER);
+CREATE TABLE IF NOT EXISTS migrations (
+ profile_id TEXT NOT NULL, migration_id TEXT NOT NULL, from_version INTEGER NOT NULL,
+ counts TEXT NOT NULL, at_ms INTEGER NOT NULL, actor TEXT NOT NULL,
+ PRIMARY KEY(profile_id,migration_id));
+CREATE TABLE IF NOT EXISTS maintenance_counters (
+ profile_id TEXT NOT NULL, day TEXT NOT NULL, name TEXT NOT NULL, value REAL NOT NULL DEFAULT 0,
+ PRIMARY KEY(profile_id,day,name));
 """
 
-# CP3 (schema user_version 3): columns added to existing tables, applied by
-# ensure_episode_columns as ALTER TABLE ADD COLUMN guarded by PRAGMA table_info, so
-# a v2 database gains them without a rewrite and a v3 one is left alone.
+# CP3 (schema user_version 3) and CP4 (user_version 4): columns added to existing
+# tables, applied by ensure_episode_columns as ALTER TABLE ADD COLUMN guarded by
+# PRAGMA table_info, so an older database gains them without a rewrite and a
+# current one is left alone.
 # local_observations.candidates: JSON list of the item_ids an ambiguous match
 # could not separate (NULL for every other observation).
-EPISODE_COLUMNS = (("local_observations", "candidates", "TEXT"),)
+# CP4: local_observations.erased marks an erasure stub ({"erased": true,
+# "observed_at_ms"}); episode_revisions.redacted_reason is 'erasure' |
+# 'retention' | 'legacy_v1' next to a NULL packet; episode_revisions.reduced_ms
+# records the landmark reduction; item_names / local_audit / corrections.erased
+# mark rows whose text was blanked by an erasure (the row itself is kept).
+# consent_version on episode_revisions / idle_frames: the CONSENT_VERSION the row
+# was ingested under; retention.acknowledged_version / erased_at_ms and
+# reobservations.gated are the coordinator fix-round columns (guarded for a
+# database created earlier in CP4).
+EPISODE_COLUMNS = (("local_observations", "candidates", "TEXT"),
+                   ("local_observations", "erased", "INTEGER NOT NULL DEFAULT 0"),
+                   ("episode_revisions", "redacted_reason", "TEXT"),
+                   ("episode_revisions", "reduced_ms", "INTEGER"),
+                   ("episode_revisions", "consent_version", "TEXT"),
+                   ("item_names", "erased", "INTEGER NOT NULL DEFAULT 0"),
+                   ("local_audit", "erased", "INTEGER NOT NULL DEFAULT 0"),
+                   ("corrections", "erased", "INTEGER NOT NULL DEFAULT 0"),
+                   ("idle_frames", "consent_version", "TEXT"),
+                   ("retention", "acknowledged_version", "TEXT"),
+                   ("retention", "erased_at_ms", "INTEGER"),
+                   ("reobservations", "gated", "INTEGER NOT NULL DEFAULT 0"),
+                   ("reobservations", "bbox", "TEXT"))
 
 
 def ensure_episode_columns(db):
@@ -153,6 +257,11 @@ def _superset(old, new):
     if new["t_start_ms"] > old["t_start_ms"] or new["t_end_ms"] < old["t_end_ms"]:
         return False
     for field in ("keyframes", "carry_burst", "landmarks", "gaps"):
+        if field == "landmarks" and old.get("landmark_summary") is not None:
+            # CP4: the stored packet was reduced (landmarks [] + landmark_summary),
+            # so its raw landmarks cannot be compared; the field is superset-neutral
+            # and the keyframes, burst and gaps of the reduced packet still decide.
+            continue
         values = {_json(value) for value in new[field]}
         if not all(_json(value) in values for value in old[field]):
             return False
@@ -181,7 +290,7 @@ def _calibration_approved(observation) -> bool:
             and calibration.get("fixture_only") is True and _named_calibration_id(observation) is not None)
 
 
-class EpisodeStoreMixin:
+class EpisodeStoreMixin(ReobservationMixin):
     # CP3: the identity embedder (perception.identity.Embedder) or None. None means no
     # embedding, no matching, identity never above provisional; nothing is simulated.
     # Set through ObjectStore(..., embedder=) or set_embedder(); the server constructs
@@ -216,6 +325,9 @@ class EpisodeStoreMixin:
             {"name": "local_text_chat", "enabled": True, "reason": "Stored evidence lookup; no provider required"},
             {"name": "automatic_hand_recognition", "enabled": False, "reason": "No cleared hand model enabled; manual marking only"},
             self._identity_capability(),
+            # CP4 rule 13: diff-only unless physical_instance_recognition is enabled.
+            {"name": "re_observation", "enabled": True,
+             "reason": "Registered idle-frame differences refresh or stale a placement; identity confirmed only with an approved embedder calibration"},
             {"name": "automatic_daily_tracker", "enabled": False, "reason": "Pending model-enable and held-out device/coverage gates"},
             {"name": "semantic_object_recognition", "enabled": False, "reason": "No semantic/OCR model enabled; changed regions are unknown"},
         ]
@@ -320,14 +432,20 @@ class EpisodeStoreMixin:
 
     def ingest_episode(self, raw: bytes) -> dict:
         packet = parse_packet(raw)
+        if packet.landmark_summary is not None:
+            # CP4: the reduced form is written only by apply_retention; a client
+            # claiming it would bypass the raw-landmark window (server maps to 400).
+            raise ValueError("landmark_summary is server-only")
         digest = hashlib.sha256(raw).hexdigest()
         semantic = packet.semantic_digest()
         key = (self.profile_id, packet.device_id, packet.episode_id)
         now = self._now_ms()
         wall_end = packet.clock_anchor.wall_ms + packet.t_end_ms - packet.clock_anchor.mono_ms
+        wall_start = packet.clock_anchor.wall_ms + packet.t_start_ms - packet.clock_anchor.mono_ms
         clock_status = "implausible" if wall_end <= 0 or wall_end > now + 300000 else "ok"
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._capture_allowed(db, wall_start)
             tombstone = db.execute("SELECT 1 FROM episode_tombstones WHERE profile_id=? AND device_id=? AND episode_id=?", key).fetchone()
             previous = db.execute("SELECT * FROM episode_revisions WHERE profile_id=? AND device_id=? AND episode_id=? ORDER BY revision_no", key).fetchall()
             same = next((row for row in previous if row["semantic_digest"] == semantic), None)
@@ -344,11 +462,19 @@ class EpisodeStoreMixin:
             if len(previous) >= 8:
                 raise RevisionLimitError("Episode revision limit reached")
             accepted_rows = [row for row in previous if row["accepted"]]
-            accepted = not accepted_rows or _superset(parse_packet(bytes(accepted_rows[-1]["packet"])).model_dump(), packet.model_dump())
+            if not accepted_rows:
+                accepted = True
+            elif accepted_rows[-1]["packet"] is None:
+                # CP4: the accepted bytes are gone (retention, superseded or erased):
+                # nothing to compare against, so the revision is retained as a
+                # conflict and never processed; the current state is not reinterpreted.
+                accepted = False
+            else:
+                accepted = _superset(parse_packet(bytes(accepted_rows[-1]["packet"])).model_dump(), packet.model_dump())
             revision = len(previous) + 1
             status = "stored" if not previous else ("revised" if accepted else "conflict")
-            db.execute("INSERT INTO episode_revisions VALUES(?,?,?,?,?,?,?,?,?,?,0)",
-                       key + (revision, semantic, digest, raw, now, int(accepted), clock_status))
+            db.execute("INSERT INTO episode_revisions(profile_id,device_id,episode_id,revision_no,semantic_digest,transport_digest,packet,received_at_ms,accepted,clock_status,redacted,consent_version) VALUES(?,?,?,?,?,?,?,?,?,?,0,?)",
+                       key + (revision, semantic, digest, raw, now, int(accepted), clock_status, CONSENT_VERSION))
             if accepted:
                 db.execute("INSERT INTO episode_jobs(profile_id,device_id,episode_id,revision_no,status) VALUES(?,?,?,?,?)", key + (revision, "pending"))
             return {"episode_id": packet.episode_id, "device_id": packet.device_id, "digest": digest,
@@ -362,7 +488,7 @@ class EpisodeStoreMixin:
         if not callable(processor):
             raise ValueError("Processor must be callable")
         counts = {"processed": 0, "failed": 0, "context_only": 0, "observations": 0,
-                  "embedded": 0, "embedding_failed": 0, "matched": 0, "ambiguous": 0}
+                  "embedded": 0, "embedding_failed": 0, "embedding_skipped_hand": 0, "matched": 0, "ambiguous": 0, "containments": 0}
         embedder = self.embedder
         embedder_tag = embedder.tag if embedder is not None else None
         for _ in range(limit):
@@ -370,7 +496,7 @@ class EpisodeStoreMixin:
                 db.execute("BEGIN IMMEDIATE")
                 job = db.execute("""SELECT j.*,r.packet,r.clock_status FROM episode_jobs j
                     JOIN episode_revisions r USING(profile_id,device_id,episode_id,revision_no)
-                    WHERE j.profile_id=? AND r.redacted=0 AND
+                    WHERE j.profile_id=? AND r.redacted=0 AND r.packet IS NOT NULL AND
                     (j.status='pending' OR (j.status='processing' AND j.lease_until<=?))
                     ORDER BY r.received_at_ms,j.revision_no LIMIT 1""", (self.profile_id, self.clock())).fetchone()
                 if job is None:
@@ -395,14 +521,24 @@ class EpisodeStoreMixin:
                 # that crop could not be embedded; a failed embedding never fails the
                 # job and never removes evidence, the observation just stays provisional.
                 vectors = [None] * len(observations)
+                hand_covered = set()
                 if embedder is not None:
-                    decoded = {}
+                    decoded, hulls = {}, {}
                     for index, observation in enumerate(observations):
                         try:
                             if observation.frame_id not in decoded:
                                 decoded[observation.frame_id] = self._rgb_frame(frames[observation.frame_id])
-                            vectors[index] = self._embed_region(embedder, decoded[observation.frame_id], observation)
+                                # CP4 (recipe r2): the hull of any hand in the landmark sample
+                                # nearest the keyframe (within HAND_HULL_WINDOW_MS) is kept out
+                                # of the pooling mask; no sample in the window means no hull.
+                                hulls[observation.frame_id] = self._hand_hull(packet, frames[observation.frame_id])
+                            vectors[index] = self._embed_region(embedder, decoded[observation.frame_id], observation, hulls.get(observation.frame_id))
                             counts["embedded"] += 1
+                        except HandCoversRegion:
+                            # CP4 F1: the hand leaves too little of the region; refused, not
+                            # pooled over the hand. Identity stays provisional, no vector.
+                            hand_covered.add(index)
+                            counts["embedding_skipped_hand"] += 1
                         except Exception:
                             # Never persist or count exception text; the crop is personal evidence.
                             counts["embedding_failed"] += 1
@@ -416,7 +552,7 @@ class EpisodeStoreMixin:
                     embedding = embedder is not None and any(v is not None for v in vectors)
                     active = self._active_calibration(db, embedder_tag) if embedding else None
                     banks = self._banks(db, assign, resolved, tombstoned, embedder_tag) if embedding else {}
-                    touched = []
+                    touched, placements = [], []
                     for index, observation in enumerate(observations):
                         # The default never claims calibration; trusted injection is a code-only
                         # boundary (CP2 dict rule) or a calibration_id approved in the table for
@@ -440,7 +576,10 @@ class EpisodeStoreMixin:
                         # association; appearance matching runs only when it yields nothing.
                         item_id = self._continuity_item(db, packet, observation, assign) if trusted else None
                         match, candidates = None, None
-                        if embedding_failed:
+                        if index in hand_covered:
+                            match = {"embedder": embedder_tag, "calibration_id": None, "state": "new", "set": [], "scores": {},
+                                     "reason": "hand covers the region"}
+                        elif embedding_failed:
                             match = {"embedder": embedder_tag, "calibration_id": None, "state": "new", "set": [], "scores": {},
                                      "reason": "embedding failed; identity provisional"}
                         if item_id is None and vectors[index] is not None:
@@ -498,10 +637,12 @@ class EpisodeStoreMixin:
                             db.execute("INSERT INTO embeddings VALUES(?,?,?,?,?,?)", (self.profile_id, signature, embedder_tag, int(embedder.dim), _vector_bytes(vectors[index]), self._now_ms()))
                         assign[signature] = item_id
                         counts["observations"] += 1
+                        placements.append((item_id, record, observed_ms))
                     for i, a in enumerate(touched):
                         for b in touched[i+1:]:
                             a1, b1 = sorted((a, b))
                             db.execute("INSERT OR IGNORE INTO local_cannot_links VALUES(?,?,?)", (self.profile_id, a1, b1))
+                    counts["containments"] += self._record_containment(db, placements)
                     self._rebuild_projection(db)
                     status = "completed" if observations else "context_only"
                     db.execute("UPDATE episode_jobs SET status=?,token=NULL,lease_until=NULL,result_count=?,error=NULL WHERE profile_id=? AND device_id=? AND episode_id=? AND revision_no=? AND token=?", (status, len(observations)) + key + (token,))
@@ -523,7 +664,7 @@ class EpisodeStoreMixin:
         if assign is None:
             assign, _, _ = self._assignments(db)
         candidates = set()
-        for row in db.execute("SELECT observation_id,item_id,record FROM local_observations WHERE profile_id=? AND device_id=? AND record IS NOT NULL", (self.profile_id, packet.device_id)):
+        for row in db.execute(f"SELECT observation_id,item_id,record FROM local_observations WHERE profile_id=? AND device_id=? AND {LIVE}", (self.profile_id, packet.device_id)):
             record = json.loads(row["record"])
             if record.get("session_id") == packet.session_id and record.get("continuity_id") == observation.continuity_id and record.get("identity_state") == "trusted":
                 candidates.add(assign.get(row["observation_id"], row["item_id"]))
@@ -549,28 +690,97 @@ class EpisodeStoreMixin:
         return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
     @staticmethod
-    def _embed_region(embedder, rgb, observation):
-        """Crop the observation's bbox at capture resolution, decode its mask_rle over
-        the same integer window (an invalid mask is dropped, not fatal) and embed.
+    def _hand_hull(packet, frame):
+        """Full-frame bool hull mask (capture resolution) of the hands in the
+        landmark sample nearest this keyframe within HAND_HULL_WINDOW_MS, or None
+        when no sample is that close or it carries no hand."""
+        sample = nearest_sample(packet.landmarks, frame.t_ms)
+        if sample is None or not sample.hands:
+            return None
+        hull = hand_hull_mask(sample.hands, packet.capture.width, packet.capture.height)
+        return hull if hull.any() else None
+
+    @staticmethod
+    def _embed_region(embedder, rgb, observation, hull=None):
+        """Crop the observation's bbox padded by CROP_PAD (recipe r2) at capture
+        resolution, decode its mask_rle over the localizer's unpadded window inside
+        that crop (an invalid mask is dropped, not fatal), remove the hand hull if
+        one is given, and embed. The mask is None when neither a diff mask nor a
+        hull touching the crop exists.
+
+        CP4 F1: when a hull was subtracted, the surviving mask must still cover
+        MIN_MASK_SHARE of the crop and MIN_MASK_PATCHES patches (mask_sufficient);
+        otherwise HandCoversRegion is raised and nothing is embedded, because the
+        all-patches fallback would embed the hand. Embedders whose embed signature
+        names hull_applied receive the flag so their own pooling refuses too.
         Raises if the embedder returns anything but a finite vector of its dim."""
+        import inspect
         import numpy as np
         height, width = rgb.shape[:2]
-        x1, y1, x2, y2 = crop_box(observation.bbox, width, height)
-        crop = np.ascontiguousarray(rgb[y1:y2, x1:x2])
+        px1, py1, px2, py2 = padded_crop_box(observation.bbox, width, height)
+        crop = np.ascontiguousarray(rgb[py1:py2, px1:px2])
         mask = None
         if observation.mask_rle:
+            x1, y1, x2, y2 = crop_box(observation.bbox, width, height)
             try:
-                mask = mask_from_rle(observation.mask_rle, x2 - x1, y2 - y1)
+                inner = mask_from_rle(observation.mask_rle, x2 - x1, y2 - y1)
             except ValueError:
-                mask = None
-        vector = np.asarray(embedder.embed(crop, mask), dtype=np.float32).reshape(-1)
+                inner = None
+            if inner is not None:
+                mask = np.zeros((py2 - py1, px2 - px1), dtype=bool)
+                mask[y1 - py1:y2 - py1, x1 - px1:x2 - px1] = inner
+        hull_applied = False
+        if hull is not None:
+            window = hull[py1:py2, px1:px2]
+            if window.any():
+                mask = (np.ones(window.shape, dtype=bool) if mask is None else mask) & ~window
+                hull_applied = True
+        if hull_applied and not mask_sufficient(mask, True):
+            raise HandCoversRegion()
+        kwargs = {}
+        if hull_applied:
+            try:
+                if "hull_applied" in inspect.signature(embedder.embed).parameters:
+                    kwargs["hull_applied"] = True
+            except (TypeError, ValueError):
+                pass
+        vector = np.asarray(embedder.embed(crop, mask, **kwargs), dtype=np.float32).reshape(-1)
         if vector.size != embedder.dim:
             raise ValueError("Embedder returned the wrong dimension")
         return l2_normalise(vector)
 
+    def _record_containment(self, db, placements) -> int:
+        """CP4 containment: among this job's trusted placements in one frame, an
+        item whose rest bbox lies at least CONTAINMENT_INSIDE inside another's is
+        recorded as contained (inner, outer, since_ms, frame_id). Mutual overlap
+        picks the smaller box as inner. Returns the number of rows written."""
+        written = 0
+        placed = [(item_id, record, observed_ms) for item_id, record, observed_ms in placements
+                  if record.get("identity_state") == "trusted" and record.get("outcome") == "placed_on_surface"
+                  and record.get("location_text") and isinstance(record.get("bbox"), list)]
+        for inner_id, inner, since in placed:
+            best = None
+            for outer_id, outer, _ in placed:
+                if outer_id == inner_id or outer.get("frame_id") != inner.get("frame_id"):
+                    continue
+                share = inside_fraction(inner["bbox"], outer["bbox"])
+                if share < CONTAINMENT_INSIDE:
+                    continue
+                inner_area = (inner["bbox"][2] - inner["bbox"][0]) * (inner["bbox"][3] - inner["bbox"][1])
+                outer_area = (outer["bbox"][2] - outer["bbox"][0]) * (outer["bbox"][3] - outer["bbox"][1])
+                if outer_area < inner_area or (outer_area == inner_area and outer_id < inner_id):
+                    continue
+                if best is None or outer_area < best[1]:
+                    best = (outer_id, outer_area)
+            if best is not None:
+                db.execute("INSERT INTO containment(profile_id,inner_item,outer_item,since_ms,frame_id) VALUES(?,?,?,?,?)",
+                           (self.profile_id, inner_id, best[0], since, inner["frame_id"]))
+                written += 1
+        return written
+
     def _corrections(self, db, at=None):
         """Stored corrections in replay order, limited to at_ms <= at when given."""
-        rows = db.execute("SELECT correction_no,correction_id,kind,at_ms,actor,payload FROM corrections WHERE profile_id=? ORDER BY correction_no", (self.profile_id,))
+        rows = db.execute("SELECT correction_no,correction_id,kind,at_ms,actor,payload FROM corrections WHERE profile_id=? AND erased=0 ORDER BY correction_no", (self.profile_id,))
         return [dict(row, payload=json.loads(row["payload"])) for row in rows if at is None or row["at_ms"] <= at]
 
     def _assignments(self, db, at=None):
@@ -586,7 +796,7 @@ class EpisodeStoreMixin:
         that item out; after an assign it withdraws the assertion). local_observations
         .item_id itself is the processing-time decision and is never rewritten.
         """
-        assign = {row[0]: row[1] for row in db.execute("SELECT observation_id,item_id FROM local_observations WHERE profile_id=? AND record IS NOT NULL", (self.profile_id,))}
+        assign = {row[0]: row[1] for row in db.execute(f"SELECT observation_id,item_id FROM local_observations WHERE profile_id=? AND {LIVE}", (self.profile_id,))}
         merged, resolved = {}, {}
         for correction in self._corrections(db, at):
             payload = correction["payload"]
@@ -625,7 +835,7 @@ class EpisodeStoreMixin:
         banks = {}
         rows = db.execute("""SELECT e.observation_id,e.dim,e.vector,o.record,o.candidates FROM embeddings e
             JOIN local_observations o USING(profile_id,observation_id)
-            WHERE e.profile_id=? AND e.embedder=? AND o.record IS NOT NULL
+            WHERE e.profile_id=? AND e.embedder=? AND o.record IS NOT NULL AND o.erased=0
             ORDER BY o.observed_at_ms,o.decided_at_ms,o.observation_id""", (self.profile_id, embedder_tag))
         for row in rows:
             item_id = assign.get(row["observation_id"])
@@ -656,7 +866,7 @@ class EpisodeStoreMixin:
 
     def _co_visible_items(self, db, packet, frame_id, assign):
         """Items holding an observation of the same device, episode and frame."""
-        rows = db.execute("SELECT observation_id,item_id,record FROM local_observations WHERE profile_id=? AND device_id=? AND episode_id=? AND record IS NOT NULL", (self.profile_id, packet.device_id, packet.episode_id))
+        rows = db.execute(f"SELECT observation_id,item_id,record FROM local_observations WHERE profile_id=? AND device_id=? AND episode_id=? AND {LIVE}", (self.profile_id, packet.device_id, packet.episode_id))
         items = set()
         for row in rows:
             if json.loads(row["record"]).get("frame_id") == frame_id:
@@ -684,12 +894,16 @@ class EpisodeStoreMixin:
         """
         aged = dict(item, aged=False)
         aged.setdefault("lookalikes", [])  # CP3 field; a projection stored before CP3 lacks it
+        # CP4 fields; a projection stored before CP4 lacks them.
+        aged.setdefault("inference", None)
+        aged.setdefault("stale_since_ms", None)
+        aged.setdefault("evidence_expired", False)
         observed = item.get("observed_at_ms")
         if eval_ms is None or observed is None or item.get("location_status") != "placed":
             return aged
         age = eval_ms - observed
         if age > AGE_ABSTAIN_MS:
-            aged.update(location_status="stale", stale_reason="age", aged=True)
+            aged.update(location_status="stale", stale_reason="age", stale_since_ms=observed + AGE_ABSTAIN_MS, aged=True)
         elif age > AGE_STALE_MS:
             aged.update(stale_reason="age", aged=True)
         return aged
@@ -747,12 +961,13 @@ class EpisodeStoreMixin:
         {observation_id, observed_at_ms, candidates: [item_id...]} with candidates
         mapped through merges (answer_text names the newest one for a group)."""
         at = self._as_of_ms(as_of)
-        rows = db.execute("""SELECT o.* FROM local_observations o WHERE o.profile_id=? AND o.record IS NOT NULL
+        rows = db.execute("""SELECT o.* FROM local_observations o WHERE o.profile_id=? AND o.record IS NOT NULL AND o.erased=0
             ORDER BY o.observed_at_ms,o.decided_at_ms,o.observation_id""", (self.profile_id,)).fetchall()
         # CP3: observations are read through the effective assignment (corrections up
         # to as_of replayed in order; a correction after as_of is not applied) and an
         # item tombstone applies only once written (a linked-away item is visible
-        # before its link). Redacted rows have record NULL whatever the time.
+        # before its link). Redacted rows have record NULL whatever the time; erased
+        # rows (CP4 stubs) are excluded by the query, so no read path sees them.
         assign, merged, resolved = self._assignments(db, at)
         tombstoned = {row[0] for row in db.execute("SELECT item_id,at_ms FROM item_tombstones WHERE profile_id=?", (self.profile_id,)) if at is None or row[1] <= at}
         items, latest_candidates, parked, own_label = {}, {}, [], {}
@@ -763,6 +978,20 @@ class EpisodeStoreMixin:
             if item_id in tombstoned:
                 continue
             observation = json.loads(row["record"])
+            if observation.get("source") == "reobservation":
+                # CP4 rule 13: a positive re-observation refreshes the item's current
+                # placement (time, image, location fields) and never its identity;
+                # it only applies to the placement it was decided against (the item's
+                # latest hand event is not newer than the frame) while that placement
+                # is still in force.
+                item = items.get(item_id)
+                if item is None or item.get("location_status") != "placed" or (item.get("last_event_ms") or 0) > row["observed_at_ms"]:
+                    continue
+                item.update(observed_at_ms=row["observed_at_ms"] if row["observed_at_ms"] > 0 else None,
+                            observation_id=row["observation_id"], location_status="placed",
+                            location_text=observation.get("location_text"), stale_reason=None, stale_since_ms=None,
+                            inference=None, reference_image=self._reference_image(observation))
+                continue
             identity_state, candidates, _ = self._resolved_identity(row, observation, item_id, merged, resolved)
             if self._parked(row, resolved):
                 # B-14: an unattributed observation is not an item and updates no item;
@@ -805,12 +1034,21 @@ class EpisodeStoreMixin:
                 "stale_reason": stale, "index_pending": False, "image_url": None,
                 # aged is an evaluated field: always False in storage, set by _age_item on read.
                 "aged": False,
-                "source": "local_evidence", "observation_id": row["observation_id"],
+                "source": "legacy_v1" if observation.get("source") == "legacy_v1" else "local_evidence",
+                "observation_id": row["observation_id"],
                 # The photo is the answer: the whole keyframe is the reference image and
                 # the target region travels with it (spec answer contract, reference_image).
-                "reference_image": {"frame_id": observation["frame_id"], "bbox": list(observation["bbox"])},
+                "reference_image": self._reference_image(observation),
                 # CP3: items this one could not be told apart from (filled below).
                 "lookalikes": [],
+                # CP4: when the item became stale (pickup time, first negative
+                # re-observation, or the ageing boundary), the containment inference
+                # {container, container_name, since_ms} when the location is inferred,
+                # whether the evidence image bytes are gone (retention), and the time
+                # of the latest hand event (internal; re-observations never move it).
+                "stale_since_ms": (row["observed_at_ms"] if location_status == "stale" and row["observed_at_ms"] > 0 else None),
+                "inference": None, "evidence_expired": False,
+                "last_event_ms": row["observed_at_ms"],
             }
             latest_candidates[item_id] = candidates
         for item_id, item in items.items():
@@ -834,14 +1072,118 @@ class EpisodeStoreMixin:
             if others:
                 items[item_id]["identity_status"] = "ambiguous"
                 items[item_id]["lookalikes"] = sorted(others)
-        for row in db.execute("SELECT item_id,name,at_ms FROM item_names WHERE profile_id=? AND name IS NOT NULL ORDER BY at_ms,name_id", (self.profile_id,)):
+        for row in db.execute("SELECT item_id,name,at_ms FROM item_names WHERE profile_id=? AND name IS NOT NULL AND erased=0 ORDER BY at_ms,name_id", (self.profile_id,)):
             if row["item_id"] in items and (at is None or row["at_ms"] <= at):
                 items[row["item_id"]]["name"] = row["name"]
                 items[row["item_id"]]["source"] = "user_named_local_evidence"
+        # CP4 passes run after the names so an inference carries the container's
+        # user name; neither pass depends on lookalikes or names otherwise.
+        self._apply_negative_reobservations(db, items, merged, at)
+        self._apply_containment(db, items, merged, at)
+        for item in items.values():
+            item["evidence_expired"] = self._evidence_expired(db, item)
         if age:
             eval_ms = at if at is not None else self._now_ms()
             items = {item_id: self._age_item(item, eval_ms) for item_id, item in items.items()}
         return items, parked
+
+    @staticmethod
+    def _reference_image(observation):
+        """{frame_id, bbox} of a record, or None when it carries no region (a
+        legacy v1 row has no stored image and no bbox)."""
+        bbox = observation.get("bbox")
+        if not isinstance(bbox, list) or len(bbox) != 4 or not isinstance(observation.get("frame_id"), str):
+            return None
+        return {"frame_id": observation["frame_id"], "bbox": list(bbox)}
+
+    def _evidence_expired(self, db, item) -> bool:
+        """True when the item's reference image was stored once and its bytes are
+        gone (retention expiry of the packet or of a promoted idle frame). A legacy
+        row that never had an image reads False; reference_image is then None."""
+        if item.get("reference_image") is None or item.get("source") == "legacy_v1":
+            return False
+        row = db.execute("SELECT * FROM local_observations WHERE profile_id=? AND observation_id=?", (self.profile_id, item["observation_id"])).fetchone()
+        if row is None:
+            return False
+        record = json.loads(row["record"]) if row["record"] else {}
+        if record.get("source") == "reobservation":
+            frame = db.execute("SELECT jpeg IS NOT NULL FROM idle_frames WHERE profile_id=? AND device_id=? AND frame_id=?",
+                               (self.profile_id, row["device_id"], record.get("frame_id"))).fetchone()
+            expired = frame is None or not frame[0]
+        else:
+            revision = db.execute("SELECT packet IS NOT NULL,redacted_reason FROM episode_revisions WHERE profile_id=? AND device_id=? AND episode_id=? AND revision_no=?",
+                                  (self.profile_id, row["device_id"], row["episode_id"], row["revision_no"])).fetchone()
+            expired = revision is not None and not revision[0] and revision[1] in ("retention", "superseded")
+            if expired and revision[1] == "superseded":
+                # A newer accepted revision may still carry the keyframe (see _episode_packets).
+                frame_id = record.get("frame_id")
+                expired = not any(any(f.frame_id == frame_id for f in packet.keyframes) for packet in self._episode_packets(db, row))
+        if expired:
+            item["reference_image"] = None
+        return expired
+
+    def _apply_negative_reobservations(self, db, items, merged, at):
+        """CP4: a 'gone' decision newer than the item's current placement time (so
+        not yet reversed by a later 'present', which writes a newer observation)
+        makes a placed item stale with stale_reason "negative_reobservation" and
+        stale_since_ms = the first such decision. Derived from the reobservations
+        table, so rebuild_all and as_of reproduce it from storage."""
+        def follow(item_id):
+            seen = set()
+            while item_id in merged and item_id not in seen:
+                seen.add(item_id)
+                item_id = merged[item_id]
+            return item_id
+        gone = {}
+        for row in db.execute("SELECT item_id,t_wall_ms FROM reobservations WHERE profile_id=? AND result='gone' ORDER BY t_wall_ms", (self.profile_id,)):
+            if at is not None and row["t_wall_ms"] > at:
+                continue
+            item_id = follow(row["item_id"])
+            item = items.get(item_id)
+            if item is None or item.get("location_status") != "placed" or row["t_wall_ms"] <= (item.get("observed_at_ms") or 0):
+                continue
+            gone.setdefault(item_id, row["t_wall_ms"])
+        for item_id, since in gone.items():
+            items[item_id].update(location_status="stale", stale_reason="negative_reobservation", stale_since_ms=since)
+
+    def _apply_containment(self, db, items, merged, at):
+        """CP4: an item A recorded inside B (containment, most recent row wins;
+        A's own later hand event clears it) reads location_status "inferred" with
+        B's current location text once B's location has changed since (a new hand
+        event of B, or B stale by pickup / negative re-observation) and A has not
+        been seen in place after that change. Ageing of B is not a change here: A's
+        own placement ages on its own clock. A negative re-observation of A at its
+        old place never contradicts the inference (A is expected to be gone)."""
+        def follow(item_id):
+            seen = set()
+            while item_id in merged and item_id not in seen:
+                seen.add(item_id)
+                item_id = merged[item_id]
+            return item_id
+        latest = {}
+        for row in db.execute("SELECT inner_item,outer_item,since_ms FROM containment WHERE profile_id=? ORDER BY since_ms,containment_no", (self.profile_id,)):
+            if at is not None and row["since_ms"] > at:
+                continue
+            inner, outer = follow(row["inner_item"]), follow(row["outer_item"])
+            if inner == outer or inner not in items or outer not in items:
+                continue
+            latest[inner] = (outer, row["since_ms"])
+        for _ in range(2):  # a second pass lets a container's own inference propagate
+            for inner, (outer, since) in latest.items():
+                a, b = items[inner], items[outer]
+                if (a.get("last_event_ms") or 0) > since or a.get("location_status") not in ("placed", "stale", "inferred"):
+                    continue
+                if a.get("location_status") == "stale" and a.get("stale_reason") != "negative_reobservation":
+                    continue
+                changed_at = None
+                if (b.get("last_event_ms") or 0) > since:
+                    changed_at = b["last_event_ms"]
+                elif b.get("location_status") == "stale" and b.get("stale_since_ms") is not None and b["stale_since_ms"] > since:
+                    changed_at = b["stale_since_ms"]
+                if changed_at is None or (a.get("observed_at_ms") or 0) > changed_at:
+                    continue
+                a.update(location_status="inferred", location_text=b.get("location_text"), stale_reason=None, stale_since_ms=None,
+                         inference={"container": outer, "container_name": b.get("name"), "since_ms": since})
 
     def _rebuild_projection(self, db):
         # Stored without ageing: the projection must not depend on wall-clock time.
@@ -903,7 +1245,7 @@ class EpisodeStoreMixin:
     def _item_rows(self, db, item_id):
         """The observation rows effectively assigned to item_id (corrections applied), oldest first."""
         assign, _, _ = self._assignments(db)
-        rows = db.execute("SELECT * FROM local_observations WHERE profile_id=? AND record IS NOT NULL ORDER BY observed_at_ms,decided_at_ms,observation_id", (self.profile_id,))
+        rows = db.execute(f"SELECT * FROM local_observations WHERE profile_id=? AND {LIVE} ORDER BY observed_at_ms,decided_at_ms,observation_id", (self.profile_id,))
         return [row for row in rows if assign.get(row["observation_id"]) == item_id]
 
     def item_history(self, item_id) -> list[dict]:
@@ -928,25 +1270,57 @@ class EpisodeStoreMixin:
                 record = json.loads(row["record"])
                 identity_state, candidates, identity_source = self._resolved_identity(row, record, item_id, merged, resolved)
                 placed = identity_state == "trusted" and record.get("outcome") == "placed_on_surface" and bool(record.get("location_text"))
+                # CP4: a positive re-observation row inherits its placement's location.
+                if record.get("source") == "reobservation" and record.get("location_status") == "placed":
+                    placed = bool(record.get("location_text"))
                 evidence.append({"observation_id": row["observation_id"], "item_id": item_id,
                                  "observed_at_ms": row["observed_at_ms"] if row["observed_at_ms"] > 0 else None,
                                  "frame_id": record["frame_id"],
-                                 "reference_image": {"frame_id": record["frame_id"], "bbox": list(record["bbox"])},
+                                 "reference_image": self._reference_image(record),
                                  "identity_status": identity_state, "identity_source": identity_source, "outcome": record["outcome"],
                                  "location_text": record.get("location_text") if placed else None,
-                                 "candidates": candidates, "embedded": row["observation_id"] in embedded})
+                                 "candidates": candidates, "embedded": row["observation_id"] in embedded,
+                                 "source": record.get("source", "local_evidence")})
             return evidence
 
     def _keyframe_bytes(self, db, row):
         """The stored keyframe bytes of one observation row, or None when its
-        revision is redacted or the frame is absent (the item_image rules)."""
-        revision = db.execute("SELECT packet FROM episode_revisions WHERE profile_id=? AND device_id=? AND episode_id=? AND revision_no=? AND redacted=0", (self.profile_id, row["device_id"], row["episode_id"], row["revision_no"])).fetchone()
-        if revision is None or revision[0] is None:
+        revision is redacted or expired or the frame is absent (the item_image
+        rules). A re-observation row's image is its promoted idle frame."""
+        if row["record"] is None:
             return None
-        packet = parse_packet(bytes(revision[0]))
         observation = json.loads(row["record"])
-        frame = next((f for f in packet.keyframes if f.frame_id == observation["frame_id"]), None)
-        return None if frame is None else jpeg_bytes(frame.jpeg_b64)
+        if observation.get("erased"):
+            return None
+        if observation.get("source") == "reobservation":
+            frame = db.execute("SELECT jpeg FROM idle_frames WHERE profile_id=? AND device_id=? AND frame_id=?",
+                               (self.profile_id, row["device_id"], observation.get("frame_id"))).fetchone()
+            return None if frame is None or frame[0] is None else bytes(frame[0])
+        for packet in self._episode_packets(db, row):
+            frame = next((f for f in packet.keyframes if f.frame_id == observation["frame_id"]), None)
+            if frame is not None:
+                return jpeg_bytes(frame.jpeg_b64)
+        return None
+
+    def _episode_packets(self, db, row):
+        """Parsed packets that may hold the row's keyframe: its own revision
+        first, then (when that one was superseded, i.e. its bytes were released
+        because a newer accepted revision exists) the newer accepted revisions of
+        the episode, newest first. A superset revision keeps every prior keyframe
+        byte for byte, so the image served is the one the observation was
+        decided on. Redacted (erased) episodes yield nothing."""
+        own = db.execute("SELECT packet,redacted,redacted_reason FROM episode_revisions WHERE profile_id=? AND device_id=? AND episode_id=? AND revision_no=?",
+                         (self.profile_id, row["device_id"], row["episode_id"], row["revision_no"])).fetchone()
+        if own is None or own["redacted"]:
+            return
+        if own["packet"] is not None:
+            yield parse_packet(bytes(own["packet"]))
+            return
+        if own["redacted_reason"] != "superseded":
+            return
+        for newer in db.execute("SELECT packet FROM episode_revisions WHERE profile_id=? AND device_id=? AND episode_id=? AND revision_no>? AND accepted=1 AND redacted=0 AND packet IS NOT NULL ORDER BY revision_no DESC",
+                                (self.profile_id, row["device_id"], row["episode_id"], row["revision_no"])):
+            yield parse_packet(bytes(newer[0]))
 
     def observation_image(self, item_id, observation_id) -> bytes | None:
         """CP3: that observation's keyframe bytes, unmodified, when the observation
@@ -957,7 +1331,7 @@ class EpisodeStoreMixin:
         with self._connection() as db:
             if not db.execute("SELECT 1 FROM current_items WHERE profile_id=? AND item_id=?", (self.profile_id, item_id)).fetchone():
                 return None
-            row = db.execute("SELECT * FROM local_observations WHERE profile_id=? AND observation_id=? AND record IS NOT NULL", (self.profile_id, observation_id)).fetchone()
+            row = db.execute(f"SELECT * FROM local_observations WHERE profile_id=? AND observation_id=? AND {LIVE}", (self.profile_id, observation_id)).fetchone()
             if row is None:
                 return None
             assign, _, _ = self._assignments(db)
@@ -978,7 +1352,7 @@ class EpisodeStoreMixin:
             if item is None:
                 return None
             item = json.loads(item[0])
-            row = db.execute("SELECT * FROM local_observations WHERE profile_id=? AND observation_id=? AND record IS NOT NULL", (self.profile_id, item["observation_id"])).fetchone()
+            row = db.execute(f"SELECT * FROM local_observations WHERE profile_id=? AND observation_id=? AND {LIVE}", (self.profile_id, item["observation_id"])).fetchone()
             if row is None:
                 return None
             return self._keyframe_bytes(db, row)
@@ -1050,7 +1424,7 @@ class EpisodeStoreMixin:
             raise KeyError("Unknown item")
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT observation_id FROM local_observations WHERE profile_id=? AND observation_id=? AND record IS NOT NULL", (self.profile_id, observation_id)).fetchone()
+            row = db.execute(f"SELECT observation_id FROM local_observations WHERE profile_id=? AND observation_id=? AND {LIVE}", (self.profile_id, observation_id)).fetchone()
             if row is None:
                 raise KeyError("Unknown observation")
             assign, _, _ = self._assignments(db)
@@ -1106,7 +1480,7 @@ class EpisodeStoreMixin:
             raise KeyError("Unknown item")
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT * FROM local_observations WHERE profile_id=? AND observation_id=? AND record IS NOT NULL", (self.profile_id, observation_id)).fetchone()
+            row = db.execute(f"SELECT * FROM local_observations WHERE profile_id=? AND observation_id=? AND {LIVE}", (self.profile_id, observation_id)).fetchone()
             if row is None:
                 raise KeyError("Unknown observation")
             if not db.execute("SELECT 1 FROM current_items WHERE profile_id=? AND item_id=?", (self.profile_id, item_id)).fetchone():
@@ -1117,7 +1491,7 @@ class EpisodeStoreMixin:
             placeholder = assign.get(observation_id, row["item_id"])
             record = json.loads(row["record"])
             co_visible = set()
-            for other in db.execute("SELECT observation_id,item_id,record FROM local_observations WHERE profile_id=? AND device_id=? AND episode_id=? AND record IS NOT NULL", (self.profile_id, row["device_id"], row["episode_id"])):
+            for other in db.execute(f"SELECT observation_id,item_id,record FROM local_observations WHERE profile_id=? AND device_id=? AND episode_id=? AND {LIVE}", (self.profile_id, row["device_id"], row["episode_id"])):
                 if other["observation_id"] != observation_id and json.loads(other["record"]).get("frame_id") == record.get("frame_id"):
                     co_visible.add(assign.get(other["observation_id"], other["item_id"]))
             a, b = sorted((placeholder, item_id))
@@ -1184,6 +1558,17 @@ class EpisodeStoreMixin:
         if item["identity_status"] == "trusted" and item["location_status"] == "placed" and not item.get("aged"):
             message = f"The recorded location of {item['name']} is {item['location_text']}."
             shape = "confident"
+        elif item["location_status"] == "inferred" and isinstance(item.get("inference"), dict):
+            # CP4 containment: never confident; the location is the container's.
+            container = item["inference"].get("container_name") or "another stored item"
+            if item["location_text"]:
+                message = f"I think {item['name']} is with {container}, which I last saw at {item['location_text']}."
+            else:
+                message = f"I think {item['name']} is with {container}, but I do not know where {container} is now."
+        elif item.get("stale_reason") == "negative_reobservation" and item["location_text"]:
+            # CP4 rule 13: the place is known, the item was seen to be gone from it.
+            message = (f"I recorded {item['name']} at {item['location_text']} on {self._date_text(item['observed_at_ms'])}, "
+                       f"but it was no longer there when I looked on {self._date_text(item.get('stale_since_ms'))}.")
         elif item.get("stale_reason") == "age" and item["location_text"]:
             if item["location_status"] == "stale":
                 return dict(answer, text=f"I have no recent evidence for {item['name']}.")
@@ -1235,49 +1620,676 @@ class EpisodeStoreMixin:
                     "automatic_conversion": False, "mutates_data": False,
                     "plan": "Preserve legacy records, budgets and leases. Explicit reviewed conversion may import legacy evidence as untrusted; never infer calibrated identity."}
 
+    # ------------------------------------------------------------------ erasure (CP4)
     def redact_item(self, item_id) -> dict:
-        # Conservatively invalidate ALL candidates sharing packet media. A whole-frame
-        # packet may contain several people/items; retaining it would defeat erasure.
+        """CP1 alias kept for callers and tests: erase_item with actor "operator"."""
+        return self.erase_item(item_id, actor="operator")
+
+    def _closure(self, db, item_id):
+        """(affected item ids, affected (device, episode) keys): the CP1 co-visibility
+        closure over the effective assignment. A whole-frame packet may show several
+        people and items, so retaining it for a co-item would defeat erasure."""
+        assign, _, _ = self._assignments(db)
+        location = {row["observation_id"]: (row["device_id"], row["episode_id"]) for row in
+                    db.execute("SELECT observation_id,device_id,episode_id FROM local_observations WHERE profile_id=?", (self.profile_id,))}
+        def episodes_of(target):
+            return {location[o] for o, item in assign.items() if item == target and o in location}
+        def items_in(device, episode):
+            return {assign[o] for o, where in location.items() if where == (device, episode) and o in assign}
+        episodes = episodes_of(item_id)
+        affected = {item_id}
+        changed = True
+        while changed:
+            before = (len(episodes), len(affected))
+            for device, episode in list(episodes):
+                affected.update(items_in(device, episode))
+            for target in list(affected):
+                episodes.update(episodes_of(target))
+            changed = before != (len(episodes), len(affected))
+        return affected, episodes, assign
+
+    def _erase_items(self, db, affected, episodes, assign, now) -> dict:
+        """Steps (1)-(5) of erase_item for a set of items inside the caller's
+        transaction; returns counts only (never ids or text)."""
+        counts = {"items": 0, "observations": 0, "embeddings": 0, "reobservations": 0, "containment": 0,
+                  "idle_frames": 0, "names": 0, "audit_rows": 0, "corrections": 0, "revisions": 0, "episodes": 0,
+                  "cannot_links": 0, "legacy_objects": 0}
+        erased_observations = set()
+        legacy_objects = set()
+        for target in sorted(affected):
+            # (1) tombstone; the item never reappears through a resent packet, a
+            # replay or a correction.
+            db.execute("INSERT OR IGNORE INTO item_tombstones VALUES(?,?,?)", (self.profile_id, target, now))
+            counts["items"] += 1
+            # Erase by effective AND processing-time assignment (over-erasure is the
+            # safe direction); the embedding derived from an erased crop goes with it.
+            erased = {o for o, item in assign.items() if item == target}
+            erased.update(r[0] for r in db.execute("SELECT observation_id FROM local_observations WHERE profile_id=? AND item_id=?", (self.profile_id, target)))
+            erased_observations |= erased
+            for observation_id in sorted(erased):
+                row = db.execute("SELECT observed_at_ms,record FROM local_observations WHERE profile_id=? AND observation_id=?", (self.profile_id, observation_id)).fetchone()
+                if row is None:
+                    continue
+                if row["record"]:
+                    try:
+                        legacy = json.loads(row["record"]).get("legacy_object_id")
+                    except ValueError:
+                        legacy = None
+                    if isinstance(legacy, str):
+                        legacy_objects.add(legacy)
+                # (3) a minimal, non-identifying stub: no label, bbox, location text,
+                # candidates or match survives.
+                db.execute("UPDATE local_observations SET record=?,candidates=NULL,erased=1 WHERE profile_id=? AND observation_id=?",
+                           (_json({"erased": True, "observed_at_ms": row["observed_at_ms"]}), self.profile_id, observation_id))
+                counts["observations"] += 1
+                counts["embeddings"] += db.execute("DELETE FROM embeddings WHERE profile_id=? AND observation_id=?", (self.profile_id, observation_id)).rowcount
+            # (2) derived rows of the item.
+            for frame in db.execute("SELECT device_id,frame_id FROM reobservations WHERE profile_id=? AND item_id=? AND result='present'", (self.profile_id, target)).fetchall():
+                counts["idle_frames"] += db.execute("DELETE FROM idle_frames WHERE profile_id=? AND device_id=? AND frame_id=? AND promoted=1", (self.profile_id, frame["device_id"], frame["frame_id"])).rowcount
+            counts["reobservations"] += db.execute("DELETE FROM reobservations WHERE profile_id=? AND item_id=?", (self.profile_id, target)).rowcount
+            counts["containment"] += db.execute("DELETE FROM containment WHERE profile_id=? AND (inner_item=? OR outer_item=?)", (self.profile_id, target, target)).rowcount
+            counts["cannot_links"] += db.execute("DELETE FROM local_cannot_links WHERE profile_id=? AND (item_a=? OR item_b=?)", (self.profile_id, target, target)).rowcount
+            # (4) text blanked, rows kept with erased=1.
+            counts["names"] += db.execute("UPDATE item_names SET name=NULL,erased=1 WHERE profile_id=? AND item_id=?", (self.profile_id, target)).rowcount
+            counts["audit_rows"] += db.execute("UPDATE local_audit SET detail='{}',erased=1 WHERE profile_id=? AND item_id=? AND erased=0", (self.profile_id, target)).rowcount
+            db.execute("DELETE FROM current_items WHERE profile_id=? AND item_id=?", (self.profile_id, target))
+        # (4) corrections naming an affected item or observation: payload blanked
+        # (so replay no longer sees them), row kept with erased=1.
+        for row in db.execute("SELECT correction_no,payload FROM corrections WHERE profile_id=? AND erased=0", (self.profile_id,)).fetchall():
+            try:
+                payload = json.loads(row["payload"])
+            except ValueError:
+                payload = {}
+            named = set()
+            for key in ("keep_id", "other_id", "item_id", "from_item_id", "new_item_id"):
+                if isinstance(payload.get(key), str):
+                    named.add(payload[key])
+            for candidate in payload.get("other_candidates") or []:
+                if isinstance(candidate, str):
+                    named.add(candidate)
+            if named & affected or payload.get("observation_id") in erased_observations:
+                db.execute("UPDATE corrections SET payload='{}',erased=1 WHERE correction_no=?", (row["correction_no"],))
+                counts["corrections"] += 1
+        # (5) packets of the affected episodes, tombstoned against a resend.
+        for device, episode in sorted(episodes):
+            db.execute("INSERT OR IGNORE INTO episode_tombstones VALUES(?,?,?,?)", (self.profile_id, device, episode, now))
+            counts["revisions"] += db.execute("UPDATE episode_revisions SET packet=NULL,redacted=1,redacted_reason='erasure' WHERE profile_id=? AND device_id=? AND episode_id=?", (self.profile_id, device, episode)).rowcount
+            db.execute("UPDATE episode_jobs SET status='redacted',token=NULL,lease_until=NULL,error=NULL WHERE profile_id=? AND device_id=? AND episode_id=?", (self.profile_id, device, episode))
+            counts["episodes"] += 1
+        # A migrated item: its legacy v1 rows carry the same personal text.
+        for object_id in sorted(legacy_objects):
+            counts["legacy_objects"] += self._erase_legacy_object(db, object_id)
+        return counts
+
+    def _erase_legacy_object(self, db, object_id) -> int:
+        """Blank the v1 rows of one legacy object (name, verifications, observation
+        records, bindings); api_calls (budgets, unknown spend) are untouched."""
+        if not db.execute("SELECT 1 FROM objects WHERE profile_id=? AND object_id=?", (self.profile_id, object_id)).fetchone():
+            return 0
+        db.execute("UPDATE objects SET name='erased',category='erased',status='ignored' WHERE profile_id=? AND object_id=?", (self.profile_id, object_id))
+        db.execute("DELETE FROM observations WHERE profile_id=? AND object_id=?", (self.profile_id, object_id))
+        db.execute("DELETE FROM bindings WHERE profile_id=? AND object_id=?", (self.profile_id, object_id))
+        db.execute("UPDATE candidates SET payload='{}',verification=NULL,reason='erased' WHERE profile_id=? AND object_id=?", (self.profile_id, object_id))
+        db.execute("UPDATE decisions SET detail='{}' WHERE profile_id=? AND object_id=?", (self.profile_id, object_id))
+        return 1
+
+    def erase_item(self, item_id, actor) -> dict:
+        """Explicit, audited erasure of one item and its CP1 co-visibility closure
+        (B-07): one transaction that tombstones the items, rewrites their
+        observation records to {"erased": true, "observed_at_ms"}, deletes their
+        embeddings, re-observations, containment rows and promoted idle frames,
+        blanks their names, audit details and correction payloads (rows kept with
+        erased=1), NULLs the affected packets (redacted_reason "erasure") and
+        writes one audit row "erased" carrying counts only. KeyError for an unknown
+        item, ValueError for a bad actor; an already erased item returns
+        already=True. Logical erasure of the live rows: no forensic claim."""
+        _check_actor(actor)
+        if not isinstance(item_id, str) or not 1 <= len(item_id) <= 100:
+            raise KeyError("Unknown item")
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            now = self._now_ms()
             if db.execute("SELECT 1 FROM item_tombstones WHERE profile_id=? AND item_id=?", (self.profile_id, item_id)).fetchone():
-                return {"item_id": item_id, "redacted": True, "scope": "logical", "forensic_erasure": False}
+                return {"item_id": item_id, "erased": True, "already": True, "redacted": True, "scope": "logical", "forensic_erasure": False}
             if not db.execute("SELECT 1 FROM current_items WHERE profile_id=? AND item_id=?", (self.profile_id, item_id)).fetchone():
                 raise KeyError("Unknown item")
-            # CP3: observations belong to items through the effective assignment
-            # (corrections applied), so a linked-in observation is erased with its item.
+            affected, episodes, assign = self._closure(db, item_id)
+            counts = self._erase_items(db, affected, episodes, assign, now)
+            db.execute("INSERT INTO local_audit(profile_id,at_ms,action,item_id,detail) VALUES(?,?,?,?,?)",
+                       (self.profile_id, now, "erased", None, _json({"actor": actor, "counts": counts})))
+            self._rebuild_projection(db)
+            return {"item_id": item_id, "erased": True, "already": False, "redacted": True, "affected_items": counts["items"],
+                    "counts": counts, "scope": "logical", "forensic_erasure": False}
+
+    def erase_profile(self, *, actor, confirm) -> dict:
+        """Erase everything personal in this profile (B-07, P-107): every item as
+        erase_item does, every idle frame (promoted or not), every re-observation,
+        containment row, cannot-link, correction payload, audit detail and packet,
+        and the legacy v1 objects/candidates/observations/bindings rows (api_calls,
+        the spend ledger, calibrations, retention and migration rows stay: none is
+        personal). confirm must be True or the literal ERASE_PROFILE_CONFIRM
+        (ValueError "confirmation required" otherwise; the server maps it to 409).
+        After the transaction commits, the file is rebuilt with VACUUM INTO into a
+        fresh private file and swapped in (os.replace), and the persisted journal
+        is dropped, which reduces residue of the erased pages in the live files; it
+        is not a guarantee about the filesystem, earlier journals or backups. When
+        the swap is refused by the OS an in-place VACUUM is run instead and the
+        report says swap: "in_place"."""
+        _check_actor(actor)
+        if confirm is not True and confirm != ERASE_PROFILE_CONFIRM:
+            raise ValueError("confirmation required")
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            now = self._now_ms()
+            items = {row[0] for row in db.execute("SELECT DISTINCT item_id FROM local_observations WHERE profile_id=?", (self.profile_id,))}
+            items |= {row[0] for row in db.execute("SELECT item_id FROM current_items WHERE profile_id=?", (self.profile_id,))}
             assign, _, _ = self._assignments(db)
-            location = {row["observation_id"]: (row["device_id"], row["episode_id"]) for row in
-                        db.execute("SELECT observation_id,device_id,episode_id FROM local_observations WHERE profile_id=?", (self.profile_id,))}
-            def episodes_of(target):
-                return {location[o] for o, item in assign.items() if item == target and o in location}
-            def items_in(device, episode):
-                return {assign[o] for o, where in location.items() if where == (device, episode) and o in assign}
-            episodes = episodes_of(item_id)
-            affected = {item_id}
-            # Transitive closure prevents a second packet from restoring a co-item.
-            changed = True
-            while changed:
-                before = (len(episodes), len(affected))
-                for device, episode in list(episodes):
-                    affected.update(items_in(device, episode))
-                for target in list(affected):
-                    episodes.update(episodes_of(target))
-                changed = before != (len(episodes), len(affected))
-            for target in affected:
-                db.execute("INSERT OR IGNORE INTO item_tombstones VALUES(?,?,?)", (self.profile_id, target, self._now_ms()))
-                # Erase by effective AND processing-time assignment (over-erasure is the
-                # safe direction); the embedding derived from an erased crop goes with it.
-                erased = {o for o, item in assign.items() if item == target}
-                erased.update(r[0] for r in db.execute("SELECT observation_id FROM local_observations WHERE profile_id=? AND item_id=?", (self.profile_id, target)))
-                for observation_id in erased:
-                    db.execute("UPDATE local_observations SET record=NULL,candidates=NULL WHERE profile_id=? AND observation_id=?", (self.profile_id, observation_id))
-                    db.execute("DELETE FROM embeddings WHERE profile_id=? AND observation_id=?", (self.profile_id, observation_id))
-                db.execute("UPDATE item_names SET name=NULL WHERE profile_id=? AND item_id=?", (self.profile_id, target))
-                db.execute("DELETE FROM current_items WHERE profile_id=? AND item_id=?", (self.profile_id, target))
-            for device, episode in episodes:
-                db.execute("INSERT OR IGNORE INTO episode_tombstones VALUES(?,?,?,?)", (self.profile_id, device, episode, self._now_ms()))
-                db.execute("UPDATE episode_revisions SET packet=NULL,redacted=1 WHERE profile_id=? AND device_id=? AND episode_id=?", (self.profile_id, device, episode))
-                db.execute("UPDATE episode_jobs SET status='redacted',token=NULL,lease_until=NULL,error=NULL WHERE profile_id=? AND device_id=? AND episode_id=?", (self.profile_id, device, episode))
-            db.execute("INSERT INTO local_audit(profile_id,at_ms,action,item_id,detail) VALUES(?,?,?,?,?)", (self.profile_id, self._now_ms(), "logical_redaction", item_id, _json({"affected_items": len(affected), "episodes": len(episodes)})))
-            return {"item_id": item_id, "redacted": True, "affected_items": len(affected), "scope": "logical", "forensic_erasure": False}
+            items |= set(assign.values())
+            episodes = {(row[0], row[1]) for row in db.execute("SELECT DISTINCT device_id,episode_id FROM episode_revisions WHERE profile_id=?", (self.profile_id,))}
+            counts = self._erase_items(db, items, episodes, assign, now)
+            counts["idle_frames"] += db.execute("DELETE FROM idle_frames WHERE profile_id=?", (self.profile_id,)).rowcount
+            counts["reobservations"] += db.execute("DELETE FROM reobservations WHERE profile_id=?", (self.profile_id,)).rowcount
+            counts["containment"] += db.execute("DELETE FROM containment WHERE profile_id=?", (self.profile_id,)).rowcount
+            counts["cannot_links"] += db.execute("DELETE FROM local_cannot_links WHERE profile_id=?", (self.profile_id,)).rowcount
+            counts["names"] += db.execute("UPDATE item_names SET name=NULL,erased=1 WHERE profile_id=? AND erased=0", (self.profile_id,)).rowcount
+            counts["audit_rows"] += db.execute("UPDATE local_audit SET detail='{}',erased=1 WHERE profile_id=? AND erased=0", (self.profile_id,)).rowcount
+            counts["corrections"] += db.execute("UPDATE corrections SET payload='{}',erased=1 WHERE profile_id=? AND erased=0", (self.profile_id,)).rowcount
+            db.execute("DELETE FROM current_items WHERE profile_id=?", (self.profile_id,))
+            # Remaining observation rows of this profile (none expected) become stubs too.
+            for row in db.execute("SELECT observation_id,observed_at_ms FROM local_observations WHERE profile_id=? AND erased=0", (self.profile_id,)).fetchall():
+                db.execute("UPDATE local_observations SET record=?,candidates=NULL,erased=1 WHERE profile_id=? AND observation_id=?",
+                           (_json({"erased": True, "observed_at_ms": row["observed_at_ms"]}), self.profile_id, row["observation_id"]))
+                counts["observations"] += 1
+            db.execute("DELETE FROM embeddings WHERE profile_id=?", (self.profile_id,))
+            # Legacy v1 personal rows; the spend ledger (api_calls) stays.
+            legacy = {"objects": db.execute("DELETE FROM objects WHERE profile_id=?", (self.profile_id,)).rowcount,
+                      "candidates": db.execute("DELETE FROM candidates WHERE profile_id=?", (self.profile_id,)).rowcount,
+                      "observations": db.execute("DELETE FROM observations WHERE profile_id=?", (self.profile_id,)).rowcount,
+                      "bindings": db.execute("DELETE FROM bindings WHERE profile_id=?", (self.profile_id,)).rowcount,
+                      "decisions": db.execute("UPDATE decisions SET detail='{}' WHERE profile_id=?", (self.profile_id,)).rowcount}
+            counts["legacy_rows"] = sum(legacy.values())
+            # Calibrations measured on the household's own footage are personal;
+            # synthetic / licensed-dataset ones are not and stay.
+            counts["calibrations"] = db.execute("DELETE FROM calibrations WHERE profile_id=? AND source='own-footage'", (self.profile_id,)).rowcount
+            # From now on any capture with a wall time before this instant is refused
+            # (a browser mirror cannot re-add erased evidence).
+            retention = self._retention_row(db)
+            retention["erased_at_ms"] = now
+            self._write_retention(db, retention, now)
+            db.execute("INSERT INTO local_audit(profile_id,at_ms,action,item_id,detail) VALUES(?,?,?,?,?)",
+                       (self.profile_id, now, "profile_erased", None, _json({"actor": actor, "counts": counts})))
+        swap = self._vacuum_swap()
+        return {"erased": True, "profile_id": self.profile_id, "counts": counts, "swap": swap,
+                "scope": "logical", "forensic_erasure": False}
+
+    def _vacuum_swap(self) -> str:
+        """VACUUM INTO a fresh private file next to the database and replace the
+        database with it; the PERSIST journal (which still holds the pages the
+        erasure transaction overwrote) is removed so _connection recreates an empty
+        private one. Falls back to an in-place VACUUM when the replace is refused.
+        Returns "replaced" | "in_place"."""
+        fresh = Path(str(self.path) + f".vacuum-{uuid.uuid4().hex[:12]}")
+        journal = Path(str(self.path) + "-journal")
+        try:
+            # The target (and the journal SQLite could open beside it) exist with
+            # private modes BEFORE VACUUM INTO writes a byte: SQLite reuses an
+            # existing empty file instead of creating one with the umask.
+            for path in (fresh, Path(str(fresh) + "-journal")):
+                os.close(private_append_fd(path))
+            db = sqlite3.connect(str(self.path), timeout=10, isolation_level=None)
+            try:
+                db.execute("VACUUM INTO ?", (str(fresh),))
+            finally:
+                db.close()
+            check = sqlite3.connect(str(fresh), timeout=10)
+            try:
+                ok = check.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+                version = check.execute("PRAGMA user_version").fetchone()[0]
+            finally:
+                check.close()
+            if not ok or version != self._schema_version():
+                raise OSError("vacuumed copy failed its check")
+            with open(fresh, "rb+") as handle:
+                os.fsync(handle.fileno())
+            os.replace(fresh, self.path)
+            # The persisted journal still holds the pages the erasure overwrote:
+            # zero-length it, then remove it; _connection recreates an empty private one.
+            for sidecar in (journal, Path(str(fresh) + "-journal")):
+                self._drop_sidecar(sidecar)
+            self._sync_directory()
+            return "replaced"
+        except Exception:
+            # The erasure transaction is already committed; the rebuild is best
+            # effort and its failure is reported, never raised over a done erasure.
+            for leftover in (fresh, Path(str(fresh) + "-journal")):
+                try:
+                    os.unlink(leftover)
+                except OSError:
+                    pass
+            try:
+                db = sqlite3.connect(str(self.path), timeout=10, isolation_level=None)
+                try:
+                    db.execute("VACUUM")
+                finally:
+                    db.close()
+            except Exception:
+                return "none"
+            return "in_place"
+
+    @staticmethod
+    def _drop_sidecar(path):
+        """Truncate a sidecar file to zero bytes (synced) and then unlink it, so its
+        content is gone even where the unlink is refused. Missing is fine."""
+        try:
+            fd = os.open(path, os.O_RDWR)
+        except OSError:
+            return
+        try:
+            os.ftruncate(fd, 0)
+            os.fsync(fd)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    def _schema_version(self) -> int:
+        with self._connection() as db:
+            return db.execute("PRAGMA user_version").fetchone()[0]
+
+    def _sync_directory(self):
+        if os.name == "nt":
+            return
+        try:
+            fd = os.open(self.path.parent, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(fd)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+    # ------------------------------------------------------------- idle frames (CP4)
+    def ingest_idle(self, raw: bytes) -> dict:
+        """Store one idle keyframe in the rolling cache. Strict parsing
+        (perception.episode.parse_idle: PacketTooLarge -> 413, ValueError -> 400,
+        an implausible capture clock is a ValueError too). Returns {"frame_id",
+        "retained": True, "expires_at_ms", "evicted"} or, over the per-device
+        daily cap or a cache full of promoted frames, {"frame_id", "retained":
+        False, "reason": "idle_cap" | "idle_cache_full"} without storing (not an
+        exception). A resend of a stored frame_id is idempotent."""
+        frame = parse_idle(raw)
+        now = self._now_ms()
+        wall = frame.wall_ms
+        if wall <= 0 or wall > now + 300000:
+            raise ValueError("Implausible idle frame clock")
+        data = jpeg_bytes(frame.jpeg_b64)
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._capture_allowed(db, wall)
+            existing = db.execute("SELECT expires_at_ms FROM idle_frames WHERE profile_id=? AND device_id=? AND frame_id=?",
+                                  (self.profile_id, frame.device_id, frame.frame_id)).fetchone()
+            if existing:
+                return {"frame_id": frame.frame_id, "retained": True, "expires_at_ms": existing[0], "evicted": 0}
+            day_count = db.execute("SELECT count(*) FROM idle_frames WHERE profile_id=? AND device_id=? AND received_ms>?",
+                                   (self.profile_id, frame.device_id, now - 24 * 3600 * 1000)).fetchone()[0]
+            if day_count >= IDLE_MAX_PER_DAY:
+                return {"frame_id": frame.frame_id, "retained": False, "reason": "idle_cap"}
+            ttl = self._retention_row(db)["idle_hours"] * 3600 * 1000
+            total = db.execute("SELECT COALESCE(SUM(length(jpeg)),0) FROM idle_frames WHERE profile_id=?", (self.profile_id,)).fetchone()[0]
+            evicted = 0
+            while total + len(data) > IDLE_CACHE_BYTES:
+                oldest = db.execute("SELECT device_id,frame_id,length(jpeg) FROM idle_frames WHERE profile_id=? AND promoted=0 ORDER BY received_ms,t_wall_ms,frame_id LIMIT 1", (self.profile_id,)).fetchone()
+                if oldest is None:
+                    return {"frame_id": frame.frame_id, "retained": False, "reason": "idle_cache_full"}
+                db.execute("DELETE FROM idle_frames WHERE profile_id=? AND device_id=? AND frame_id=?", (self.profile_id, oldest[0], oldest[1]))
+                total -= oldest[2] or 0
+                evicted += 1
+            expires = now + ttl
+            db.execute("INSERT INTO idle_frames(profile_id,device_id,frame_id,session_id,t_wall_ms,received_ms,width,height,jpeg,motion_energy,expires_at_ms,promoted,consent_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,0,?)",
+                       (self.profile_id, frame.device_id, frame.frame_id, frame.session_id, wall, now, frame.capture.width, frame.capture.height,
+                        data, float(frame.motion_energy), expires, CONSENT_VERSION))
+            return {"frame_id": frame.frame_id, "retained": True, "expires_at_ms": expires, "evicted": evicted}
+
+    def expire_idle(self, now_ms=None) -> dict:
+        """Hard-delete expired unpromoted idle frames (expires_at_ms <= now, or
+        older than the retention row's idle_hours). Returns {"expired",
+        "remaining", "promoted"}."""
+        now = self._now_ms() if now_ms is None else now_ms
+        if isinstance(now, bool) or type(now) is not int or now < 0:
+            raise ValueError("now_ms must be nonnegative epoch milliseconds")
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            ttl = self._retention_row(db)["idle_hours"] * 3600 * 1000
+            expired = db.execute("DELETE FROM idle_frames WHERE profile_id=? AND promoted=0 AND (expires_at_ms<=? OR received_ms+?<=?)",
+                                 (self.profile_id, now, ttl, now)).rowcount
+            remaining = db.execute("SELECT count(*) FROM idle_frames WHERE profile_id=?", (self.profile_id,)).fetchone()[0]
+            promoted = db.execute("SELECT count(*) FROM idle_frames WHERE profile_id=? AND promoted=1", (self.profile_id,)).fetchone()[0]
+            return {"expired": expired, "remaining": remaining, "promoted": promoted}
+
+    # --------------------------------------------------------------- retention (CP4)
+    def _retention_row(self, db) -> dict:
+        row = db.execute("SELECT * FROM retention WHERE profile_id=?", (self.profile_id,)).fetchone()
+        if row is None:
+            return dict(RETENTION_DEFAULTS, consent_version=CONSENT_VERSION, updated_ms=None, acknowledged_version=None, erased_at_ms=None)
+        result = {key: row[key] for key in ("episodes_days", "idle_hours", "landmarks_hours", "updated_ms", "acknowledged_version", "erased_at_ms")}
+        result["consent_version"] = CONSENT_VERSION
+        return result
+
+    def _write_retention(self, db, current, now):
+        db.execute("INSERT INTO retention(profile_id,consent_version,episodes_days,idle_hours,landmarks_hours,updated_ms,acknowledged_version,erased_at_ms) VALUES(?,?,?,?,?,?,?,?) "
+                   "ON CONFLICT(profile_id) DO UPDATE SET consent_version=excluded.consent_version,episodes_days=excluded.episodes_days,"
+                   "idle_hours=excluded.idle_hours,landmarks_hours=excluded.landmarks_hours,updated_ms=excluded.updated_ms,"
+                   "acknowledged_version=excluded.acknowledged_version,erased_at_ms=excluded.erased_at_ms",
+                   (self.profile_id, CONSENT_VERSION, current["episodes_days"], current["idle_hours"], current["landmarks_hours"], now,
+                    current.get("acknowledged_version"), current.get("erased_at_ms")))
+
+    def get_retention(self) -> dict:
+        """The retention row {consent_version (the build constant), episodes_days,
+        idle_hours, landmarks_hours, updated_ms, acknowledged_version,
+        erased_at_ms} (defaults with updated_ms None until set)."""
+        with self._connection() as db:
+            return self._retention_row(db)
+
+    # Consent (CP4, Oversight rule). Capture is refused until the build's
+    # CONSENT_VERSION has been acknowledged for this profile, and anything captured
+    # before an erase_profile is refused for good (a browser mirror cannot re-add it).
+    def consent_state(self) -> dict:
+        """{required_version, acknowledged_version, ok}."""
+        with self._connection() as db:
+            return self._consent_state(db)
+
+    def _consent_state(self, db) -> dict:
+        row = self._retention_row(db)
+        return {"required_version": CONSENT_VERSION, "acknowledged_version": row["acknowledged_version"],
+                "ok": row["acknowledged_version"] == CONSENT_VERSION}
+
+    def acknowledge_consent(self, version, actor) -> dict:
+        """Record that the disclosure for `version` was acknowledged (audited).
+        version must equal CONSENT_VERSION (ValueError "consent version mismatch"
+        otherwise; the server maps it to 400). Returns consent_state()."""
+        _check_actor(actor)
+        if not isinstance(version, str) or version != CONSENT_VERSION:
+            raise ValueError("consent version mismatch")
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            now = self._now_ms()
+            current = self._retention_row(db)
+            current["acknowledged_version"] = version
+            self._write_retention(db, current, now)
+            db.execute("INSERT INTO local_audit(profile_id,at_ms,action,item_id,detail) VALUES(?,?,?,?,?)",
+                       (self.profile_id, now, "consent_acknowledged", None, _json({"actor": actor, "version": version})))
+            return self._consent_state(db)
+
+    def _capture_allowed(self, db, wall_ms):
+        """Refuse a capture (episode: its wall start; idle frame: its wall time)
+        without a current consent acknowledgement (ValueError "consent required"
+        -> 409 consent_required) or with a wall time earlier than the profile's
+        last erase_profile minus ERASED_BEFORE_TOLERANCE_MS (ValueError "captured
+        before erasure" -> 409 erased_before). The tolerance absorbs a phone clock
+        lagging the laptop; a mirrored capture from the final minutes before the
+        erasure is therefore not refused here, and the browser clears its mirror
+        on erase-all to cover that window."""
+        row = self._retention_row(db)
+        if row["acknowledged_version"] != CONSENT_VERSION:
+            raise ValueError("consent required")
+        if row["erased_at_ms"] is not None and wall_ms < row["erased_at_ms"] - ERASED_BEFORE_TOLERANCE_MS:
+            raise ValueError("captured before erasure")
+
+    def retention_counts(self) -> dict:
+        """Live counts for GET /api/retention: idle_cached, idle_promoted,
+        revisions_expired, landmarks_reduced, revisions_erased."""
+        with self._connection() as db:
+            return {"idle_cached": db.execute("SELECT count(*) FROM idle_frames WHERE profile_id=? AND promoted=0", (self.profile_id,)).fetchone()[0],
+                    "idle_promoted": db.execute("SELECT count(*) FROM idle_frames WHERE profile_id=? AND promoted=1", (self.profile_id,)).fetchone()[0],
+                    "revisions_expired": db.execute("SELECT count(*) FROM episode_revisions WHERE profile_id=? AND redacted_reason='retention'", (self.profile_id,)).fetchone()[0],
+                    "landmarks_reduced": db.execute("SELECT count(*) FROM episode_revisions WHERE profile_id=? AND reduced_ms IS NOT NULL", (self.profile_id,)).fetchone()[0],
+                    "revisions_erased": db.execute("SELECT count(*) FROM episode_revisions WHERE profile_id=? AND redacted_reason='erasure'", (self.profile_id,)).fetchone()[0]}
+
+    def set_retention(self, *, actor, **fields) -> dict:
+        """Update the retention windows (audited, actor literal). Accepted fields:
+        episodes_days (7..365), idle_hours (1..72), landmarks_hours (1..168); ints
+        only, no bools. consent_version is a build constant and is refused here.
+        Unknown field, bad value or empty update -> ValueError. Returns the row."""
+        _check_actor(actor)
+        if not fields or set(fields) - set(RETENTION_RANGES):
+            raise ValueError("Invalid retention fields")
+        for name, (low, high) in RETENTION_RANGES.items():
+            if name in fields:
+                value = fields[name]
+                if isinstance(value, bool) or type(value) is not int or not low <= value <= high:
+                    raise ValueError("Invalid retention window")
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = self._retention_row(db)
+            current.update(fields)
+            now = self._now_ms()
+            self._write_retention(db, current, now)
+            db.execute("INSERT INTO local_audit(profile_id,at_ms,action,item_id,detail) VALUES(?,?,?,?,?)",
+                       (self.profile_id, now, "retention_set", None, _json({"actor": actor, "fields": fields})))
+            return self._retention_row(db)
+
+    def apply_retention(self, now_ms=None, *, limit=RETENTION_BATCH) -> dict:
+        """Run the retention tiers at now_ms (default: the injected clock):
+        (a) packets of revisions received more than episodes_days ago are
+        replaced by NULL with redacted_reason "retention" (metadata, digests,
+        observations and embeddings stay; the item then reads evidence_expired and
+        its reference_image is null) and promoted idle frames that old are
+        deleted; (b) idle expiry (expire_idle); (c) landmark reduction: at most
+        `limit` packets older than landmarks_hours are rewritten with landmarks []
+        and the server-only landmark_summary (hand_bbox + hand_busy verdict per
+        hand), reduced_ms recorded, digest columns untouched. Returns counts."""
+        now = self._now_ms() if now_ms is None else now_ms
+        if isinstance(now, bool) or type(now) is not int or now < 0:
+            raise ValueError("now_ms must be nonnegative epoch milliseconds")
+        if type(limit) is not int or not 1 <= limit <= 1024:
+            raise ValueError("Invalid retention batch")
+        counts = {"revisions_expired": 0, "revisions_superseded": 0, "idle_promoted_expired": 0, "jobs_expired": 0,
+                  "reobservations_expired": 0, "landmarks_reduced": 0, "reduction_checked": 0, "reduction_failed": 0,
+                  "reduction_deferred": 0}
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            retention = self._retention_row(db)
+            cutoff = now - retention["episodes_days"] * 24 * 3600 * 1000
+            expired = db.execute("SELECT device_id,episode_id,revision_no FROM episode_revisions WHERE profile_id=? AND packet IS NOT NULL AND received_at_ms<?",
+                                 (self.profile_id, cutoff)).fetchall()
+            for row in expired:
+                key = (self.profile_id, row["device_id"], row["episode_id"], row["revision_no"])
+                db.execute("UPDATE episode_revisions SET packet=NULL,redacted_reason='retention' WHERE profile_id=? AND device_id=? AND episode_id=? AND revision_no=?", key)
+                counts["jobs_expired"] += db.execute("UPDATE episode_jobs SET status='expired',token=NULL,lease_until=NULL WHERE profile_id=? AND device_id=? AND episode_id=? AND revision_no=? AND status IN ('pending','processing')", key).rowcount
+                counts["revisions_expired"] += 1
+            # A superseded accepted revision (a newer accepted one exists) loses its
+            # bytes after SUPERSEDED_TTL_MS; digests, metadata and observations stay.
+            superseded = db.execute("""SELECT r.device_id,r.episode_id,r.revision_no FROM episode_revisions r
+                WHERE r.profile_id=? AND r.packet IS NOT NULL AND r.accepted=1 AND r.received_at_ms<?
+                AND EXISTS (SELECT 1 FROM episode_revisions n WHERE n.profile_id=r.profile_id AND n.device_id=r.device_id
+                            AND n.episode_id=r.episode_id AND n.accepted=1 AND n.revision_no>r.revision_no)""",
+                                    (self.profile_id, now - SUPERSEDED_TTL_MS)).fetchall()
+            for row in superseded:
+                key = (self.profile_id, row["device_id"], row["episode_id"], row["revision_no"])
+                db.execute("UPDATE episode_revisions SET packet=NULL,redacted_reason='superseded' WHERE profile_id=? AND device_id=? AND episode_id=? AND revision_no=?", key)
+                counts["jobs_expired"] += db.execute("UPDATE episode_jobs SET status='expired',token=NULL,lease_until=NULL WHERE profile_id=? AND device_id=? AND episode_id=? AND revision_no=? AND status IN ('pending','processing')", key).rowcount
+                counts["revisions_superseded"] += 1
+            counts["idle_promoted_expired"] = db.execute("DELETE FROM idle_frames WHERE profile_id=? AND promoted=1 AND received_ms<?", (self.profile_id, cutoff)).rowcount
+            counts["reobservations_expired"] = db.execute("DELETE FROM reobservations WHERE profile_id=? AND t_wall_ms<?", (self.profile_id, cutoff)).rowcount
+            reduce_before = now - retention["landmarks_hours"] * 3600 * 1000
+            # F2: a revision whose job is still pending/processing keeps its raw
+            # landmarks (the hand hull needs them at processing time); it is deferred
+            # and counted, not reduced.
+            counts["reduction_deferred"] = db.execute("""SELECT count(*) FROM episode_revisions r JOIN episode_jobs j USING(profile_id,device_id,episode_id,revision_no)
+                WHERE r.profile_id=? AND r.packet IS NOT NULL AND r.reduced_ms IS NULL AND r.received_at_ms<? AND j.status IN ('pending','processing')""",
+                                                      (self.profile_id, reduce_before)).fetchone()[0]
+            pending = db.execute("""SELECT r.device_id,r.episode_id,r.revision_no,r.packet FROM episode_revisions r
+                LEFT JOIN episode_jobs j USING(profile_id,device_id,episode_id,revision_no)
+                WHERE r.profile_id=? AND r.packet IS NOT NULL AND r.reduced_ms IS NULL AND r.received_at_ms<?
+                AND (j.status IS NULL OR j.status NOT IN ('pending','processing'))
+                ORDER BY r.received_at_ms,r.revision_no LIMIT ?""", (self.profile_id, reduce_before, limit)).fetchall()
+            for row in pending:
+                key = (self.profile_id, row["device_id"], row["episode_id"], row["revision_no"])
+                counts["reduction_checked"] += 1
+                reduced = self._reduce_landmarks(bytes(row["packet"]))
+                if reduced is None:
+                    counts["reduction_failed"] += 1
+                    continue
+                if reduced is not False:
+                    db.execute("UPDATE episode_revisions SET packet=?,reduced_ms=? WHERE profile_id=? AND device_id=? AND episode_id=? AND revision_no=?", (reduced, now) + key)
+                    counts["landmarks_reduced"] += 1
+                else:
+                    db.execute("UPDATE episode_revisions SET reduced_ms=? WHERE profile_id=? AND device_id=? AND episode_id=? AND revision_no=?", (now,) + key)
+            if counts["revisions_expired"] or counts["revisions_superseded"] or counts["idle_promoted_expired"] or counts["reobservations_expired"]:
+                self._rebuild_projection(db)
+        idle = self.expire_idle(now)
+        counts["idle_expired"] = idle["expired"]
+        counts["idle_remaining"] = idle["remaining"]
+        return counts
+
+    @staticmethod
+    def _reduce_landmarks(packet_bytes):
+        """The packet bytes rewritten with landmarks [] and landmark_summary, or
+        False when the packet has no landmarks (nothing to reduce), or None when
+        the packet or its reduced form does not parse (left untouched, counted)."""
+        try:
+            packet = parse_packet(packet_bytes)
+        except ValueError:
+            return None
+        if not packet.landmarks:
+            return False
+        summary = []
+        for sample in packet.landmarks:
+            hands = []
+            for hand in sample.hands:
+                try:
+                    verdict = hand_busy([hand.model_dump()])
+                except ValueError:
+                    verdict = {"busy": None, "basis": "degenerate hand"}
+                hands.append({"hand_bbox": [float(v) for v in hand.hand_bbox], "busy": verdict["busy"], "basis": str(verdict["basis"])[:40]})
+            summary.append({"frame_id": sample.frame_id, "t_ms": sample.t_ms, "hands": hands})
+        data = packet.model_dump()
+        data["landmarks"] = []
+        data["landmark_summary"] = summary
+        reduced = json.dumps(data, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        try:
+            check = parse_packet(reduced)
+        except ValueError:
+            return None
+        # The reduced bytes must still carry every keyframe (item_image) and the
+        # summary; the stored digest columns are never recomputed from these bytes.
+        if [f.frame_id for f in check.keyframes] != [f.frame_id for f in packet.keyframes] or check.landmark_summary is None or check.landmarks:
+            return None
+        return reduced
+
+    # --------------------------------------------------------------- migration (CP4)
+    @staticmethod
+    def _legacy_media(payload) -> set:
+        """Distinct media path strings (frames + crop) named by a v1 candidate
+        payload or observation record; counted only, never opened."""
+        try:
+            value = json.loads(payload) if isinstance(payload, (str, bytes)) else {}
+        except ValueError:
+            return set()
+        if not isinstance(value, dict):
+            return set()
+        paths = {p for p in value.get("frames") or [] if isinstance(p, str) and p}
+        if isinstance(value.get("crop"), str) and value["crop"]:
+            paths.add(value["crop"])
+        return paths
+
+    def migrate_v1(self, *, dry_run=True, actor) -> dict:
+        """Explicit conversion of the legacy v1 ledger (B-10). Each observation of
+        a user-confirmed ('tracked') legacy object becomes a local_observations
+        row with source "legacy_v1", identity_state "provisional" (never trusted),
+        outcome from the legacy action (placed -> placed_on_surface, picked_up ->
+        picked_up, sighted -> sighted, anything else -> uncertain), location_text
+        from the legacy scene description, observed_at_ms from its timestamp and no
+        image (reference_image null; legacy frames were paths on disk). Legacy
+        rows, budgets, unknown spend and leases are untouched. dry_run=True returns
+        counts and up to 5 sample rows without writing; a real run is one
+        transaction with a migrations row and is idempotent (a second run reports
+        status "already_migrated"). Any exception rolls everything back."""
+        _check_actor(actor)
+        if type(dry_run) is not bool:
+            raise ValueError("dry_run must be a bool")
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            done = db.execute("SELECT * FROM migrations WHERE profile_id=? AND migration_id=?", (self.profile_id, MIGRATION_V1_ID)).fetchone()
+            if done is not None:
+                return {"status": "already_migrated", "dry_run": dry_run, "from_version": done["from_version"],
+                        "migration": {"migration_id": done["migration_id"], "from_version": done["from_version"],
+                                      "counts": json.loads(done["counts"]), "at_ms": done["at_ms"], "actor": done["actor"]}}
+            objects = {row["object_id"]: dict(row) for row in db.execute("SELECT object_id,name,category,status,created_at FROM objects WHERE profile_id=?", (self.profile_id,))}
+            counts = {"objects": len(objects), "objects_confirmed": sum(1 for o in objects.values() if o["status"] == "tracked"),
+                      "observations": 0, "converted": 0, "skipped_unconfirmed": 0, "skipped_unknown_object": 0,
+                      "candidates": db.execute("SELECT count(*) FROM candidates WHERE profile_id=?", (self.profile_id,)).fetchone()[0],
+                      "decisions": db.execute("SELECT count(*) FROM decisions WHERE profile_id=?", (self.profile_id,)).fetchone()[0],
+                      "api_calls": db.execute("SELECT count(*) FROM api_calls WHERE profile_id=?", (self.profile_id,)).fetchone()[0],
+                      "legacy_media_files": 0}
+            # Legacy frames/crops are JPEG paths on disk. They are counted so the
+            # operator knows they exist, never read, moved, deleted or referenced.
+            media = set()
+            for (payload,) in db.execute("SELECT payload FROM candidates WHERE profile_id=?", (self.profile_id,)):
+                media |= self._legacy_media(payload)
+            rows = []
+            device_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"pam-v1-device:{self.profile_id}"))
+            for row in db.execute("SELECT event_id,object_id,observed_at,sequence,action,record FROM observations WHERE profile_id=? ORDER BY observed_at,sequence,event_id", (self.profile_id,)):
+                counts["observations"] += 1
+                media |= self._legacy_media(row["record"])
+                legacy = objects.get(row["object_id"])
+                if legacy is None:
+                    counts["skipped_unknown_object"] += 1
+                    continue
+                if legacy["status"] != "tracked":
+                    counts["skipped_unconfirmed"] += 1
+                    continue
+                try:
+                    record_v1 = json.loads(row["record"])
+                except ValueError:
+                    record_v1 = {}
+                # Location text comes from the scene's room / surface fields ONLY:
+                # never the VLM's free-text description, lat/lon, media paths or its
+                # actor verdict (the actor is always unknown after migration).
+                scene = record_v1.get("scene") if isinstance(record_v1.get("scene"), dict) else {}
+                parts = [str(scene.get(key)).strip() for key in ("surface", "room") if isinstance(scene.get(key), str) and scene.get(key).strip()]
+                location = ", ".join(parts) or None
+                observed_ms = int(round(float(row["observed_at"]) * 1000))
+                event_id = row["event_id"]
+                item_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"pam-v1-item:{self.profile_id}:{row['object_id']}"))
+                episode_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"pam-v1-episode:{self.profile_id}:{event_id}"))
+                observation_id = hashlib.sha256(_json([self.profile_id, "legacy_v1", event_id]).encode()).hexdigest()
+                record = {"frame_id": "legacy-" + hashlib.sha256(event_id.encode()).hexdigest()[:32], "bbox": None,
+                          "label": str(legacy["name"])[:100] or "unknown", "actor": "unknown",
+                          "outcome": LEGACY_OUTCOMES.get(row["action"], "uncertain"), "continuity_id": None,
+                          "identity_state": "provisional", "location_text": str(location)[:600] if location else None,
+                          "confidence": 0.0, "confidence_basis": "legacy v1 cloud verification; migrated as provisional, never trusted",
+                          "calibration": {}, "session_id": str(record_v1.get("session_id") or "")[:160], "clock_status": "ok",
+                          "capture_mode": "manual", "observed_at_ms": observed_ms, "item_id": item_id, "observation_id": observation_id,
+                          "device_id": device_id, "episode_id": episode_id, "revision_no": 1, "source": "legacy_v1",
+                          "identity_source": "legacy_v1", "legacy_object_id": row["object_id"], "legacy_event_id": event_id,
+                          "legacy_action": row["action"]}
+                rows.append(record)
+                counts["converted"] += 1
+            counts["legacy_media_files"] = len(media)
+            samples = [{key: record[key] for key in ("item_id", "label", "outcome", "location_text", "observed_at_ms", "identity_state", "legacy_event_id")} for record in rows[:5]]
+            if dry_run:
+                return {"status": "dry_run", "dry_run": True, "from_version": version, "counts": counts, "samples": samples, "mutates_data": False}
+            now = self._now_ms()
+            for record in rows:
+                key = (self.profile_id, record["device_id"], record["episode_id"], record["revision_no"])
+                digest = hashlib.sha256(("legacy:" + record["legacy_event_id"]).encode()).hexdigest()
+                db.execute("INSERT INTO episode_revisions(profile_id,device_id,episode_id,revision_no,semantic_digest,transport_digest,packet,received_at_ms,accepted,clock_status,redacted,redacted_reason) VALUES(?,?,?,?,?,?,NULL,?,0,'ok',0,'legacy_v1')",
+                           key + (digest, digest, record["observed_at_ms"]))
+                db.execute("INSERT INTO local_observations(profile_id,observation_id,item_id,device_id,episode_id,revision_no,observed_at_ms,decided_at_ms,record,candidates,erased) VALUES(?,?,?,?,?,?,?,?,?,NULL,0)",
+                           (self.profile_id, record["observation_id"], record["item_id"], record["device_id"], record["episode_id"], record["revision_no"],
+                            record["observed_at_ms"], now, _json(record)))
+            db.execute("INSERT INTO migrations(profile_id,migration_id,from_version,counts,at_ms,actor) VALUES(?,?,?,?,?,?)",
+                       (self.profile_id, MIGRATION_V1_ID, version, _json(counts), now, actor))
+            db.execute("INSERT INTO local_audit(profile_id,at_ms,action,item_id,detail) VALUES(?,?,?,?,?)",
+                       (self.profile_id, now, "migrated_v1", None, _json({"actor": actor, "counts": counts})))
+            self._rebuild_projection(db)
+            return {"status": "migrated", "dry_run": False, "from_version": version, "counts": counts, "samples": samples, "mutates_data": True,
+                    "migration": {"migration_id": MIGRATION_V1_ID, "from_version": version, "counts": counts, "at_ms": now, "actor": actor}}

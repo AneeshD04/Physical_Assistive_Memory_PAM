@@ -276,6 +276,10 @@ Coordinator-run, Linux sandbox (Python 3.13.16, Node 22.22.0, Playwright 1.56.0 
 
 Coordinator-run, Linux sandbox (Python 3.13.16, Node 22, Playwright 1.56.0 / chromium-1194). 260/260 methods, 0 skips: see `docs/CONTINUATION_HANDOFF.md` §5 and `docs/BUILD_PLAN.md` "CP3 result". The embedder in every test is a seeded synthetic prototype generator (`server/fixtures/cp3/`), so the conformal coverage and the new/match/ambiguous outcomes are software-correctness results, not recognition accuracy. P-104 (CUTE or own-footage calibration with the real DINOv2 export) remains not run; the export and the calibration are human steps recorded in `docs/OVERSIGHT_CP3.md` §0.
 
+## X-009 / CP4 — re-observation, retention, erasure and migration on synthetic data (observed here, 2026-10-10)
+
+Coordinator-run, Linux sandbox. 341/341 methods, 0 skips: see `docs/CONTINUATION_HANDOFF.md` §5 and `docs/BUILD_PLAN.md` "CP4 result". P-107 (deletion without resurrection) is now executed on synthetic markers across every table, derived view, replay path and the database file bytes; B-09 sidecar privacy is executed on POSIX (Windows branch pending the laptop). Re-observation thresholds (0.06 / 0.18, gate 0.03, hourly refresh, 300 CPU-s/day) are initial values pending P-105 on the rig. No real footage, device, model download or paid call was used.
+
 ## Proposed experiment queue — historical proposals; no outcomes implied
 
 These entries preserve pre-build proposals, not a substitute for BUILD_CONTRACT.

@@ -10,15 +10,46 @@ export const LANDMARK_SAMPLES_MAX = 128, HAND_FRAME_MAX = 640;
 // can substitute a fake by replacing globalThis.Worker before the camera is built.
 export const HAND_WORKER_URL = '/assets/hand-worker.js';
 export const MANUAL_STATUS = 'Camera on · manual marks only. Nothing is automatically recognized.';
+// CP4 idle keyframes: in automatic mode, with the controller idle, motion off and no
+// hand present for IDLE_QUIET_MS, one capture-resolution JPEG (quality
+// IDLE_JPEG_QUALITY, target <= 64 KiB) is posted to /api/idle at most once per
+// IDLE_KEYFRAME_MS. There is no IndexedDB mirror for idle frames: a frame that is
+// not posted or not retained is coverage, not evidence, and is only counted.
+export const IDLE_KEYFRAME_MS = 30000, IDLE_QUIET_MS = 2000, IDLE_JPEG_QUALITY = 0.5, MAX_IDLE_BYTES = 256 * 1024;
+// A valid no-hand measurement must be no older than this for the quiet condition to
+// hold (a missing landmark result is never read as "no hand").
+export const IDLE_VALID_MAX_AGE_MS = 1000;
 const now = () => Math.floor(performance.now());
 function createHandWorker() {
   try { return typeof Worker === 'function' ? new Worker(HAND_WORKER_URL) : null; } catch { return null; }
 }
+// Default transport for an idle frame: same-origin POST, no retry. The page may
+// supply its own (same result shape) to share its session handling.
+async function defaultPostIdle(body) {
+  const response = await fetch('/api/idle', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body });
+  let result = null;
+  try { result = await response.json(); } catch { result = null; }
+  return { ok: response.ok, status: response.status, code: typeof result?.code === 'string' ? result.code : null, retained: result?.retained === true };
+}
+function idleCounters() { return { sent: 0, dropped: 0, oversize: 0, capped: 0, failed: 0 }; }
+// "idle stills: N sent · M dropped" (plus the reasons when any) for the summaries.
+export function idleSummary(idle = idleCounters()) {
+  const count = key => Number.isSafeInteger(idle?.[key]) ? idle[key] : 0;
+  const reasons = [count('oversize') ? `${count('oversize')} over size` : null, count('capped') ? `${count('capped')} not retained by the server` : null, count('failed') ? `${count('failed')} failed` : null].filter(Boolean);
+  return `idle stills: ${count('sent')} sent · ${count('dropped')} dropped${reasons.length ? ` (${reasons.join(', ')})` : ''}`;
+}
 // Class name kept from the first checkpoint: manual marking is unchanged, and the
 // automatic path (CP2) is layered on the same ring/pin/burst machinery.
 export class ManualCamera {
-  constructor({ video, queue, status = () => {}, changed = () => {}, gap = () => {}, worker, createWorker } = {}) {
+  constructor({ video, queue, status = () => {}, changed = () => {}, gap = () => {}, worker, createWorker, postIdle, consentRequired = () => {}, unauthorized = () => {} } = {}) {
     this.video = video; this.queue = queue; this.status = status; this.changed = changed; this.onGap = gap;
+    this.postIdle = typeof postIdle === 'function' ? postIdle : defaultPostIdle;
+    this.onConsentRequired = consentRequired; this.onUnauthorized = unauthorized;
+    // CP4 idle keyframes: counters shown in the camera summary and the Privacy view;
+    // quietSince is the start of the current no-hand/no-motion run (null when not
+    // quiet), lastQuietValid the newest valid frame that confirmed it, lastIdleMs the
+    // time of the last post (the 30 s spacing holds across toggles and restarts).
+    this.idle = idleCounters(); this.quietSince = null; this.lastQuietValid = null; this.lastIdleMs = null; this.idleInFlight = false;
     this.sessionId = uuid(); this.anchor = { mono_ms: now(), wall_ms: Date.now() };
     this.ring = []; this.pins = []; this.burst = []; this.gaps = []; this.episode = null;
     this.stream = null; this.running = false; this.starting = false; this.generation = 0; this.lastTime = null;
@@ -41,8 +72,9 @@ export class ManualCamera {
   }
   update() {
     this.changed({ running: this.running, starting: this.starting, episode: !!this.episode, saving: this.saving, unsaved: !!this.unsaved,
-      automatic: this.automatic, automaticActive: this.automaticActive(), automaticEpisode: !!this.episode?.automatic, adapter: this.adapterState() });
+      automatic: this.automatic, automaticActive: this.automaticActive(), automaticEpisode: !!this.episode?.automatic, adapter: this.adapterState(), idle: { ...this.idle } });
   }
+  idleSummary() { return idleSummary(this.idle); }
   adapterChanged() {
     if (this.running && this.episode?.automatic && !this.automaticAvailable()) this.feedGap(`Hand model became unavailable: ${this.adapter.reason || 'no reason given'}`);
     if (this.running && !this.episode) { this.controller = null; this.status(this.automaticActive() ? this.automaticStatus() : MANUAL_STATUS); }
@@ -60,7 +92,7 @@ export class ManualCamera {
     const next = !!on;
     if (next === this.automatic) return;
     if (this.running && this.episode?.automatic && !next) this.feedGap('Automatic capture turned off during an episode');
-    this.automatic = next; this.controller = null; this.adapter.reset?.();
+    this.automatic = next; this.controller = null; this.adapter.reset?.(); this.resetQuiet();
     if (this.running && !this.episode) this.status(this.automaticActive() ? this.automaticStatus() : MANUAL_STATUS);
     this.update();
   }
@@ -143,7 +175,7 @@ export class ManualCamera {
     if (!frame || now() - frame.t_ms > 400) throw new Error('Waiting for a fresh camera frame. Try the mark again.');
     this.pin(frame, 'pre_contact');
     this.episode = { episode_id: uuid(), t_start_ms: frame.t_ms };
-    this.burst = []; this.burstStarted = false; this.previousGray = null; this.controller = null; this.adapter.reset?.();
+    this.burst = []; this.burstStarted = false; this.previousGray = null; this.controller = null; this.adapter.reset?.(); this.resetQuiet();
     this.status('Before-move frame pinned. Move the item, then mark at rest within 10 seconds.'); this.update();
   }
   // Analysis-resolution grayscale of a frame, computed once and kept on the frame
@@ -192,13 +224,69 @@ export class ManualCamera {
     if (Array.isArray(analysis.hands)) this.rememberSample({ frame_id: frame.frame_id, t_ms: t, hands: analysis.hands });
     this.feed({ t_ms: t, busy: analysis.busy, motion: analysis.motion, frame_valid: analysis.frame_valid }, frame, gray, null);
     if (this.episode?.automatic && this.burstStarted && this.burst.at(-1)?.frame_id !== frame.frame_id) this.pushBurst(frame, gray);
+    if (this.running && generation === this.generation) this.idleTick(analysis, frame);
   }
+  // --- idle keyframes (CP4) -------------------------------------------------------------
+  // Called once per analysed frame, after the controller step. The quiet run starts
+  // at the first valid frame with no hand present and motion off; any valid frame
+  // with a hand, any frame with motion, an episode or a gap ends it. A frame without
+  // a landmark result neither starts nor ends the run (a missing measurement is not
+  // evidence either way), but the post needs a valid confirmation within
+  // IDLE_VALID_MAX_AGE_MS. Posting is rate-limited to one per IDLE_KEYFRAME_MS.
+  idleTick(analysis, frame) {
+    const t = frame.t_ms;
+    const controllerIdle = !this.episode && (this.controller === null || this.controller.phase === 'idle');
+    const noHand = analysis.present === false || (analysis.present == null && Array.isArray(analysis.hands) && analysis.hands.length === 0);
+    const measured = analysis.frame_valid === true && typeof analysis.motion === 'boolean' && Number.isFinite(analysis.energy);
+    if (!controllerIdle || analysis.motion !== false) { this.quietSince = null; this.lastQuietValid = null; return; }
+    if (measured) {
+      if (!noHand) { this.quietSince = null; this.lastQuietValid = null; return; }
+      if (this.quietSince === null) this.quietSince = t;
+      this.lastQuietValid = t;
+    }
+    if (this.quietSince === null || this.lastQuietValid === null) return;
+    if (t - this.quietSince < IDLE_QUIET_MS || t - this.lastQuietValid > IDLE_VALID_MAX_AGE_MS) return;
+    if (this.lastIdleMs !== null && t - this.lastIdleMs < IDLE_KEYFRAME_MS) return;
+    if (this.idleInFlight || !this.queue?.deviceId) return;
+    this.lastIdleMs = t;
+    let body;
+    try { body = this.idlePacket(frame, analysis.energy); }
+    catch { this.idle.failed++; this.idle.dropped++; this.update(); return; }
+    if (new TextEncoder().encode(body).byteLength > MAX_IDLE_BYTES) { this.idle.oversize++; this.idle.dropped++; this.update(); return; }
+    void this.sendIdle(body);
+  }
+  // The frame's bitmap re-drawn on the capture canvas (the same canvas the packet
+  // keyframes use) and encoded at IDLE_JPEG_QUALITY; capture-resolution pixels.
+  idlePacket(frame, energy) {
+    this.context.drawImage(frame.bitmap, 0, 0, this.capture.width, this.capture.height);
+    const data = this.canvas.toDataURL('image/jpeg', IDLE_JPEG_QUALITY);
+    if (!data.startsWith('data:image/jpeg;base64,')) throw new Error('JPEG encoding failed.');
+    const motion = Math.min(1, Math.max(0, Number.isFinite(energy) ? energy : 0));
+    return JSON.stringify({ schema_version: 1, device_id: this.queue.deviceId, session_id: this.sessionId, frame_id: frame.frame_id, t_ms: frame.t_ms,
+      clock_anchor: this.anchor, capture: { width: this.capture.width, height: this.capture.height }, jpeg_b64: data.slice(data.indexOf(',') + 1), motion_energy: motion });
+  }
+  async sendIdle(body) {
+    this.idleInFlight = true;
+    try {
+      const result = await this.postIdle(body);
+      if (result && result.ok && result.retained) this.idle.sent++;
+      else if (result && result.ok) { this.idle.capped++; this.idle.dropped++; }
+      else {
+        this.idle.failed++; this.idle.dropped++;
+        if (result && result.status === 401) this.onUnauthorized();
+        else if (result && result.status === 409 && result.code === 'consent_required') this.onConsentRequired();
+      }
+    } catch { this.idle.failed++; this.idle.dropped++; }
+    finally { this.idleInFlight = false; this.update(); }
+  }
+  resetQuiet() { this.quietSince = null; this.lastQuietValid = null; }
   rememberSample(sample) {
     this.samples.push(sample);
     while (this.samples.length && (this.samples.length > RING_MAX || sample.t_ms - this.samples[0].t_ms > RING_MS)) this.samples.shift();
     if (this.episode?.automatic && this.landmarks.length < LANDMARK_SAMPLES_MAX && sample.t_ms >= this.episode.t_start_ms && sample.t_ms > (this.landmarks.at(-1)?.t_ms ?? -1)) this.landmarks.push(sample);
   }
   feedGap(reason) {
+    this.resetQuiet();
     const t = Math.max(now(), (this.controller?.last_ms ?? -1) + 1);
     this.feed({ t_ms: t, busy: null, motion: null, frame_valid: false, gap: true }, null, null, reason);
     // A gap always ends an automatic episode, even if the controller had already been
@@ -222,7 +310,7 @@ export class ManualCamera {
     switch (action) {
       case 'start':
         this.episode = { episode_id: uuid(), t_start_ms: t, automatic: true };
-        this.burst = []; this.burstStarted = false; this.landmarks = [];
+        this.burst = []; this.burstStarted = false; this.landmarks = []; this.resetQuiet();
         break;
       case 'select_pre_contact': {
         // The oldest retained frame before the busy frame (the ring holds about 2 s).
@@ -330,13 +418,19 @@ export class ManualCamera {
     try { await this.queue.enqueue(this.unsaved); this.unsaved = null; this.status('The unsaved episode is now in durable browser retry storage.'); }
     finally { this.saving = false; this.update(); }
   }
+  // CP4: after "Erase everything" a packet captured before the erasure must not be
+  // re-added (the server would refuse it as erased_before); drop it here.
+  discardUnsaved() {
+    if (!this.unsaved || this.saving) return false;
+    this.unsaved = null; this.update(); return true;
+  }
   clearEpisode() {
     this.pins.forEach(frame => frame.bitmap.close()); this.pins = []; this.burst = []; this.previousGray = null; this.episode = null;
     this.landmarks = []; this.burstStarted = false;
   }
   cancel() {
     const automatic = this.episode?.automatic === true;
-    this.clearEpisode(); this.ring.forEach(frame => frame.bitmap.close()); this.ring = []; this.controller = null;
+    this.clearEpisode(); this.ring.forEach(frame => frame.bitmap.close()); this.ring = []; this.controller = null; this.resetQuiet();
     this.status(`${automatic ? 'Automatic' : 'Manual'} episode cancelled. Its unsaved frames were discarded, not stored as a memory.`); this.update();
   }
   recordGap(from, to, reason) {
@@ -349,7 +443,7 @@ export class ManualCamera {
     this.stream?.getTracks().forEach(track => track.stop()); this.stream = null;
     this.video.pause(); this.video.srcObject = null;
     this.ring.forEach(frame => frame.bitmap.close()); this.ring = [];
-    this.controller = null; this.samples = []; this.adapter.reset?.();
+    this.controller = null; this.samples = []; this.adapter.reset?.(); this.resetQuiet();
   }
   async stop(reason = 'Stopped by user') {
     const wasActive = this.running || this.starting;

@@ -45,6 +45,57 @@ class LocalObservation(StrictModel):
         return self
 
 
+# Registration bounds (initial values, unmeasured; shared by localize and the CP4
+# re-observation stage so both accept exactly the same background registrations):
+# flat frames, sparse features, a failed LK track, a poor RANSAC consensus, a scale
+# outside 0.95..1.05 or a translation over 10 % of the short side all abstain.
+MIN_STD = 8
+MIN_FEATURES = 12
+MIN_INLIER_RATIO = .8
+SCALE_BOUNDS = (.95, 1.05)
+MAX_TRANSLATION = .1
+
+
+def register_frames(gray_a, gray_b):
+    """Partial-affine registration of gray_a onto gray_b (both uint8 grayscale
+    arrays of one shape): (matrix, inliers) with matrix the 2x3 cv2 affine that
+    maps a-coordinates to b-coordinates and inliers the RANSAC inlier count, or
+    (None, 0) when the registration is unsupported under the bounds above.
+    Pure OpenCV LK + estimateAffinePartial2D; no model, no identity inference."""
+    import cv2
+    import numpy as np
+    before, after = np.asarray(gray_a), np.asarray(gray_b)
+    if before.ndim != 2 or before.shape != after.shape or before.dtype != np.uint8 or after.dtype != np.uint8 or before.size == 0:
+        return None, 0
+    if min(float(before.std()), float(after.std())) < MIN_STD:
+        return None, 0
+    points = cv2.goodFeaturesToTrack(before, 250, .02, 7)
+    if points is None or len(points) < MIN_FEATURES:
+        return None, 0
+    tracked, status, _ = cv2.calcOpticalFlowPyrLK(before, after, points, None)
+    if tracked is None or status is None:
+        return None, 0
+    keep = status.ravel() == 1
+    if int(keep.sum()) < MIN_FEATURES:
+        return None, 0
+    matrix, inliers = cv2.estimateAffinePartial2D(points[keep], tracked[keep], method=cv2.RANSAC, ransacReprojThreshold=2)
+    if matrix is None or inliers is None or float(inliers.mean()) < MIN_INLIER_RATIO:
+        return None, 0
+    scale = float(np.linalg.norm(matrix[:, 0]))
+    if not SCALE_BOUNDS[0] <= scale <= SCALE_BOUNDS[1] or float(np.linalg.norm(matrix[:, 2])) > min(before.shape) * MAX_TRANSLATION:
+        return None, 0
+    return matrix, int(inliers.sum())
+
+
+def gray_at(encoded, width, height):
+    """A keyframe's JPEG decoded to grayscale and resized to (width, height)."""
+    import cv2
+    image = decode_jpeg(encoded)
+    if image.ndim == 3:
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return cv2.resize(image, (width, height))
+
+
 def localize(packet: EpisodePacket) -> list[LocalObservation]:
     """Conservative registered frame differences, or none.
 
@@ -58,27 +109,10 @@ def localize(packet: EpisodePacket) -> list[LocalObservation]:
         return []
     first, last = packet.keyframes[0], packet.keyframes[-1]
     def gray(frame):
-        image = decode_jpeg(frame.jpeg_b64)
-        if image.ndim == 3:
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        return cv2.resize(image, (packet.analysis.width, packet.analysis.height))
+        return gray_at(frame.jpeg_b64, packet.analysis.width, packet.analysis.height)
     before, after = gray(first), gray(last)
-    if min(float(before.std()), float(after.std())) < 8:
-        return []
-    points = cv2.goodFeaturesToTrack(before, 250, .02, 7)
-    if points is None or len(points) < 12:
-        return []
-    tracked, status, _ = cv2.calcOpticalFlowPyrLK(before, after, points, None)
-    if tracked is None or status is None:
-        return []
-    keep = status.ravel() == 1
-    if int(keep.sum()) < 12:
-        return []
-    matrix, inliers = cv2.estimateAffinePartial2D(points[keep], tracked[keep], method=cv2.RANSAC, ransacReprojThreshold=2)
-    if matrix is None or inliers is None or float(inliers.mean()) < .8:
-        return []
-    scale = float(np.linalg.norm(matrix[:, 0]))
-    if not .95 <= scale <= 1.05 or float(np.linalg.norm(matrix[:, 2])) > min(before.shape) * .1:
+    matrix, _ = register_frames(before, after)
+    if matrix is None:
         return []
     warped = cv2.warpAffine(before, matrix, (before.shape[1], before.shape[0]))
     valid = cv2.warpAffine(np.full_like(before, 255), matrix, (before.shape[1], before.shape[0]))

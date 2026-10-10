@@ -10,6 +10,9 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MAX_PACKET_BYTES = 4 * 1024 * 1024
+# CP4 idle keyframes (POST /api/idle): one capture-resolution JPEG every
+# IDLE_KEYFRAME_MS while the controller is idle; body cap 256 KiB, target <= 64 KiB.
+MAX_IDLE_BYTES = 256 * 1024
 MAX_TIME = 9007199254740991
 Millis = Annotated[int, Field(ge=0, le=MAX_TIME)]
 
@@ -84,6 +87,28 @@ class LandmarkSample(StrictModel):
     frame_id: str = Field(min_length=1, max_length=100)
     t_ms: Millis
     hands: list[Hand] = Field(default_factory=list, max_length=2)
+
+
+class SummaryHand(StrictModel):
+    """CP4 landmark reduction: what survives of a Hand after landmarks_hours. The
+    normalised hand box and the hand_busy verdict (busy / basis) only; no points."""
+    hand_bbox: list[float] = Field(min_length=4, max_length=4)
+    busy: bool | None
+    basis: str = Field(min_length=1, max_length=40)
+
+    @model_validator(mode="after")
+    def box(self):
+        x1, y1, x2, y2 = self.hand_bbox
+        if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
+            raise ValueError("Invalid hand box")
+        return self
+
+
+class LandmarkSummary(StrictModel):
+    """One reduced landmark sample (bounded exactly as LandmarkSample is)."""
+    frame_id: str = Field(min_length=1, max_length=100)
+    t_ms: Millis
+    hands: list[SummaryHand] = Field(default_factory=list, max_length=2)
 
 
 class Gap(StrictModel):
@@ -166,6 +191,13 @@ class EpisodePacket(StrictModel):
     gaps: list[Gap] = Field(default_factory=list, max_length=32)
     outcome_hint: Literal["released", "hand_gone", "gap"]
     capture_mode: Literal["manual", "automatic"]
+    # CP4, server-only: written by the store's landmark reduction (apply_retention)
+    # when a stored packet is older than the retention row's landmarks_hours, in
+    # place of the raw landmarks. parse_packet accepts it so a reduced packet still
+    # parses and item_image still works; ingest_episode refuses a client packet that
+    # carries it (the server maps that ValueError to 400). It is excluded from the
+    # semantic digest: the stored digest columns never change.
+    landmark_summary: list[LandmarkSummary] | None = Field(default=None, max_length=128)
 
     @model_validator(mode="before")
     @classmethod
@@ -183,7 +215,7 @@ class EpisodePacket(StrictModel):
             raise ValueError("Invalid episode interval")
         if self.analysis.width > self.capture.width or self.analysis.height > self.capture.height:
             raise ValueError("Analysis exceeds capture dimensions")
-        for frames in (self.keyframes, self.carry_burst, self.landmarks):
+        for frames in (self.keyframes, self.carry_burst, self.landmarks, self.landmark_summary or []):
             ids = set()
             last = -1
             for frame in frames:
@@ -204,15 +236,50 @@ class EpisodePacket(StrictModel):
         return self
 
     def semantic_digest(self) -> str:
-        body = json.dumps(self.model_dump(), sort_keys=True, separators=(",", ":"), allow_nan=False)
+        # landmark_summary is server-only and never part of what the client sent, so
+        # it is left out: a reduced packet keeps the digest it was stored under.
+        body = json.dumps(self.model_dump(exclude={"landmark_summary"}), sort_keys=True, separators=(",", ":"), allow_nan=False)
         return hashlib.sha256(body.encode()).hexdigest()
 
 
-def parse_packet(raw: bytes) -> EpisodePacket:
-    if not isinstance(raw, bytes):
-        raise ValueError("Packet must be bytes")
-    if len(raw) > MAX_PACKET_BYTES:
-        raise PacketTooLarge("Packet exceeds 4 MiB")
+class IdleFrame(StrictModel):
+    """CP4 idle keyframe (POST /api/idle). Same strict rules as a packet: UUID ids,
+    bounded JPEG whose actual dimensions equal capture, finite motion energy 0..1.
+    No identity, processor or profile field crosses this boundary."""
+    schema_version: Literal[1]
+    device_id: str
+    session_id: str
+    frame_id: str = Field(min_length=1, max_length=100)
+    t_ms: Millis
+    clock_anchor: ClockAnchor
+    capture: Dimensions
+    jpeg_b64: str = Field(min_length=1, max_length=MAX_IDLE_BYTES)
+    motion_energy: float = Field(ge=0, le=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def strict_version(cls, value):
+        if isinstance(value, dict) and type(value.get("schema_version")) is not int:
+            raise ValueError("Schema version must be an integer")
+        return value
+
+    @model_validator(mode="after")
+    def evidence(self):
+        for value in (self.device_id, self.session_id):
+            if str(uuid.UUID(value)) != value.lower():
+                raise ValueError("Invalid UUID")
+        image = decode_jpeg(self.jpeg_b64)
+        if image.shape[:2] != (self.capture.height, self.capture.width):
+            raise ValueError("JPEG dimensions do not match capture")
+        return self
+
+    @property
+    def wall_ms(self) -> int:
+        """Capture wall time through the anchor (may be implausible; the store checks)."""
+        return self.clock_anchor.wall_ms + self.t_ms - self.clock_anchor.mono_ms
+
+
+def _load_json(raw: bytes):
     def pairs(values):
         result = {}
         for key, value in values:
@@ -221,7 +288,24 @@ def parse_packet(raw: bytes) -> EpisodePacket:
             result[key] = value
         return result
     try:
-        value = json.loads(raw, object_pairs_hook=pairs, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("Nonfinite JSON")))
-        return EpisodePacket.model_validate(value)
+        return json.loads(raw, object_pairs_hook=pairs, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("Nonfinite JSON")))
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("Invalid packet JSON") from exc
+
+
+def parse_packet(raw: bytes) -> EpisodePacket:
+    if not isinstance(raw, bytes):
+        raise ValueError("Packet must be bytes")
+    if len(raw) > MAX_PACKET_BYTES:
+        raise PacketTooLarge("Packet exceeds 4 MiB")
+    return EpisodePacket.model_validate(_load_json(raw))
+
+
+def parse_idle(raw: bytes) -> IdleFrame:
+    """Strict idle-frame parsing; PacketTooLarge above MAX_IDLE_BYTES (413),
+    ValueError for anything malformed (400)."""
+    if not isinstance(raw, bytes):
+        raise ValueError("Idle frame must be bytes")
+    if len(raw) > MAX_IDLE_BYTES:
+        raise PacketTooLarge("Idle frame exceeds 256 KiB")
+    return IdleFrame.model_validate(_load_json(raw))

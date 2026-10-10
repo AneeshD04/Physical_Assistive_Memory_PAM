@@ -25,9 +25,13 @@ function finished(transaction) {
     transaction.onerror = transaction.onabort = () => reject(new Error('Local storage could not retain this capture.'));
   });
 }
+// CP4 refusal codes on POST /api/episodes (409): consent_required keeps the packet
+// queued until the disclosure is acknowledged; erased_before means the packet was
+// captured before "Erase everything" and is dropped (reported as a coverage gap).
+export const CONSENT_REQUIRED = 'consent_required', ERASED_BEFORE = 'erased_before';
 export class RetryQueue {
-  constructor({ notify = () => {}, unauthorized = () => {}, retained = () => {} } = {}) {
-    this.notify = notify; this.unauthorized = unauthorized; this.retained = retained;
+  constructor({ notify = () => {}, unauthorized = () => {}, retained = () => {}, dropped = () => {}, consentRequired = () => {} } = {}) {
+    this.notify = notify; this.unauthorized = unauthorized; this.retained = retained; this.dropped = dropped; this.consentRequired = consentRequired;
     this.enabled = false; this.flushing = false; this.db = null; this.abort = null;
   }
   async open() {
@@ -92,6 +96,28 @@ export class RetryQueue {
     if (!value) this.abort?.abort();
     else void this.flush();
   }
+  // Delete one queued record (used for a packet the server refuses for good).
+  async remove(episodeId) {
+    const tx = this.db.transaction('episodes', 'readwrite');
+    const done = finished(tx);
+    tx.objectStore('episodes').delete(episodeId);
+    await done;
+  }
+  // CP4: after a successful "Erase everything" the local mirror is emptied so no
+  // queued capture from before the erasure is ever uploaded. Returns the number of
+  // records removed.
+  async clear() {
+    if (!this.db) throw new Error('Local retry storage is not ready.');
+    this.abort?.abort();
+    const tx = this.db.transaction('episodes', 'readwrite');
+    const done = finished(tx); const store = tx.objectStore('episodes');
+    let count = 0;
+    const request = store.count();
+    request.onsuccess = () => { count = request.result; store.clear(); };
+    await done;
+    await this.report();
+    return count;
+  }
   async report() {
     const rows = await this.records();
     const bytes = rows.reduce((sum, row) => sum + row.size, 0);
@@ -119,14 +145,25 @@ export class RetryQueue {
         if (response.status === 401) { this.enabled = false; this.unauthorized(); break; }
         let result;
         try { result = await response.json(); } catch { result = null; }
+        const code = response.status === 409 && result && typeof result.code === 'string' ? result.code : null;
+        if (code === ERASED_BEFORE) {
+          // Captured before "Erase everything": the server will never accept it, and a
+          // browser mirror must not re-add erased evidence. Dropped and counted as a gap.
+          await this.remove(record.episode_id);
+          this.dropped(record, 'captured before erasure');
+          await this.report();
+          continue;
+        }
+        if (code === CONSENT_REQUIRED) {
+          this.notify('Saved captures stay in this browser until the camera disclosure is acknowledged (Privacy view).');
+          this.consentRequired();
+          break;
+        }
         if (!matchesAck(record, result?.ack)) {
           this.notify(`Capture retained locally: ${response.ok ? 'the server acknowledgement did not match.' : `upload not acknowledged (HTTP ${response.status}).`} Retry after the service is available.`);
           break;
         }
-        const tx = this.db.transaction('episodes', 'readwrite');
-        const done = finished(tx);
-        tx.objectStore('episodes').delete(record.episode_id);
-        await done;
+        await this.remove(record.episode_id);
         this.retained(result);
         await this.report();
       }

@@ -17,18 +17,26 @@ from typing import Literal
 
 try:
     from .capture import finite_number, location_at
-    from .private_files import private_append_fd
+    from .private_files import private_append_fd, is_private
     from .episode_store import EpisodeStoreMixin, EPISODE_SCHEMA, ensure_episode_columns
 except ImportError:
     from capture import finite_number, location_at
-    from private_files import private_append_fd
+    from private_files import private_append_fd, is_private
     from episode_store import EpisodeStoreMixin, EPISODE_SCHEMA, ensure_episode_columns
 
 # SQLite user_version values this code can open. 0/1 are legacy (v1 tables only),
 # 2 is the CP0-CP2 episode ledger, 3 adds the CP3 identity tables and the
-# local_observations.candidates column. Anything newer is refused before any write.
-SUPPORTED_VERSIONS = (0, 1, 2, 3)
-CURRENT_VERSION = 3
+# local_observations.candidates column, 4 (CP4) adds idle_frames, reobservations,
+# containment, retention, migrations and the erasure/retention columns. Anything
+# newer is refused before any write.
+SUPPORTED_VERSIONS = (0, 1, 2, 3, 4)
+CURRENT_VERSION = 4
+# Sidecars SQLite may create next to the database. PERSIST journal mode uses only
+# the -journal file, which _connection pre-creates privately before SQLite opens
+# it (valid because PERSIST keeps the file; SQLite reuses an existing one). -wal
+# and -shm would only appear under WAL mode, which this store never selects;
+# sidecar_report lists them so a stray one is visible.
+SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 
 
 class InteractionEvidence(BaseModel):
@@ -150,10 +158,22 @@ class ObjectStore(EpisodeStoreMixin):
                     decision_id INTEGER PRIMARY KEY, profile_id TEXT NOT NULL, at REAL NOT NULL,
                     action TEXT NOT NULL, event_id TEXT, object_id TEXT, detail TEXT NOT NULL);
             """ + EPISODE_SCHEMA)
-            # CP3 columns on existing tables (guarded ALTER TABLE), then the marker.
+            # CP3/CP4 columns on existing tables (guarded ALTER TABLE), then the marker.
             ensure_episode_columns(db)
             if db.execute("PRAGMA user_version").fetchone()[0] < CURRENT_VERSION:
                 db.execute(f"PRAGMA user_version={CURRENT_VERSION}")
+
+    def sidecar_report(self) -> list[dict]:
+        """CP4 (B-09) debug method: for the database file and every sidecar name
+        (-journal, -wal, -shm) whether it exists and whether it is private
+        (perception.private_files.is_private: POSIX mode 0600 owned by the user,
+        Windows protected owner-only DACL; None when absent or uncheckable). No
+        paths are returned, only the suffix names."""
+        report = []
+        for name, path in (("db", self.path), *((suffix, Path(str(self.path) + suffix)) for suffix in SIDECAR_SUFFIXES)):
+            exists = path.is_file()
+            report.append({"name": name, "exists": exists, "private": is_private(path) if exists else None})
+        return report
 
     @contextmanager
     def _connection(self):
@@ -166,6 +186,8 @@ class ObjectStore(EpisodeStoreMixin):
             if header[:16] == b"SQLite format 3\x00" and len(header) == 100:
                 if int.from_bytes(header[60:64], "big") not in SUPPORTED_VERSIONS:
                     raise ValueError("Unsupported object database version; do not overwrite it")
+        # B-09: both the database and the PERSIST journal exist with private modes
+        # before SQLite opens them, so SQLite never creates either with the umask.
         _private_file(self.path)
         _private_file(Path(str(self.path) + "-journal"))
         db = sqlite3.connect(str(self.path), timeout=10)
@@ -177,6 +199,10 @@ class ObjectStore(EpisodeStoreMixin):
             db.execute("PRAGMA synchronous=FULL")
             db.execute("PRAGMA temp_store=MEMORY")
             db.execute("PRAGMA foreign_keys=ON")
+            # CP4 (Oversight pass 1): overwrite freed pages with zeros on every
+            # delete/update, so erased content does not linger in free space (61
+            # marker copies were measured surviving without it). Not forensic.
+            db.execute("PRAGMA secure_delete=ON")
             with db:
                 yield db
         finally:

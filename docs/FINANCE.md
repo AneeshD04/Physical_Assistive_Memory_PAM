@@ -1,19 +1,27 @@
-# PAM finance model v1.1: cost per user-month, subscription sensitivity, caps
+# PAM finance model v1.2: cost per user-month, subscription sensitivity, caps
 
 Finance agent. **v1** 2026-10-08, written for the coordinator after CP1 (`fbf6719`), before
 CP2 landed. **v1.1** 2026-10-09, after CP2, for the CP3 identity stage
 (`BUILD_PLAN.md` "CP3 in detail: identity", *Finance* line): adds §8 (CP3 delta: DINOv2
 compute, embedding storage, one-time export and calibration costs), Appendix B (its
 arithmetic), open questions 8–11, and three additive cross-reference notes marked
-"v1.1" in §2.2, §5 and §7. §1–7 and Appendix A are otherwise unchanged from v1. Scope and
-authority: `BUILD_PLAN.md` §0 ("Finance: unit economics, cost caps the builders must
-respect") and §2 ("FINANCE.md v1"). This file proposes; the coordinator decides. Nothing
-here is a selected price, a measured margin or a commercial term (RESEARCH_LOG D-010,
-D-013, B-17, C-10).
+"v1.1" in §2.2, §5 and §7. **v1.2** 2026-10-09, at `77b769e`, for the CP4 stage
+(`BUILD_PLAN.md` "CP4 in detail: re-observation, retention and erasure", *Finance* line):
+adds §9 (CP4 delta: idle cache, re-observation, retention, erasure), Appendix C (its
+arithmetic), open questions 12–17 and a v1.2 addendum in §5. Because the expected hosted
+delta at the plan's 90-day retention default exceeds $0.05/user-month (§9.6), the hosted
+and chat rows of §2.4, §3.2 and §3.3 are recomputed at `A_b = 0.72` and marked "v1.2";
+the v1 values (`A_b = 0.50`) are preserved side by side in §9.6 and remain valid within
+$0.05 at a 30-day retention default. §1, §4, §6, §8 and Appendices A–B are unchanged.
+Scope and authority: `BUILD_PLAN.md` §0 ("Finance: unit economics, cost caps the builders
+must respect") and §2 ("FINANCE.md v1"). This file proposes; the coordinator decides.
+Nothing here is a selected price, a measured margin or a commercial term (RESEARCH_LOG
+D-010, D-013, B-17, C-10).
 
-Arithmetic was done with Python `Decimal` (the scripts are Appendix A (v1) and Appendix B
-(v1.1) of this file; every row below also shows its formula, so it can be re-run by hand).
-The handoff's margin formula (`CONTINUATION_HANDOFF.md` §10) is reused unchanged; see §3.
+Arithmetic was done with Python `Decimal` (the scripts are Appendix A (v1), Appendix B
+(v1.1) and Appendix C (v1.2) of this file; every row below also shows its formula, so it
+can be re-run by hand). The handoff's margin formula (`CONTINUATION_HANDOFF.md` §10) is
+reused unchanged; see §3.
 
 **Provenance warning that applies to every external price in this file.** In this session
 both live-fetch paths were blocked: `WebFetch` permission requests were withdrawn
@@ -35,9 +43,25 @@ connect. No public **CPU** latency figure for ViT-S/14 was obtainable, so the pe
 time in §8 is an assumption bounded by FLOP arithmetic, not a quoted benchmark. The v1
 `[Q-UNVERIFIED]` prices were not re-read and keep their label.
 
+*v1.2 session (2026-10-09):* the same four price hosts were attempted again
+(`aws.amazon.com/ebs/pricing/`, `aws.amazon.com/s3/pricing/`, `hetzner.com/cloud/`,
+`backblaze.com/cloud-storage/pricing`): `WebFetch` permission requests were withdrawn
+unanswered and `curl` through the egress proxy returned `CONNECT tunnel failed, response
+403` for all four, so **no price was re-read and every price in §9 reuses the v1 figure
+with its `[Q-UNVERIFIED]` label.** What this session could do instead was run the
+repository's own code in the sandbox: the landmark byte counts in §9.1 are measured with
+the real `perception/episode.py` schema classes, and the registration/blur timings in §9.2
+are measured with the real `perception/motion.py` and the localizer's own OpenCV calls on
+synthetic frames. Those carry a new label, **[M-sandbox]**: measured on this session's
+Linux sandbox (Intel Xeon @ 2.10 GHz, 2 vCPU, OpenCV 5.0.0, numpy 2.5.3, single thread),
+which is neither the household laptop nor a t3.medium; they bound the order of magnitude
+and nothing more. The coordinator measures on-device later (§9.7).
+
 Labels used throughout: **[A]** assumption (ours), **[Q-UNVERIFIED]** quoted list price not
 verified in session, **[Q-REPO]** price recorded in this repository's research notes with
 its own URL and date, **[M]** measured in this repository (with date and machine),
+**[M-sandbox]** measured in the v1.2 session's sandbox on synthetic inputs (see above),
+**[M-code]** a constant read from the code at the stated commit,
 **[D]** design parameter taken from the spec or contract.
 
 ---
@@ -108,6 +132,15 @@ B-17 forbids margin claims until they are):
 | Month | 30 days for per-day lines; 730 h for VM hours | [A]; a 31-day month raises per-day lines by 31/30 (shown where it matters) |
 | Tenure for hardware amortisation | 24 months | [A]; elder-care churn (death, moves to care, product abandonment) could make this far shorter |
 | USD/EUR | 1.08 | [A] for Hetzner lines only |
+
+*v1.2 note (CP4): two rows above are superseded by §9, not edited here.* "Durable keyframe
+bytes per day 20 MB" counted raw JPEG bytes; the store keeps the packet **as the raw JSON
+it received** (`perception/episode_store.py:ingest_episode` inserts `raw` into
+`episode_revisions.packet` [M-code]), so keyframes are stored base64-encoded (× 4/3) and
+the packet also carries the carry burst and up to 128 hand-landmark samples: **≈ 39 MB/day
+as stored at 50 episodes/day, falling to ≈ 33 MB/day after the 72 h landmark reduction**
+(§9.1.2). "24 h idle cache ~150 MB" becomes the plan's **200 MiB cap inside the SQLite
+file**, which holds 60 MiB at 8 h of camera-on time and 180 MiB at 24 h (§9.1.1).
 
 ---
 
@@ -199,6 +232,13 @@ per-keyframe objects; this is also the handoff's `A1.10` column, so those rows r
 the handoff table exactly). The Hetzner stack is ~3× cheaper but EU-resident by default;
 data residency for US households is a product/legal choice, not a finance one.
 
+*v1.2 note (CP4):* at the plan's 90-day retention default the expected hosted metered
+cost is **`A_b = 0.72`** (0.7175: AWS, batched objects, CP4 caps of §9.4, stored-packet
+bytes of §9.1.2); the sensitivity tables now use 0.72 and keep 1.10 as the worst case,
+which covers the capped CP4 worst (0.9352) only together with cap 4 (batched objects).
+At a 30-day default `A_b` is 0.5413 and the v1 value 0.50 stands within $0.05. The
+Hetzner stack moves from 0.1640 to 0.3019. Arithmetic in §9.6 and Appendix C.
+
 ### 2.3 Variant (c): hosted + optional cloud text chat
 
 Policy costed (the coordinator's bounded example): **20 chats/day × ~1,500 input + 150
@@ -228,19 +268,24 @@ the tier, and a naive retry policy doubles it. **The chat line is the single lar
 controllable cloud cost in the product; at the $2/$10 tier it exceeds every other hosted
 line combined by 5×.** The sensitivity below uses three (c) rows: cheap tier
 (`A_c = 0.50 + 0.135 = 0.635`), $1/$5 tier (`A_c = 1.85`) and $2/$10 tier (`A_c = 3.20`).
+*v1.2:* with `A_b = 0.72` these become `A_c = 0.855`, `2.07` and `3.42`; the chat line
+itself is unchanged.
 
 ### 2.4 Summary table: cost per user-month by variant
 
-Costs before support, at P=$10 (fee = 0.029 × 10 + 0.30 = 0.59), BYOD hardware:
+Costs before support, at P=$10 (fee = 0.029 × 10 + 0.30 = 0.59), BYOD hardware.
+*v1.2 (CP4): hosted and chat rows recomputed at `A_b = 0.72` (90-day retention, CP4 caps;
+§9.6). The v1 rows at `A_b = 0.50` were 1.8400 / 1.9750 / 3.1900 / 4.5400 before support
+and stand within $0.05 at a 30-day retention default.*
 
 | Variant | Metered cloud `A` | Fee | `H` | Subtotal (no S, no W) | + S=3 | + S=8 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | (a) Rig | 0.0000 | 0.5900 | 0.7500 | **1.3400** | 4.3400 | 9.3400 |
-| (b) Hosted, AWS batched | 0.5000 | 0.5900 | 0.7500 | **1.8400** | 4.8400 | 9.8400 |
+| (b) Hosted, AWS batched (v1.2, A=0.72) | 0.7200 | 0.5900 | 0.7500 | **2.0600** | 5.0600 | 10.0600 |
 | (b) Hosted, worst | 1.1000 | 0.5900 | 0.7500 | 2.4400 | 5.4400 | 10.4400 |
-| (c) + chat, cheap tier | 0.6350 | 0.5900 | 0.7500 | **1.9750** | 4.9750 | 9.9750 |
-| (c) + chat, $1/$5 tier | 1.8500 | 0.5900 | 0.7500 | 3.1900 | 6.1900 | 11.1900 |
-| (c) + chat, $2/$10 tier | 3.2000 | 0.5900 | 0.7500 | 4.5400 | 7.5400 | 12.5400 |
+| (c) + chat, cheap tier (v1.2) | 0.8550 | 0.5900 | 0.7500 | **2.1950** | 5.1950 | 10.1950 |
+| (c) + chat, $1/$5 tier (v1.2) | 2.0700 | 0.5900 | 0.7500 | 3.4100 | 6.4100 | 11.4100 |
+| (c) + chat, $2/$10 tier (v1.2) | 3.4200 | 0.5900 | 0.7500 | 4.7600 | 7.7600 | 12.7600 |
 
 ---
 
@@ -284,18 +329,23 @@ variant (b)-worst below.
 ### 3.2 Margin sensitivity at $5 / $10 / $15
 
 Each cell is `(P − fee − A − 0.75 − S − W) / P`. Worked rows for P=10, S=3:
-rig `10 − 0.59 − 0 − 0.75 − 3 = 5.66 → 56.60 %`; hosted `10 − 0.59 − 0.50 − 0.75 − 3 =
-5.16 → 51.60 %`; hosted + $1/$5 chat `10 − 0.59 − 1.85 − 0.75 − 3 = 3.81 → 38.10 %`.
+rig `10 − 0.59 − 0 − 0.75 − 3 = 5.66 → 56.60 %`; hosted (v1.2) `10 − 0.59 − 0.72 − 0.75 −
+3 = 4.94 → 49.40 %` (v1 at A=0.50: 5.16 → 51.60 %); hosted + $1/$5 chat (v1.2) `10 − 0.59
+− 2.07 − 0.75 − 3 = 3.59 → 35.90 %` (v1 at A=1.85: 3.81 → 38.10 %).
+
+*v1.2 (CP4): the four hosted/chat rows below are recomputed at `A_b = 0.72`; the worst
+row (1.10) is unchanged. The v1 rows at `A_b = 0.50` are reproduced in §9.6 and stand
+within $0.05 at a 30-day retention default.*
 
 | Variant (A, W) | P=$5 S=3 | P=$10 S=3 | P=$15 S=3 | P=$5 S=8 | P=$10 S=8 | P=$15 S=8 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | (a) Rig, BYOD (A=0, W=0) | 16.10 % | **56.60 %** | **70.10 %** | −83.90 % | 6.60 % | 36.77 % |
 | (a) Rig, bundled mount (A=0, W=1.0417) | −4.73 % | 46.18 % | 63.16 % | −104.73 % | −3.82 % | 29.82 % |
-| (b) Hosted (A=0.50) | 6.10 % | **51.60 %** | **66.77 %** | −93.90 % | 1.60 % | 33.43 % |
+| (b) Hosted (A=0.72, v1.2) | 1.70 % | **49.40 %** | **65.30 %** | −98.30 % | −0.60 % | 31.97 % |
 | (b) Hosted worst (A=1.10) = handoff A1.10 | −5.90 % | 45.60 % | 62.77 % | −105.90 % | −4.40 % | 29.43 % |
-| (c) + chat cheap tier (A=0.635) | 3.40 % | 50.25 % | 65.87 % | −96.60 % | 0.25 % | 32.53 % |
-| (c) + chat $1/$5 tier (A=1.85) | −20.90 % | 38.10 % | 57.77 % | −120.90 % | −11.90 % | 24.43 % |
-| (c) + chat $2/$10 tier (A=3.20) | −47.90 % | 24.60 % | 48.77 % | −147.90 % | −25.40 % | 15.43 % |
+| (c) + chat cheap tier (A=0.855, v1.2) | −1.00 % | 48.05 % | 64.40 % | −101.00 % | −1.95 % | 31.07 % |
+| (c) + chat $1/$5 tier (A=2.07, v1.2) | −25.30 % | 35.90 % | 56.30 % | −125.30 % | −14.10 % | 22.97 % |
+| (c) + chat $2/$10 tier (A=3.42, v1.2) | −52.30 % | 22.40 % | 47.30 % | −152.30 % | −27.60 % | 13.97 % |
 
 Break-even price `P* = (0.30 + A + 0.75 + S + W) / 0.971` and the price at which margin
 reaches 40 % (`P = (0.30 + A + 0.75 + S + W) / (1 − 0.029 − 0.40)`; 40 % is a
@@ -306,11 +356,16 @@ target the user has set):
 | --- | ---: | ---: | ---: | ---: |
 | (a) Rig, BYOD | $4.17 | $9.32 | **$7.09** | $15.85 |
 | (a) Rig, bundled mount | $5.24 | $10.39 | $8.92 | $17.67 |
-| (b) Hosted | $4.69 | $9.84 | **$7.97** | $16.73 |
+| (b) Hosted (v1.2, A=0.72) | $4.91 | $10.06 | **$8.35** | $17.11 |
 | (b) Hosted worst | $5.30 | $10.45 | $9.02 | $17.78 |
-| (c) + chat cheap tier | $4.82 | $9.97 | $8.20 | $16.96 |
-| (c) + chat $1/$5 tier | $6.08 | $11.23 | $10.33 | $19.09 |
-| (c) + chat $2/$10 tier | $7.47 | $12.62 | $12.70 | $21.45 |
+| (c) + chat cheap tier (v1.2) | $5.05 | $10.20 | $8.59 | $17.35 |
+| (c) + chat $1/$5 tier (v1.2) | $6.30 | $11.45 | $10.72 | $19.47 |
+| (c) + chat $2/$10 tier (v1.2) | $7.69 | $12.84 | $13.08 | $21.84 |
+
+(v1 values at `A_b = 0.50`: hosted $4.69 / $9.84 / $7.97 / $16.73; cheap chat $4.82 /
+$9.97 / $8.20 / $16.96; $1/$5 $6.08 / $11.23 / $10.33 / $19.09; $2/$10 $7.47 / $12.62 /
+$12.70 / $21.45. Each v1.2 break-even price is the v1 price + 0.22 / 0.971 = +$0.23 and
+each 40 %-margin price + 0.22 / 0.571 = +$0.39, §9.6.)
 
 Readings (sensitivity, not forecasts):
 
@@ -322,6 +377,13 @@ Readings (sensitivity, not forecasts):
    (15.43 %), the only configuration where a cloud line, not support, decides the outcome.
 4. The difference between rig and hosted is $0.50/user-month (5 points at $10). Hosting
    is not what makes or breaks this product; support and the chat tier are.
+
+*v1.2 (CP4) addendum to the readings:* with `A_b = 0.72` the hosted rows lose 2.2 points
+at $10 (49.40 % at S=3; −0.60 % at S=8) and the rig–hosted gap becomes $0.72 (7 points at
+$10); at $15/S=8 the $1/$5 chat tier drops to 22.97 % and the $2/$10 tier to 13.97 %.
+Readings 1–4 stand with those numbers: support and the chat tier still decide the
+outcome, and the one new way a cloud line could decide it is an **uncapped** CP4
+re-observation/promotion design, which would cost more than the subscription (§9.6).
 
 ### 3.3 Break-even users against a fixed monthly base
 
@@ -344,27 +406,34 @@ Fixed bases [A], stated so they can be replaced:
 | (a) Rig, BYOD | 5 | 8 | −3.4450 | never | never |
 | (a) Rig, BYOD | 10 | 8 | 1.4100 | 107 | 2,944 |
 | (a) Rig, BYOD | 15 | 8 | 6.2650 | 24 | 663 |
-| (b) Hosted (A=0.50) | 5 | 3 | 1.0550 | 143 | 3,934 |
-| (b) Hosted | 10 | 3 | 5.9100 | **26** | **703** |
-| (b) Hosted | 15 | 3 | 10.7650 | 14 | 386 |
-| (b) Hosted | 10 | 8 | 0.9100 | 165 | 4,561 |
-| (b) Hosted | 15 | 8 | 5.7650 | 27 | 720 |
-| (c) + chat $1/$5 (A=1.85) | 10 | 3 | 4.5600 | 33 | 911 |
-| (c) + chat $1/$5 | 15 | 3 | 9.4150 | 16 | 441 |
-| (c) + chat $1/$5 | 10 | 8 | −0.4400 | never | never |
-| (c) + chat $1/$5 | 15 | 8 | 4.4150 | 34 | 940 |
-| (c) + chat $2/$10 (A=3.20) | 10 | 3 | 3.2100 | 47 | 1,293 |
-| (c) + chat $2/$10 | 15 | 3 | 8.0650 | 19 | 515 |
-| (c) + chat $2/$10 | 15 | 8 | 3.0650 | 49 | 1,354 |
+| (b) Hosted (A=0.72, v1.2) | 5 | 3 | 0.8350 | 180 | 4,971 |
+| (b) Hosted (v1.2) | 10 | 3 | 5.6900 | **27** | **730** |
+| (b) Hosted (v1.2) | 15 | 3 | 10.5450 | 15 | 394 |
+| (b) Hosted (v1.2) | 10 | 8 | 0.6900 | 218 | 6,015 |
+| (b) Hosted (v1.2) | 15 | 8 | 5.5450 | 28 | 749 |
+| (c) + chat $1/$5 (A=2.07, v1.2) | 10 | 3 | 4.3400 | 35 | 957 |
+| (c) + chat $1/$5 (v1.2) | 15 | 3 | 9.1950 | 17 | 452 |
+| (c) + chat $1/$5 (v1.2) | 10 | 8 | −0.6600 | never | never |
+| (c) + chat $1/$5 (v1.2) | 15 | 8 | 4.1950 | 36 | 990 |
+| (c) + chat $2/$10 (A=3.42, v1.2) | 10 | 3 | 2.9900 | 51 | 1,388 |
+| (c) + chat $2/$10 (v1.2) | 15 | 3 | 7.8450 | 20 | 529 |
+| (c) + chat $2/$10 (v1.2) | 15 | 8 | 2.8450 | 53 | 1,459 |
 
 (Rows with bundled-mount `W` and the cheap chat tier are printed by Appendix A; they
-move each count by a few users and do not change the picture.)
+move each count by a few users and do not change the picture. *v1.2:* the hosted and
+chat rows above are recomputed at `A_b = 0.72` by Appendix C §C.8; the v1 counts at
+`A_b = 0.50` were hosted 143 / 3,934, **26 / 703**, 14 / 386, 165 / 4,561, 27 / 720;
+$1/$5 chat 33 / 911, 16 / 441, never, 34 / 940; $2/$10 chat 47 / 1,293, 19 / 515,
+49 / 1,354. The rows that work (P=10–15, S=3) move by 1–4 households at F=150 and by
+8–95 at F=4,150; the rows near zero contribution (P=10/S=8) move more because the
+divisor is small, which changes nothing about their reading.)
 
 Reading: covering infrastructure alone takes a few dozen households at $10–15; covering
 one founder's draw takes 400–900 households at $10–15 with lean support, and is
 unreachable at $10 if support runs at $8. At 648–703 households the hosted variant needs
 7–8 VMs at 100 users/VM; the rig needs 648–703 always-on home laptops kept healthy, which is
-where the `S=3` assumption will be tested.
+where the `S=3` assumption will be tested. (*v1.2:* 648–730 households and 7–8 VMs; the
+VMs now need 80 GB of disk each rather than 30, §9.5.)
 
 ### 3.4 Channel note: app-store billing
 
@@ -456,6 +525,46 @@ by an interface parameter the architect fixed (§8.5 shows the arithmetic):
   users/VM becomes 16–53 (§8.5). CP4 must carry its own cap for it (index at 224 px, or
   only on scene change, or lazily within cap 7's 2 s) before Finance accepts it.
 
+*v1.2 addendum (CP4, 2026-10-09): caps 5, 6 and 7 change; cap 3 gains a note; cap 4 is
+now load-bearing.* The arithmetic is §9; the proposals in full are §9.4. In brief:
+
+- **Cap 5 (idle keyframes), adjusted to the plan's numbers:** ≤ 1 per 30 s, ≤ 2,880/day,
+  target ≤ 64 KiB (capture resolution, JPEG q0.5; replaces v1's 25 KB), body cap 256 KiB,
+  cache ≤ 200 MiB, 24 h TTL. At the target the **count cap binds** (2,880 × 64 KiB =
+  180 MiB < 200 MiB); the byte cap binds once the mean frame exceeds 71.1 KiB and then
+  shortens idle coverage (16.6 h at 103 KiB, 6.7 h at the 256 KiB body cap). Add: the
+  hours of idle coverage the cache holds and an `idle_oversize` counter are reported, so a
+  byte-bound cache is visible coverage, never silent.
+- **Cap 6 (durable storage), adjusted:** the 2 GB figure assumed 20 MB/day of raw
+  keyframes; packets are stored as received (base64, burst, landmarks), ≈ 39 MB/day
+  typical, so 90 days needs ≈ 3.0 GB typical and 5.5 GB at high packet sizes. Proposal:
+  **≤ 2 GiB per household with a 30-day default** (Finance's cost-only preference; the
+  privacy agent owns the final retention call), or ≤ 4 GiB if 90 days is chosen; in both
+  cases promoted idle frames and their observation/embedding rows are **inside** the cap
+  and **follow `episodes_days`** (the plan's "never expires" would otherwise be an
+  unbounded line: 6.9 GB/year at 10 % promotion); superseded accepted revisions have
+  their packet bytes NULLed at the 72 h pass (digest columns kept), so the 8-revision
+  limit cannot multiply a packet by 8.
+- **Cap 7 (re-observation), replaced:** v1 assumed a query-time scan (≤ 40 frames,
+  ≤ 2 s per query); CP4 is arrival-time, every placed item × every idle frame. As written,
+  a static scene with 30 items at 24 h of camera-on is 86,400 pairs/day and, with an
+  embed on each `present` candidate, **115 vCPU-h/user-month ($2.40 at AWS rates), more
+  than the whole subscription margin**. New cap 7: (a) `limit=16` per worker pass
+  (confirmed; bounds a pass to ≤ 2.7 s at 150 ms embeds); (b) a frame-level gate: an idle
+  frame unchanged against the previous processed idle frame of the same device inherits
+  its results (one blur-diff per frame, 0.5–2 ms); (c) promotion, observation row and
+  embed **at most once per item per hour**; diff-only decisions on changed frames are
+  unlimited within (d); (d) **≤ 300 CPU-s per household-day** of re-observation time
+  (2.5 vCPU-h/user-month, 0.35 % of a core), measured by the worker; beyond it frames stay
+  unprocessed, are counted (`reobs_deferred`) and expire as coverage, never silently as
+  evidence. Under (b)–(d) the same worst household costs ≈ 1.7 vCPU-h ($0.035).
+- **Cap 3 note:** the "median packet target ≤ 500 KB" was raw keyframe bytes; as stored,
+  a typical automatic packet is ≈ 786 KB (654 KB after the 72 h reduction) and the
+  daily soft/hard caps (50 / 150 MB) should count stored bytes **including revisions**.
+- **Cap 4** (one object per packet, idle frames never per-object) now carries the
+  worst-case table: `A_b = 1.10` covers the capped CP4 worst (0.9352) only with batched
+  objects; per-frame idle uploads alone would add $0.16–0.47/user-month (§9.3).
+
 ---
 
 ## 6. What must be measured before any margin claim, and the riskiest assumptions
@@ -524,6 +633,23 @@ cent or one household. The one CP3 number that could matter is conditional: if c
 calibration ever has to be done **per household** rather than once on CUTE plus pilot
 footage, it is a support cost of $1.20–1.60/user-month (12–16 margin points at P=10;
 §8.4), which is why open question 9 exists.
+
+*v1.2 (CP4): the bottom line moves by two points, and one new line could move it by
+thirty.* At the plan's 90-day retention default the expected hosted metered cost rises
+from $0.50 to **$0.72** per user-month (AWS; $0.30 on the Hetzner/B2 stack): +$0.085 is
+the stored-packet correction surfaced by the retention arithmetic (base64 keyframes,
+burst and landmarks: ≈ 39 MB/day, not 20; its object bytes and snapshot share), +$0.040
+the larger VM disk (80 GB instead of 30), +$0.057 the SQLite-resident idle cache,
+promoted frames and rows with their snapshot, and +$0.038 the net re-observation budget
+of 2.5 vCPU-h (§9.6). Hosted at $10/S=3 is 49.4 % instead of 51.6 %; every
+hosted break-even price moves by +$0.23; **$5, $10 and $15 keep exactly the readings of
+§3**. Retention is now a $0.18/user-month lever (30 vs 90 days), not $0.03, which is why
+Finance's cost-only proposal is a 30-day default (§9.4) while the privacy agent owns the
+call. The number that is not small is conditional: **the re-observation and promotion
+rules as written in the plan, uncapped, would cost 115 vCPU-h and ~42 GB per household
+in a static 30-item home with 24 h of camera** ($8.28/user-month at AWS rates, a −31 %
+margin at $10/S=3), so the §9.4 caps are a condition of CP4 acceptance for Finance, not
+a saving.
 
 ---
 
@@ -692,6 +818,398 @@ the export and the CUTE calibration actually took. None of §8 is a measurement.
 
 ---
 
+## 9. CP4 delta: idle cache, re-observation and retention (v1.2, 2026-10-09)
+
+What CP4 adds (`BUILD_PLAN.md` "CP4 in detail"): idle keyframes, one capture-resolution
+JPEG every 30 s while the camera is on and idle, posted to `POST /api/idle` (target
+≤ 64 KiB, body cap 256 KiB), kept in a new SQLite table `idle_frames` as a rolling 24 h
+cache capped at 2,880 frames/day and 200 MiB; a worker-side re-observation pass
+(`reobserve(limit=16)`) that, for every placed or inferred item and every newer
+unprocessed idle frame from the same device, registers the frame to the item's reference
+keyframe (the localizer's LK + partial-affine), box-blurs and diffs the item's bbox, and,
+with an embedder present, embeds the registered region for `present`; a `present`
+promotes the idle frame (never expires) and writes an observation row; retention windows
+(`episodes_days` 90, `idle_hours` 24, `landmarks_hours` 72) that NULL packet bytes after
+`episodes_days`, hard-delete expired idle frames and rewrite packets older than 72 h with
+`landmarks: []` plus a bounded `landmark_summary`; and erasure that ends with `VACUUM
+INTO` a fresh file. No cloud call; no new upload path besides the idle post; on the rig
+every byte and every millisecond lands on the household laptop.
+
+Inputs specific to this section (every one labelled; nothing here is an on-device
+measurement):
+
+| Parameter | Value | Label and source |
+| --- | --- | --- |
+| Idle frames | ≤ 1 / 30 s, `IDLE_MAX_PER_DAY = 2880`, `IDLE_CACHE_BYTES = 200 MiB`, `IDLE_TTL_MS = 24 h` | [D] BUILD_PLAN CP4 |
+| Idle frame bytes | target ≤ 64 KiB (q0.5), `MAX_IDLE_BYTES = 256 KiB` | [D]; a synthetic worst-case-texture 1280×720 frame at q50 was 65 KiB, 1920×1080 103 KiB [M-sandbox]; real room scenes are expected below the target at 720p [A] |
+| Capture / analysis resolution | ≤ 1280×720 at JPEG q0.72; analysis ≤ 320 px long side | [M-code] `phone/assets/memory-camera.js` (`scale = min(1, 1280/w, 720/h)`, `analysisScale = 320/...`, `toDataURL('image/jpeg', .72)`) |
+| Camera-on hours per day | 8 (worked example); 24 (bound) | [A]; 8 h gives 960 idle frames/day, 24 h the full 2,880 |
+| Episodes/day | 50 | [D] as §1 |
+| Keyframe raw bytes | 50 KB typical, 100 KB high | [A] v1's 50 KB; the synthetic q72 720p frame was 84 KiB [M-sandbox] |
+| Burst frames | ≤ 10 grayscale 320×180 JPEGs, ~8 KB each | [D] `BURST_MAX = 10`; [A] bytes (synthetic 13–18 KiB [M-sandbox]) |
+| Landmark samples | ≤ 128 per packet; ≤ 2 hands × 21 image points + 21 world points, 6-decimal floats; typical 75 | [D] `LANDMARK_SAMPLES_MAX = 128`; [M-code] the camera tick is every 100 ms and `MAX_EPISODE_MS = 10000`, so an automatic episode holds ≤ 100; `hand-worker.js` `round6` and world landmarks whenever MediaPipe returns them; [A] 75 = 10 Hz × 7.5 s |
+| Packet storage form | the received JSON bytes, verbatim, in `episode_revisions.packet` (base64 JPEGs inside); ≤ 8 revisions per episode, each a full packet | [M-code] `perception/episode_store.py` |
+| Tracked items with a placed location | 10 … 30 | [A] coordinator's range |
+| Registration + blur per (item × frame) pair | **8.5 ms** incl. both JPEG decodes; 3.6 ms with decodes cached; a frame-level motion-energy check 0.5 ms | [M-sandbox] at 320×180 analysis size, the localizer's own calls (`goodFeaturesToTrack 250`, `calcOpticalFlowPyrLK`, `estimateAffinePartial2D` RANSAC, `warpAffine`) and `motion.box_blur3`; used as **10 ms laptop-class [A], 20 ms burstable-vCPU [A]** |
+| DINOv2-S/14 embed per candidate | 50 … 150 ms, 300 ms pessimistic | [A] §8's range; the sandbox core sustains 150 GFLOP/s of fp32 GEMM single-threaded, i.e. ≥ 81 ms for the 12.2 GFLOP crop if the whole model ran at GEMM speed [M-sandbox], consistent with the range |
+| Observation row, embedding row | ~1,500 B; 1,736 B | [A] `local_observations.record` JSON; [A] §8.2 |
+| Prices | v1 rates: S3 $0.023/GB, gp3 $0.08/GB, snapshot $0.05/GB, PUT $0.005/1k, GET $0.0004/1k, t3.medium $0.0208/vCPU-h; Hetzner volume €0.044 × 1.08, B2 $0.006/GB, $0.00333/vCPU-h | all **[Q-UNVERIFIED]**, re-read attempted and blocked 2026-10-09 (header note) |
+
+### 9.1 Storage per user-day and per user at steady state
+
+#### 9.1.1 The idle cache: which cap binds
+
+| Mean idle frame | 2,880 × bytes per day | vs 200 MiB cap (209,715,200 B) | Frames the byte cap holds | Idle coverage at the byte cap |
+| --- | ---: | --- | ---: | ---: |
+| 64 KiB (65,536 B) target | 188,743,680 B = **180.0 MiB = 188.7 MB** | **under: the count cap binds** (20 MiB spare) | 3,200 | 26.7 h (> 24 h TTL) |
+| 64 KB decimal (64,000 B) | 184,320,000 B = 175.8 MiB = 184.3 MB | under: the count cap binds | 3,276 | 27.3 h |
+| 71.1 KiB (72,818 B) | 209,715,200 B | the cross-over: above this mean the byte cap binds | 2,880 | 24.0 h |
+| 103 KiB (1080p synthetic) | 303,759,360 B = 289.7 MiB | **byte cap binds** | 1,988 | **16.6 h** |
+| 256 KiB body cap | 754,974,720 B = 720.0 MiB | byte cap binds | 800 | **6.7 h** |
+
+So the brief's "2,880 × 64 KB = 184 MB/day > 200 MiB?" is **no**: 184.3 MB (decimal KB) or
+188.7 MB (KiB) against 209.7 MB; the count cap is the binding one at the target, with
+10–12 % to spare. The byte cap is a guard that only engages when frames come in above
+71 KiB, and when it engages it **costs coverage, not money**: the cache then holds fewer
+than 24 h of idle frames (16.6 h at 103 KiB; 6.7 h at the body cap), and the plan's
+"oldest unpromoted evicted first" rule silently shortens the window inside which a
+placement can be re-observed. That is why §9.4 asks for the held coverage (hours) and an
+oversize counter to be reported. At the worked example's 8 h of camera-on time the cache
+holds 960 × 64 KiB = **60.0 MiB**, far inside both caps. The cache lives in the SQLite
+file (`idle_frames.jpeg BLOB`), so on the hosted variant it is block storage (gp3), not
+object storage, and it adds no PUT/GET requests (§9.3).
+
+#### 9.1.2 Episode packets as stored, and the 72 h landmark reduction
+
+**Landmark bytes.** The brief's bound is 128 samples × 2 hands × 21 points × 3 floats =
+16,128 floats; as compact JSON at six decimals one point is
+`{"x":0.847434,"y":0.763775,"z":-0.048986}` = **41 B** (13.7 B per float), so the image
+landmarks alone are ≤ 215 KiB. Measured with the real schema classes
+(`LandmarkSample`/`Hand`/`ImagePoint`, `json.dumps(..., separators=(",", ":"))`, which is
+what `semantic_digest()` and the browser's `JSON.stringify` produce) [M-sandbox]:
+
+| Landmark set | Bytes | Note |
+| --- | ---: | --- |
+| 128 samples × 2 hands, `world_landmarks` present | **484,864 B = 473.5 KiB** | the hand worker emits world landmarks whenever MediaPipe returns them [M-code], so this is the real worst case; 1,869 B per hand |
+| 128 samples × 2 hands, no world landmarks | 258,816 B = 252.8 KiB | 986 B per hand |
+| Typical: 75 samples × 1 hand, world present | **143,925 B = 140.6 KiB** | [A] sample count |
+| `landmark_summary` after 72 h, worst / typical | 33,280 B / 12,000 B | [A] ~60 B per sample + ~100 B per hand (`hand_bbox` 4 floats, `busy`, `basis`) |
+
+The reduction therefore removes **93.1 % (worst) / 91.7 % (typical) of landmark bytes**:
+−452 KB / −132 KB per packet.
+
+**Packet bytes as stored.** `ingest_episode` inserts the received bytes verbatim
+(base64 JPEGs inside the JSON), so:
+
+| Packet | Keyframes (8 × raw × 4/3) | Burst (10 × 8 KB × 4/3) | Landmarks | JSON | **Stored** | **After 72 h** |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Typical (50 KB keyframes, 75 samples) | 533.3 KB | 106.7 KB | 143.9 KB | 2 KB | **785.9 KB** | **654.0 KB** |
+| High (100 KB keyframes, worst landmarks) | 1,066.7 KB | 106.7 KB | 484.9 KB | 2 KB | 1,660.2 KB | 1,208.6 KB |
+| Cap | | | | | 4,194.3 KB (4 MiB) | |
+
+Per day at 50 episodes: **39.3 MB/day typical** (v1 and `MEMORY_SYSTEM_V4.md` said 20
+MB/day, counting raw keyframes only), 83.0 MB/day high; the reduction gives back 6.6
+MB/day (typical) to 22.6 MB/day (high) once a day-cohort passes 72 h. Two further
+multipliers the v1 line did not see: up to **8 revisions per episode, each a full
+packet** (a resent superset is a new row; the previous revision's bytes stay), and the
+observation rows and embeddings per episode (≈ 6.5 KB, negligible).
+
+#### 9.1.3 Promoted idle frames
+
+A `present` result promotes the idle frame (64 KiB kept, "never expires") and writes one
+observation row per (item × frame) `present`, plus an embedding row when the embedder
+confirmed it (≈ 3.2 KB per row pair). The brief asks for 0–10 % promotion; the design as
+written promotes **every** idle frame in which any placed item is still visible, which in
+a quiet home with the items in view is nearly all of them, so a third column is shown:
+
+| Promotion rate | Camera 8 h (960 frames/day) | Camera 24 h (2,880 frames/day) | If promoted frames never expire |
+| --- | ---: | ---: | ---: |
+| 0 % | 0 | 0 | 0 |
+| 10 %, 1 row per frame | 6.3 MB/day frames + 0.3 MB/day rows | 18.9 MB/day + 0.9 MB/day | **6.9 GB/year of frames alone, unbounded with tenure** |
+| 100 %, 30 items (design as written, static scene) | 62.9 MB/day frames + 93.2 MB/day rows | 188.7 MB/day + 279.6 MB/day | 171 GB/year, frames + rows |
+| **Capped: ≤ 1 promotion per item per hour** (§9.4), 30 items, frames shared (≤ 24/day) | 1.6 MB/day frames + 2.3 MB/day rows | same | n/a: follows `episodes_days` |
+
+At 90-day retention the 10 % case adds 0.59 GB (8 h) to 1.78 GB (24 h); the as-written
+case adds 14–42 GB; the capped case 0.35 GB (141.6 MB of frames + 209.7 MB of rows). The
+rows, not the frames, dominate the as-written case, because every item in view writes a
+row every 30 s: 86,400 rows/day at 30 items and 24 h.
+
+#### 9.1.4 Formula, retention 30 vs 90, and the worked example
+
+Durable bytes per household at steady state, retention `R` days (`R ≥ 3`):
+
+```
+D(R) = E × [3 × P_full + (R − 3) × P_reduced]            # packets, landmarks reduced after 72 h
+     + E × o × (r_obs + r_emb) × R                         # observation + embedding rows per episode
+     + F_p × b_idle × R + F_p × k × (r_obs + r_emb) × R    # promoted idle frames and their rows
+C    = min(F × b_idle, 200 MiB)                            # the 24 h idle cache, not retention-scaled
+```
+
+with `E` episodes/day, `P_full`/`P_reduced` stored packet bytes before/after 72 h, `o`
+observations per episode (2), `r_obs`/`r_emb` row bytes (1,500 / 1,736), `F` idle
+frames/day, `F_p` promoted frames/day, `k` rows per promoted frame, `b_idle` 64 KiB.
+
+Worked example, **50 episodes/day, 8 h/day of camera-on time** (F = 960), typical packet
+(785.9 → 654.0 KB), promotion capped (F_p = 24, k × F_p = 720 rows/day):
+
+| Component | Per user-day | R = 30 days | R = 90 days |
+| --- | ---: | ---: | ---: |
+| Packets (after reduction for cohorts > 72 h) | 39.3 MB ingested; 32.7 MB retained | 1.001 GB | **2.963 GB** |
+| Observation + embedding rows (episodes) | 0.32 MB | 9.7 MB | 29.1 MB |
+| Promoted idle frames (capped) | 1.57 MB | 47.2 MB | 141.6 MB |
+| Promoted-frame rows (capped, 30 items) | 2.33 MB | 69.9 MB | 209.7 MB |
+| Idle cache (rolling, 24 h) | 60.0 MiB held | 62.9 MB | 62.9 MB |
+| **Total per household** | **≈ 43.5 MB/day ingested** | **1.19 GB** | **3.41 GB** |
+| Same with high packets (100 KB keyframes, worst landmarks) | 87.2 MB/day | 2.1 GB | 5.9 GB |
+
+Where the bytes live: on the **rig** all of it sits in one SQLite file on the laptop
+(§9.5), zero company spend, and the file does not shrink when retention NULLs packet
+bytes (SQLite reuses free pages; only `VACUUM INTO` at `erase_profile` rewrites it), so
+it plateaus at the steady-state maximum. On the **hosted** variant, v1's model stands:
+packets as one object each (S3-class, cap 4), everything else (idle cache, promoted
+frames, rows, embeddings) in the per-VM block storage: **0.34 GB (R=30) / 0.59 GB (R=90)
+of block storage per household**, idle cache counted at its 200 MiB cap. If the hosted
+variant kept packets in SQLite as the rig does, the 2.96 GB would move from $0.023/GB to
+$0.08/GB (+$0.17/user-month) and the multi-tenant file would be 355 GB (§9.5), which is
+why the storage adapter or per-household files matter.
+
+### 9.2 Compute: re-observation
+
+**Per pair.** Registration (decode both JPEGs, grey, resize to 320×180, 250 corners, LK,
+partial affine with RANSAC, warp) plus the blurred bbox diff measured **8.5 ms** on the
+sandbox core (3.6 ms when the idle frame and reference decodes are cached across items of
+the same frame); the figure used below is **10 ms laptop-class [A], 20 ms on a burstable
+vCPU [A]**. The embed runs only on `present` candidates (diff ≤ 0.06), 50–150 ms [A],
+300 ms pessimistic. "Tens of ms" for registration + blur is confirmed in order of
+magnitude; the embed dominates whenever it runs.
+
+**Worst case per worker pass, `limit=16`:** 16 × 20 ms = **0.32 s** diff-only; 16 ×
+(20 + 150) ms = **2.72 s** with embeds; 16 × (20 + 300) ms = 5.12 s pessimistic. That
+bounds a pass, which is what keeps the store responsive (passes run in a thread, the
+API interleaves). It does **not** bound the day: the worker loop in `server/memory_app.py`
+wakes every 1 s [M-code], so `limit=16` is a per-second ceiling of 16 pairs, and the daily
+work is simply pairs = items × idle frames:
+
+| Camera, items | Pairs/day | Diff-only (10 ms) | Diff + embed 150 ms on every pair (static scene) | Hosted vCPU-h/user-month (diff / +embed) | $ AWS (diff / +embed) | $ Hetzner |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 8 h, 10 items | 9,600 | 96 CPU-s/day (0.11 % of a core) | 1,536 CPU-s/day (1.78 %) | 0.8 / 12.8 | 0.017 / 0.266 | 0.003 / 0.043 |
+| 8 h, 30 items | 28,800 | 288 (0.33 %) | 4,608 (5.33 %) | 2.4 / 38.4 | 0.050 / **0.799** | 0.008 / 0.128 |
+| 24 h, 10 items | 28,800 | 288 (0.33 %) | 4,608 (5.33 %) | 2.4 / 38.4 | 0.050 / 0.799 | 0.008 / 0.128 |
+| 24 h, 30 items | 86,400 | 864 (1.00 %) | 13,824 (16.00 %) | 7.2 / **115.2** | 0.150 / **2.396** | 0.024 / 0.383 |
+
+Readings:
+
+- **Diff-only is cheap everywhere**: ≤ 1 % of one core on the laptop, ≤ $0.15/user-month
+  hosted even at 24 h and 30 items. The laptop stays idle-capable on diff alone.
+- **The embed is not.** As written, a static 30-item scene with the camera on all day
+  embeds 86,400 crops/day: 16 % of a core continuously (≈ 5 W more at the wall, ~$0.6/month
+  of household electricity [A], and a laptop that never cools), and hosted **115
+  vCPU-h/user-month = $2.40 at AWS rates, 100× the whole v1 compute line and more than the
+  margin at $10**. This is exactly the exposure §8.5 flagged (arrival-time indexing of
+  every idle frame), in a cheaper per-frame form multiplied by the item count.
+- **`limit=16` keeps the server responsive, not the laptop idle.** With a continuous
+  backlog the worker runs 16 pairs every second until it clears; at 170 ms per pair that
+  is a core at 100 % for as long as the backlog lasts, and at 2,880 frames × 30 items a
+  day the backlog never clears (it expires at 24 h instead, as coverage).
+
+**Under the §9.4 caps** (frame-level unchanged gate at 2 ms; diff on changed frames,
+assumed ≤ 10 % of idle frames [A]; promotion/embed ≤ 1 per item per hour; 300 CPU-s/day
+budget), the same 24 h, 30-item household is 5.8 + 86.4 + 108.0 = **200 CPU-s/day = 1.67
+vCPU-h/user-month = $0.035** (AWS); the budget's ceiling is **2.5 vCPU-h = $0.052 AWS /
+$0.008 Hetzner**, a 0.35 % duty cycle on the laptop. v1's cap-7 line was 0.6667 vCPU-h
+for a query-time scan; the budget replaces it, net **+1.83 vCPU-h = +$0.038** at AWS
+rates.
+
+### 9.3 Hosted object storage and requests for the idle cache (if it were uploaded)
+
+The brief keeps idle frames on the laptop (rig) or on the server disk (hosted). The
+hosted variant must keep it that way: per-frame objects would cost
+
+| Camera | PUTs/month | S3 PUT $ | R2 class A $ | Storage at the 200 MiB cap (S3) | GETs for re-observation (1 per frame) | Total S3 | Batched-objects line for comparison |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 8 h | 28,800 | 0.1440 | 0.1296 | 0.0048 | 0.0115 | **0.1603** | 0.0111 |
+| 24 h | 86,400 | 0.4320 | 0.3888 | 0.0048 | 0.0346 | **0.4714** | 0.0111 |
+
+i.e. **$0.16–0.47/user-month, 14–42× the entire batched request line**, for bytes that
+expire in 24 h. The CP2 rule (cap 4: one object per episode packet, idle frames bundled
+or on block storage, never one object per keyframe) is reused unchanged and extended:
+**idle frames are never written to object storage per frame.** On the VM they are block
+storage inside the SQLite file: 0.21 GB × $0.08 = $0.0168/user-month at the cap (v1
+carried $0.012 for a 150 MB cache), and $0 of requests. If a hosted design ever needs
+idle frames off the VM (for example a snapshot), it is one hourly bundle at most, the
+rule v1 already priced at $0.0111.
+
+### 9.4 Caps: confirm or adjust §5 items 5–7, and the retention default
+
+Every cap keeps the contract's semantics: queue or report, never drop silently, never
+stop memory workers (handoff §10; `budget_wait` / coverage-loss states).
+
+**Cap 5, idle keyframes: adjusted to the plan's exact numbers, with one addition.**
+≤ 1 per 30 s, **≤ 2,880/day** [D, confirmed]; **target ≤ 64 KiB** at capture resolution
+(JPEG q0.5) [D; replaces v1's 25 KB, which assumed analysis resolution; the plan chose
+capture resolution so a promoted frame can serve as an ordinary observation image, and
+the 720p synthetic worst case landed at 65 KiB, so the target is realistic at 720p and
+not at 1080p]; body cap 256 KiB [D]; **cache ≤ 200 MiB** [D, confirmed; v1 wrote 200 MB];
+24 h TTL [D]. Addition: because the count cap binds at the target and the byte cap only
+engages above a 71.1 KiB mean, when it does engage it shortens coverage (§9.1.1), so the
+store reports the **hours of idle coverage currently held** and an **`idle_oversize`
+counter** (frames above 96 KiB [A]), and the browser steps JPEG quality down one notch
+(0.5 → 0.4) when its last idle frame exceeded 96 KiB. Cost of the cache at the cap:
+$0.017/user-month (gp3) or $0.010 (Hetzner volume); nothing to save, only coverage to
+keep visible.
+
+**Cap 6, durable storage per household: adjusted.** v1's "≤ 2 GB (≈ 90 days at 20
+MB/day plus promoted idle frames)" is not achievable by the design at 90 days: as stored,
+packets are ≈ 39 MB/day typical and the 90-day set is 2.96 GB typical, 5.5 GB high
+(§9.1.2). Proposal:
+
+- **≤ 2 GiB per household at a 30-day `episodes_days` default** (1.19 GB typical, 2.1 GB
+  high in §9.1.4, so the high case needs the 72 h reduction and the revision rule below to
+  fit), **or ≤ 4 GiB at 90 days** (3.41 GB typical; the high case, 5.9 GB, does not fit,
+  which makes cap 3's per-day bytes cap the operative one).
+- **Promoted idle frames and their observation/embedding rows are inside the cap and
+  follow `episodes_days`** (jpeg → NULL with the same "evidence image expired" state as
+  packets). The plan's "promoted = never expires" is an unbounded line otherwise: 6.9
+  GB/year at 10 % promotion, 171 GB/year as written.
+- **Superseded accepted revisions have their packet bytes NULLed at the 72 h pass**
+  (digest columns stay, so B-16's duplicate detection is untouched); otherwise the
+  8-revision limit lets one episode hold 8 × 4 MiB.
+- Cap 3's daily soft/hard caps (50 / 150 MB) count **stored bytes including revisions**;
+  its "median packet target ≤ 500 KB" becomes **≤ 800 KB as stored** (786 KB typical).
+
+**Retention default, from cost alone: 30 days.** Expected difference 30 → 90 days is
+**$0.176/user-month at AWS rates ($0.135 on Hetzner/B2)**: 1.8 margin points at $10, the
+largest single lever CP4 has after the re-observation caps, and six times v1's $0.03
+(which was computed on raw keyframe bytes without the snapshot share). Retention (a) keeps
+metadata, digests, observations and embeddings and NULLs only the packet bytes, so what a
+30-day default loses is the **evidence photo** for placements older than 30 days ("evidence
+image expired"), not the answer; most "where is X" questions concern the last placement,
+which is days old, not months. **The privacy agent owns the final call** (G-PRIV
+data-class map, `consent_version` semantics); Finance's input is the number above and
+the observation that 90 days also doubles the VACUUM headroom and snapshot lines.
+
+**Cap 7, on-demand re-observation: replaced.** v1's "≤ 40 frames per query, ≤ 2 s CPU
+per query" assumed a query-time scan; CP4's rule 13 is arrival-time. New cap 7:
+
+- (a) **`limit=16` pairs per worker pass** [D, confirmed]: bounds one pass to ≤ 0.32 s
+  diff-only / ≤ 2.72 s with embeds at the assumed rates, which keeps the store and API
+  responsive. It is not a rate cap (§9.2).
+- (b) **Frame-level gate:** an idle frame whose motion energy against the previously
+  processed idle frame of the same device is below the controller's idle threshold
+  inherits that frame's per-item results (one `box_blur3` diff per frame, 0.5–2 ms); only
+  changed frames go through per-item registration. In a quiet home that removes most
+  pairs at no decision cost, because an unchanged frame cannot change `present/gone`.
+- (c) **Promotion, observation row and embed at most once per item per hour**
+  (`REOBS_PROMOTE_INTERVAL_MS = 3,600,000` [A]; the architect may choose longer: the
+  ageing threshold the promotion exists to reset is 24 h, `AGE_STALE_MS` [M-code]).
+  Diff-only `present/gone/unknown` decisions on changed frames stay unlimited inside (d),
+  so `gone` latency is unaffected.
+- (d) **≤ 300 CPU-s of re-observation time per household-day** (2.5 vCPU-h/user-month;
+  $0.052 AWS, $0.008 Hetzner; 0.35 % of a laptop core), measured by the worker with the
+  same clock the tests inject; beyond it idle frames stay unprocessed, are counted
+  (`reobs_deferred`, in `/api/retention` and health) and expire at 24 h as **coverage,
+  never silently as evidence**.
+
+With (b)–(d) the worst household (24 h, 30 items, static) is ≈ 1.7 vCPU-h ($0.035) against
+115.2 vCPU-h ($2.40) as written; with (a) alone it is unbounded. Finance treats (b)–(d) as
+conditions of CP4 acceptance, not optimisations, because without them the hosted variant's
+worst case is not 1.10 but 8.78 (§9.6).
+
+*Where the builder's draft already stands (read, not reviewed: `perception/reobservation.py`
+is an untracked file in the working tree at `77b769e`, not yet in any commit).* It
+already has the **promotion and observation-row half of (c)**: `REOBS_REFRESH_MS = 3600 ×
+1000`, a `present` promotes and writes a row the first time after a hand event, on a
+state reversal, and otherwise at most hourly. Two things it does not yet have: the
+**embed runs on every `present` pair before the refresh check** (the expensive half of
+(c) is ungated: the compute table of §9.2 is the draft's behaviour), and the
+**`reobservations` table records one row per pair with no retention window** (~120 B
+[A] × 86,400 pairs/day in the as-written scene ≈ 10 MB/day, 0.9 GB at 90 days; under the
+frame gate (b) it shrinks with the pairs; it should follow `episodes_days` as well).
+Neither (b) nor (d) is present.
+
+### 9.5 Erasure: `VACUUM INTO` headroom
+
+`erase_profile` runs `VACUUM INTO` a fresh file and swaps it in, so the disk must hold
+**two copies of the database** for the duration:
+
+| Database | Size | Free space needed (2×) | Matters? |
+| --- | ---: | ---: | --- |
+| Rig, one household, everything in SQLite, R=90 typical, promotion capped | 3.55 GB (5.9 GB high) | 7.1 GB (12 GB) | No: any laptop with a ≥ 128 GB SSD; a 3.5 GB copy on a laptop SSD is tens of seconds [A], once, at erase-all |
+| Rig, R=30 | 1.2 GB (2.1 GB high) | 2.4 GB (4.2 GB) | No |
+| Hosted, one household's block-storage share (packets in objects) | 0.59 GB (R=90) / 0.34 GB (R=30) | 1.2 GB / 0.7 GB | No, **if each household is its own database file** |
+| Hosted, **one multi-tenant file** for 100 households | 59 GB (R=90); 355 GB if packets were also in SQLite | **118 GB; 711 GB** | **Yes**: one household's "erase everything" copies every other household's data, needs ≥ 2× the whole file free, and takes minutes of I/O on a 2-vCPU VM; the v1 30 GB disk cannot hold even one copy |
+
+Consequence for the hosted variant: **per-household SQLite files** (the schema already
+keys every table by `profile_id`, so the change is file placement, not schema), which
+makes `VACUUM INTO` headroom 2 × 0.6 GB, lets P-107's byte-scan after `erase_profile`
+run on that household's file alone, and makes snapshots per household. With that, the VM
+disk goes from v1's 30 GB to **80 GB** (100 × 0.59 GB + OS + one household's headroom;
+120 GB in the worst-with-caps case): +$4.00/VM-month = **+$0.040/user-month** at gp3
+rates (+$0.024 on a Hetzner volume). Without per-household files the disk would need to
+be sized at 2× the whole set (120–240 GB) and the erase-all path would be the most
+expensive operation in the product. On the laptop none of this matters beyond the free
+space check `erase_profile` must make before it starts (refuse with a clear message if
+free space < 2× the file; never half-swap).
+
+### 9.6 Bottom line: does CP4 move the $5 / $10 / $15 sensitivity?
+
+Per-user-month delta on `A_b`, Decimal arithmetic (Appendix C §C.7), against v1's lines
+for the same items (durable storage, idle cache, snapshot, re-observation compute, VM
+disk). "Expected" = 90-day retention (the plan's default), 8 h camera-on, typical packets,
+promotion capped at 1/item/h, re-observation at its 2.5 vCPU-h budget, 80 GB VM disk.
+
+| Case | Packets | Block storage (DB) | Snapshot | Re-obs compute | Extra VM disk | New lines | v1 lines | **Δ $/user-month** | **`A_b`** | P=10/S=3 hosted margin |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| **AWS, expected, R=90** | 2.96 GB, 0.0681 | 0.59 GB, 0.0472 | 0.1777 | 0.0520 | 0.0400 | 0.3850 | 0.1648 | **+0.2203** | **0.7175 → 0.72** | **49.43 %** |
+| AWS, expected, R=30 | 1.00 GB, 0.0230 | 0.34 GB, 0.0269 | 0.0669 | 0.0520 | 0.0400 | 0.2088 | 0.1648 | +0.0441 | 0.5413 (0.50 stands) | 51.19 % |
+| AWS, CP4-only at R=90 (v1 packet bytes kept, isolates CP4 from the CP2 size correction) | 1.80 GB, 0.0414 | 0.59 GB, 0.0472 | 0.1195 | 0.0520 | 0.0400 | 0.3001 | 0.1648 | +0.1354 | 0.6326 | 50.27 % |
+| AWS, worst **with** the §9.4 caps (high packets, 24 h, 120 GB disk) | 5.51 GB, 0.1266 | 0.59 GB, 0.0472 | 0.3048 | 0.0520 | 0.0720 | 0.6027 | 0.1648 | +0.4380 | 0.9352 (< 1.10) | 47.25 % |
+| AWS, worst **without** caps (every frame promoted and embedded, 30 items, 24 h, 200 GB disk) | 5.51 GB, 0.1266 | 42.39 GB, 3.3911 | 2.3948 | 2.3962 | 0.1360 | 8.4447 | 0.1648 | **+8.2800** | 8.7772 | **−31.17 %** |
+| Hetzner/B2, expected, R=90 | 0.0178 | 0.0281 | 0.1777 | 0.0083 | 0.0238 | 0.2556 | 0.1176 | +0.1379 | 0.3019 | 53.58 % |
+| Hetzner/B2, expected, R=30 | 0.0060 | 0.0160 | 0.0669 | 0.0083 | 0.0238 | 0.1210 | 0.1176 | +0.0033 | 0.1673 | 54.93 % |
+| Hetzner/B2, worst with caps | 0.0330 | 0.0281 | 0.3048 | 0.0083 | 0.0428 | 0.4170 | 0.1176 | +0.2994 | 0.4634 | 51.97 % |
+| Hetzner/B2, worst without caps | 0.0330 | 2.0143 | 2.3948 | 0.3835 | 0.0808 | 4.9064 | 0.1176 | +4.7888 | 4.9528 | 7.07 % |
+
+Readings:
+
+1. **Expected delta at the plan's 90-day default: +$0.22/user-month (AWS), above the
+   $0.05 threshold, so §2.4, §3.2 and §3.3 are recomputed at `A_b = 0.72`.** Of the
+   0.22, 0.085 is the stored-packet correction (a CP2 fact that the retention arithmetic
+   exposed), 0.040 the VM disk, 0.057 the SQLite-resident cache, promoted frames and rows
+   with their snapshot share, 0.038 the net re-observation budget. The CP4-only delta is
+   +$0.14; it exceeds the threshold on its own.
+2. **At a 30-day default the delta is +$0.04 and the v1 tables stand within rounding.**
+   This is the retention lever of §9.4 ($0.18/user-month).
+3. **The worst case with caps (0.94) stays under the tables' 1.10**, with $0.17 to spare,
+   but 1.10 no longer also covers per-keyframe objects (+0.48 would make it 1.42): cap 4
+   is now load-bearing, not a saving.
+4. **Without the §9.4 caps there is no worst case to tabulate**: +$8.28 at AWS rates
+   (+$4.79 Hetzner), a −31 % hosted margin at $10/S=3. Nothing in v1's 1.10 anticipated
+   a per-item, per-30-s durable write path.
+5. The **sensitivity readings of §3 do not change**: $5 is not viable; $10 works only
+   near S=3 (hosted now 49.4 %, not 51.6 %); $15 keeps 23 % or more at S=8 (22.97 % at
+   the $1/$5 tier) outside the $2/$10 chat tier (14.0 %). Every hosted break-even price
+   moves by +$0.23 (= 0.22 / 0.971) and every 40 %-margin price by +$0.39 (= 0.22 /
+   0.571); the rows that work in §3.3 move by 1–4 households at F=150.
+
+Before/after at P=10, S=3 (hosted rows; v1 → v1.2): margin 51.60 % → 49.40 %; break-even
+P* $4.69 → $4.91; P at 40 % $7.97 → $8.35; households for F=150 26 → 27, for F=4,150
+703 → 730; subtotal before support 1.84 → 2.06. Rig rows are untouched: CP4 costs the
+rig nothing in money and ≈ 0.35 % of a core under cap 7(d).
+
+### 9.7 What replaces these numbers
+
+The tester's synthetic CP4 runs (`BUILD_PLAN.md` *Finance* line for CP4) should report,
+per household-day: stored packet bytes per revision (not raw keyframe bytes), landmark
+bytes before and after the 72 h pass, idle frame bytes at q0.5 on the fake camera and on
+one real 720p room scene, promoted frames and `reobservations` rows per day with the
+item count, pairs processed and ms per pair on the dev laptop (diff-only and with the
+embedder), and the database file size before and after `apply_retention` and after
+`erase_profile`. On device (P-105) the same counters replace every [A] above; §6 items 1
+and 3 are the slots. None of §9 is an on-device measurement.
+
+---
+
 ## Open questions for the coordinator
 
 1. **Chat policy vs cap.** The 20/day × 1.5k/150 policy on a $2/$10 model costs $2.70;
@@ -734,6 +1252,43 @@ the export and the CUTE calibration actually took. None of §8 is a measurement.
     the observation's retention window and tombstone semantics (B-07) so cap 6 stays a
     single number; a vector that outlives its tombstoned observation is both a privacy
     defect and an unbounded storage line.
+
+*Added in v1.2 (CP4):*
+
+12. **Promotion and embed rate (cap 7 b–d).** Will the architect adopt the frame-level
+    unchanged gate, the ≤ 1 promotion/observation-row/embed per item per hour rule and
+    the 300 CPU-s/day budget with a `reobs_deferred` counter? As written, a static
+    30-item scene with the camera on all day is 86,400 (item × frame) pairs and
+    86,400 observation rows per day: 115 vCPU-h and ~42 GB per household-month hosted
+    (§9.2, §9.6). The untracked draft already has the hourly promotion/row refresh
+    (`REOBS_REFRESH_MS`) but embeds every `present` pair before it and keeps one
+    `reobservations` row per pair with no retention (§9.4). Finance's acceptance of
+    CP4 is conditional on some bound of this kind; the exact interval (1 h, 6 h, 24 h =
+    `AGE_STALE_MS`) is the architect's.
+13. **Promoted idle frames and retention.** The plan says promoted frames "never
+    expire"; Finance proposes they and their rows follow `episodes_days` and sit inside
+    cap 6 (§9.4). Privacy agent and architect: is a promoted frame evidence with the same
+    window as a packet, or something else? If it never expires, cap 6 cannot be a number.
+14. **Retention default.** Finance's cost-only proposal is **30 days** ($0.18/user-month
+    less than 90 at AWS rates, 1.8 margin points at $10; §9.4), with cap 6 at 2 GiB; if
+    the privacy agent chooses 90 days, cap 6 becomes 4 GiB and `A_b = 0.72` is the
+    table value. Who decides, and does `consent_version` "rig-2026-10" fix the window?
+15. **Per-household database files in the hosted variant.** `VACUUM INTO` needs 2× the
+    file; one multi-tenant file for 100 households is 59–355 GB and one household's
+    erase-all copies everyone else's data (§9.5). Finance asks the architect whether the
+    hosted deployment can be one SQLite file per `profile_id` (the schema already keys
+    every table by it), which also gives P-107's byte scan a single file to scan.
+16. **Revisions × packet bytes.** Up to 8 accepted revisions per episode each keep a full
+    packet. May the 72 h pass NULL the packet bytes of superseded accepted revisions
+    (digest columns kept, B-16 untouched), so cap 3's daily bytes and cap 6 count one
+    packet per episode? If not, cap 3's hard cap must count revisions.
+17. **Packet bytes as stored vs the spec's 20 MB/day.** The stored form is ≈ 2× the
+    spec's raw-keyframe estimate (base64, burst, landmarks; §9.1.2). Should
+    `MEMORY_SYSTEM_V4.md` "Storage and radio" and cap 3's 500 KB median be restated in
+    stored bytes, or should the store strip base64 to raw JPEG BLOBs (a CP2 change that
+    would cut the stored set by a quarter and is not in CP4's scope)? Finance has no
+    preference beyond consistency of the number; the tester's CP4 runs will measure it
+    (§9.7).
 
 ---
 
@@ -1107,4 +1662,221 @@ for mult, ms in ((D("4"), D("60")), (D("6"), D("150"))):
     vcpu_h = cpu_s_day * DAYS / D("3600")
     tot = v1_total_hi + vcpu_h
     print(f"CP4 arrival indexing at 518 px, {s_frame} s/frame x {IDLE_DAY} idle frames/day: {cpu_s_day} CPU-s/day = {q(vcpu_h, '0.01')} vCPU-h/user-month; users per VM at 25 % util would be {q(usable_25 / tot, '1')}")
+```
+
+## Appendix C: CP4 arithmetic (v1.2)
+
+The tables in §9 were produced by the script below (Python 3, `decimal` only, no floats). Run it with `python3 -I appendix_c.py` after pasting it to a file; it prints the idle-cache cap check, the landmark and packet byte counts, the steady-state storage grid, the re-observation compute grid and the proposed caps, the per-frame object-storage contrast, the `A_b` deltas for both price stacks, the v1.2 sensitivity rows and the `VACUUM INTO` headroom. The two [M-sandbox] inputs it consumes (1,869 / 986 B per hand of landmark JSON, 8.5 ms per registration + blur pair) were measured by a separate sandbox script that imported `perception/episode.py` and `perception/motion.py` from `77b769e` and timed the localizer's OpenCV calls on synthetic 1280×720 frames; its outputs are quoted in §9 and are not on-device measurements.
+
+```python
+"""PAM FINANCE.md v1.2 Appendix C: CP4 arithmetic (idle cache, re-observation, retention,
+erasure). Decimal only; no floats.
+
+Every input is an assumption [A], a design parameter [D] from BUILD_PLAN.md "CP4 in detail",
+a code constant [M-code], a sandbox measurement [M-sandbox] (Intel Xeon 2.1 GHz vCPU, NOT the
+laptop) or an unverified list price [Q-UNVERIFIED]; see docs/FINANCE.md section 9 for labels.
+"""
+from decimal import Decimal as D, getcontext, ROUND_HALF_UP, ROUND_CEILING
+
+getcontext().prec = 28
+
+
+def q(x, places="0.0001"):
+    return x.quantize(D(places), rounding=ROUND_HALF_UP)
+
+
+def pct(x):
+    return (x * 100).quantize(D("0.01"), rounding=ROUND_HALF_UP)
+
+
+KiB, MiB = D(1024), D(1024) ** 2
+MB, GB = D("1e6"), D("1e9")
+
+print("=== C.1 Idle cache: which cap binds ===")
+IDLE_PER_DAY = D(2880)            # [D] IDLE_MAX_PER_DAY
+IDLE_TARGET = 64 * KiB            # [D] target <= 64 KiB (JPEG q0.5)
+IDLE_BODY_CAP = 256 * KiB         # [D] MAX_IDLE_BYTES
+IDLE_CACHE_CAP = 200 * MiB        # [D] IDLE_CACHE_BYTES
+for label, per_frame in (("64 KiB target", IDLE_TARGET), ("64 KB decimal", D(64000)), ("103 KiB (1080p synthetic, M-sandbox)", D(103) * KiB), ("256 KiB body cap", IDLE_BODY_CAP)):
+    day_bytes = IDLE_PER_DAY * per_frame
+    frames_in_cap = (IDLE_CACHE_CAP / per_frame).to_integral_value(rounding="ROUND_FLOOR")
+    hours = frames_in_cap * 30 / 3600
+    print(f"{label}: 2,880 x {per_frame} B = {day_bytes:,} B = {q(day_bytes / MiB, '0.1')} MiB = {q(day_bytes / MB, '0.1')} MB vs cap {IDLE_CACHE_CAP:,} B (200 MiB = {q(IDLE_CACHE_CAP / MB, '0.1')} MB): {'count cap binds (under)' if day_bytes <= IDLE_CACHE_CAP else 'BYTE CAP BINDS'}; frames held at the byte cap {frames_in_cap} = {q(hours, '0.1')} h of idle coverage")
+mean_binding = IDLE_CACHE_CAP / IDLE_PER_DAY
+print(f"byte cap binds when the mean idle frame exceeds {q(mean_binding, '0.1')} B = {q(mean_binding / KiB, '0.1')} KiB")
+CAMERA_H = D(8)                   # [A] camera-on hours/day in the worked example
+idle_8h = CAMERA_H * 3600 / 30
+print(f"worked example {CAMERA_H} h camera-on: {idle_8h} idle frames/day x 64 KiB = {q(idle_8h * IDLE_TARGET / MiB, '0.1')} MiB in the 24 h cache")
+
+print()
+print("=== C.2 Landmark bytes per packet and the 72 h reduction ===")
+# [M-sandbox] measured with the real schema classes, compact JSON, 6-decimal floats:
+PT = D(41)                        # one {"x":..,"y":..,"z":..} point
+HAND_WORLD = D(1869)              # one hand with world_landmarks (21 + 21 points + bbox + handedness)
+HAND_NOWORLD = D(986)
+SAMPLE_OVERHEAD = D(50)           # frame_id + t_ms + keys per sample
+floats_max = D(128) * 2 * 21 * 3
+print(f"floats, image landmarks only, max: 128 x 2 x 21 x 3 = {floats_max:,}; x ~{PT}/3 B per float as JSON = {q(floats_max * PT / 3 / KiB, '0.1')} KiB; measured compact JSON:")
+for label, samples, hands, hb in (("worst: 128 samples x 2 hands, world_landmarks present", D(128), D(2), HAND_WORLD),
+                                  ("worst without world_landmarks", D(128), D(2), HAND_NOWORLD),
+                                  ("typical: 75 samples (10 Hz x 7.5 s [A]) x 1 hand, world present", D(75), D(1), HAND_WORLD)):
+    b = samples * (SAMPLE_OVERHEAD + hands * hb)
+    print(f"  {label}: {b:,} B = {q(b / KiB, '0.1')} KiB")
+LM_WORST = D(128) * (SAMPLE_OVERHEAD + 2 * HAND_WORLD)
+LM_TYP = D(75) * (SAMPLE_OVERHEAD + 1 * HAND_WORLD)
+# landmark_summary [A]: per sample frame_id+t_ms (~60 B) + per hand {hand_bbox 4 floats, busy, basis} (~100 B)
+SUM_SAMPLE, SUM_HAND = D(60), D(100)
+SUM_WORST = D(128) * (SUM_SAMPLE + 2 * SUM_HAND)
+SUM_TYP = D(75) * (SUM_SAMPLE + 1 * SUM_HAND)
+print(f"landmark_summary after 72 h [A]: worst {SUM_WORST:,} B ({q(SUM_WORST / KiB, '0.1')} KiB), typical {SUM_TYP:,} B ({q(SUM_TYP / KiB, '0.1')} KiB); reduction removes {pct(1 - SUM_WORST / LM_WORST)} % / {pct(1 - SUM_TYP / LM_TYP)} % of landmark bytes")
+
+print()
+print("=== C.3 Packet bytes as stored (episode_revisions.packet = raw JSON, base64 JPEGs) ===")
+KF_RAW_TYP, KF_RAW_HI = D(50000), D(100000)   # [A] v1 50 KB; synthetic q72 720p worst 84 KiB
+KF_N = D(8)                                   # [D] max keyframes
+BURST_N, BURST_RAW = D(10), D(8000)           # [D] max burst; [A] 320x180 grey ~8 KB (synthetic worst 13-18 KiB)
+B64 = D(4) / D(3)
+JSON_OVERHEAD = D(2000)
+def packet(kf_raw, lm):
+    return KF_N * kf_raw * B64 + BURST_N * BURST_RAW * B64 + lm + JSON_OVERHEAD
+P_TYP = packet(KF_RAW_TYP, LM_TYP)
+P_TYP_R = packet(KF_RAW_TYP, SUM_TYP)
+P_HI = packet(KF_RAW_HI, LM_WORST)
+P_HI_R = packet(KF_RAW_HI, SUM_WORST)
+print(f"keyframes 8 x 50 KB raw -> base64 {q(KF_N * KF_RAW_TYP * B64 / 1000, '0.1')} KB; burst 10 x 8 KB -> {q(BURST_N * BURST_RAW * B64 / 1000, '0.1')} KB")
+print(f"typical packet {q(P_TYP / 1000, '0.1')} KB -> after 72 h reduction {q(P_TYP_R / 1000, '0.1')} KB; high packet {q(P_HI / 1000, '0.1')} KB -> {q(P_HI_R / 1000, '0.1')} KB; v1 assumed 400 KB raw keyframes/episode; cap 4 MiB = {4 * MiB / 1000} KB")
+EP_DAY = D(50)
+print(f"per day at {EP_DAY} episodes: typical {q(EP_DAY * P_TYP / MB, '0.1')} MB/day (v1: 20 MB/day); high {q(EP_DAY * P_HI / MB, '0.1')} MB/day; reduction saves {q(EP_DAY * (P_TYP - P_TYP_R) / MB, '0.1')} / {q(EP_DAY * (P_HI - P_HI_R) / MB, '0.1')} MB/day")
+
+print()
+print("=== C.4 Durable storage per user at steady state, retention R, with the 72 h reduction ===")
+EMB_ROW = D(1736)                 # [A] section 8.2
+OBS_PER_EP = D(2)                 # [A] section 8.2
+OBS_ROW = D(1500)                 # [A] local_observations.record JSON
+ITEMS_LO, ITEMS_HI = D(10), D(30) # [A] tracked items
+def durable(R, p_full, p_red, frames_day, promo_frac, promo_rows_per_frame, promoted_retained=True):
+    days_full = min(D(3), R)
+    packets = EP_DAY * (days_full * p_full + (R - days_full) * p_red)
+    emb = EP_DAY * OBS_PER_EP * EMB_ROW * R
+    obs = EP_DAY * OBS_PER_EP * OBS_ROW * R
+    promo_frames = frames_day * promo_frac
+    promo_bytes = promo_frames * IDLE_TARGET * (R if promoted_retained else D(365))
+    promo_rows = promo_frames * promo_rows_per_frame * (OBS_ROW + EMB_ROW) * (R if promoted_retained else D(365))
+    return packets, emb, obs, promo_bytes, promo_rows
+rows = []
+for R in (D(30), D(90)):
+    for frames_day, fl in ((idle_8h, "8 h"), (IDLE_PER_DAY, "24 h")):
+        for promo_frac, pl, rpf in ((D(0), "0 %", D(0)), (D("0.10"), "10 %", D(1)), (D(1), "100 % (design as written, static scene, 30 items)", ITEMS_HI)):
+            p, e, o, pb, pr = durable(R, P_TYP, P_TYP_R, frames_day, promo_frac, rpf)
+            tot = p + e + o + pb + pr
+            print(f"R={R} d, camera {fl}, promoted {pl}: packets {q(p / GB, '0.001')} GB + emb {q(e / MB, '0.1')} MB + obs {q(o / MB, '0.1')} MB + promoted frames {q(pb / GB, '0.001')} GB + promoted rows {q(pr / GB, '0.001')} GB = {q(tot / GB, '0.001')} GB (at R, if promoted frames follow episodes_days)")
+# promoted frames capped at <= 1 promotion per item per hour (proposal), 30 items, frames shared: <= 24 frames/day
+PROMO_CAP_FRAMES = D(24)
+for R in (D(30), D(90)):
+    pb = PROMO_CAP_FRAMES * IDLE_TARGET * R
+    pr = ITEMS_HI * 24 * (OBS_ROW + EMB_ROW) * R
+    print(f"R={R} d, promotion capped at 1/item/h (30 items): frames {q(pb / MB, '0.1')} MB + rows {q(pr / MB, '0.1')} MB")
+print(f"promoted frames NOT retained (never expires, as written): 10 % of 2,880/day x 64 KiB = {q(D('0.1') * IDLE_PER_DAY * IDLE_TARGET / MB, '0.1')} MB/day = {q(D('0.1') * IDLE_PER_DAY * IDLE_TARGET * 365 / GB, '0.2')} GB/year, unbounded with tenure")
+print(f"high-size packets (100 KB keyframes, worst landmarks) at R=90: {q(durable(D(90), P_HI, P_HI_R, idle_8h, D(0), D(0))[0] / GB, '0.2')} GB packets; at R=30: {q(durable(D(30), P_HI, P_HI_R, idle_8h, D(0), D(0))[0] / GB, '0.2')} GB")
+
+print()
+print("=== C.5 Re-observation compute ===")
+PAIR_DIFF = {"sandbox incl. decodes [M-sandbox]": D("0.0085"), "laptop-class [A]": D("0.010"), "burstable vCPU, 2x [A]": D("0.020")}
+EMBED = {"low": D("0.050"), "high": D("0.150"), "pessimistic": D("0.300")}   # [A] section 8
+LIMIT = D(16)
+print(f"worst case per worker pass (limit=16): diff-only 16 x 20 ms = {q(LIMIT * PAIR_DIFF['burstable vCPU, 2x [A]'], '0.01')} s; diff + embed high = {q(LIMIT * (PAIR_DIFF['burstable vCPU, 2x [A]'] + EMBED['high']), '0.01')} s; + embed pessimistic = {q(LIMIT * (PAIR_DIFF['burstable vCPU, 2x [A]'] + EMBED['pessimistic']), '0.01')} s")
+AWS_VCPU_H = D("0.0416") / 2
+HETZ_VCPU_H = D("4.50") * D("1.08") / 2 / 730
+DAYS = D(30)
+for frames_day, fl in ((idle_8h, "8 h"), (IDLE_PER_DAY, "24 h")):
+    for items in (ITEMS_LO, ITEMS_HI):
+        pairs = frames_day * items
+        diff_s = pairs * PAIR_DIFF["laptop-class [A]"]
+        emb_s = pairs * (PAIR_DIFF["laptop-class [A]"] + EMBED["high"])
+        for label, s in (("diff-only", diff_s), ("diff + embed 150 ms on every pair (static scene)", emb_s)):
+            vh = s * DAYS / 3600
+            print(f"camera {fl}, {items} items: {pairs:,} pairs/day, {label}: {q(s, '1')} CPU-s/day = {pct(s / 86400)} % of one core; {q(vh, '0.1')} vCPU-h/user-month = AWS ${q(vh * AWS_VCPU_H, '0.001')} / Hetzner ${q(vh * HETZ_VCPU_H, '0.001')}")
+print("proposed caps: frame-level motion gate (0.5-2 ms/frame), diff on changed frames only (assume <= 10 % of idle frames change [A]), promotion/embed <= 1 per item per hour, daily budget 300 CPU-s")
+gate_s = IDLE_PER_DAY * D("0.002")
+changed_pairs = IDLE_PER_DAY * D("0.10") * ITEMS_HI
+diff_s = changed_pairs * PAIR_DIFF["laptop-class [A]"]
+emb_s = ITEMS_HI * 24 * EMBED["high"]
+capped = gate_s + diff_s + emb_s
+print(f"  24 h, 30 items under the proposed caps: gate {q(gate_s, '0.1')} + diff {q(diff_s, '0.1')} + embeds {q(emb_s, '0.1')} = {q(capped, '0.1')} CPU-s/day = {q(capped * DAYS / 3600, '0.2')} vCPU-h/user-month = AWS ${q(capped * DAYS / 3600 * AWS_VCPU_H, '0.004')}")
+BUDGET_S = D(300)
+print(f"  daily budget 300 CPU-s = {q(BUDGET_S * DAYS / 3600, '0.2')} vCPU-h/user-month = AWS ${q(BUDGET_S * DAYS / 3600 * AWS_VCPU_H, '0.0001')} / Hetzner ${q(BUDGET_S * DAYS / 3600 * HETZ_VCPU_H, '0.0001')}; duty cycle {pct(BUDGET_S / 86400)} % of one core (laptop idle-capable)")
+v1_reobs = D("0.6667")
+print(f"  v1 cap 7 line was {v1_reobs} vCPU-h (query-time scan); budget replaces it: net +{q(BUDGET_S * DAYS / 3600 - v1_reobs, '0.01')} vCPU-h")
+
+print()
+print("=== C.6 Hosted object storage IF idle frames were uploaded per frame (they must not be) ===")
+S3_PUT, S3_GET, S3 = D("0.005") / 1000, D("0.0004") / 1000, D("0.023")
+R2_A = D("4.50") / D("1e6")
+for frames_day, fl in ((idle_8h, "8 h"), (IDLE_PER_DAY, "24 h")):
+    puts = frames_day * DAYS
+    print(f"camera {fl}: {puts:,} PUTs/month = S3 ${q(puts * S3_PUT)} / R2 class A ${q(puts * R2_A)}; storage at the 200 MiB cap on S3 ${q(IDLE_CACHE_CAP / GB * S3)}; GETs for re-observation (1 per frame, cached per pass) ${q(puts * S3_GET)}; total S3 ${q(puts * S3_PUT + IDLE_CACHE_CAP / GB * S3 + puts * S3_GET)} vs batched-objects line $0.0111")
+
+print()
+print("=== C.7 Hosted per-user-month delta on A_b (AWS and Hetzner/B2 stacks, all prices [Q-UNVERIFIED]) ===")
+A_b_v1 = {"AWS": D("0.4972"), "Hetzner": D("0.1640")}
+STACK = {  # object $/GB, block $/GB, snapshot $/GB, vCPU-h $, VM disk $/GB (AWS: gp3; Hetzner: volume EUR 0.044 x 1.08)
+    "AWS": (D("0.023"), D("0.08"), D("0.05"), AWS_VCPU_H, D("0.08")),
+    "Hetzner": (D("0.006"), D("0.044") * D("1.08"), D("0.05"), HETZ_VCPU_H, D("0.044") * D("1.08")),
+}
+v1_packets_gb, v1_idle_gb, V1_DISK = D("1.8"), D("0.15"), D(30)
+def scenario(label, R, p_full, p_red, promo_frames_day, promo_rows_day, reobs_vcpu_h, disk_gb_vm, idle_gb, stack="AWS"):
+    obj, blk, snp, vcpu, dsk = STACK[stack]
+    packets_gb = EP_DAY * (min(D(3), R) * p_full + (R - min(D(3), R)) * p_red) / GB
+    db_gb = (EP_DAY * OBS_PER_EP * (EMB_ROW + OBS_ROW) * R + promo_frames_day * IDLE_TARGET * R + promo_rows_day * (OBS_ROW + EMB_ROW) * R) / GB + idle_gb
+    s3 = packets_gb * obj
+    gp3 = db_gb * blk
+    snap = (packets_gb + db_gb) * snp
+    compute = reobs_vcpu_h * vcpu
+    disk = (disk_gb_vm - V1_DISK) * dsk / 100   # extra VM disk over v1's 30 GB, shared by 100 users (v1 counted 30 GB inside the VM price)
+    v1_lines = v1_packets_gb * obj + v1_idle_gb * blk + (v1_packets_gb + v1_idle_gb) * snp + v1_reobs * vcpu
+    new_lines = s3 + gp3 + snap + compute + disk
+    delta = new_lines - v1_lines
+    A = A_b_v1[stack] + delta
+    m10 = (D(10) - (D("0.029") * 10 + D("0.30")) - A - D("0.75") - 3) / 10
+    print(f"[{stack}] {label}: packets {q(packets_gb, '0.01')} GB (object ${q(s3)}), DB on block {q(db_gb, '0.01')} GB (${q(gp3)}), snapshot ${q(snap)}, re-obs compute ${q(compute)}, extra VM disk ({disk_gb_vm} GB vs 30) share ${q(disk)}; v1 same lines ${q(v1_lines)} -> new ${q(new_lines)}; delta {'+' if delta >= 0 else ''}{q(delta)} -> A_b {q(A)}; P=10 S=3 hosted margin {pct(m10)} %")
+    return delta, A
+results = {}
+for stack in ("AWS", "Hetzner"):
+    results[stack, "exp90"] = scenario("expected: R=90, 8 h camera, typical packets, promotion <= 1/item/h, re-obs budget 2.5 vCPU-h, 80 GB VM disk", D(90), P_TYP, P_TYP_R, PROMO_CAP_FRAMES, ITEMS_HI * 24, D("2.5"), D(80), D("0.21"), stack)
+    results[stack, "exp30"] = scenario("expected: R=30, otherwise the same", D(30), P_TYP, P_TYP_R, PROMO_CAP_FRAMES, ITEMS_HI * 24, D("2.5"), D(80), D("0.21"), stack)
+    results[stack, "cp4only"] = scenario("CP4-only at R=90 (v1 20 MB/day packets kept, to isolate CP4 from the CP2 packet-size correction)", D(90), D(400000), D(400000), PROMO_CAP_FRAMES, ITEMS_HI * 24, D("2.5"), D(80), D("0.21"), stack)
+    results[stack, "worstcap"] = scenario("worst WITH the CP4 caps: high packets, R=90, 24 h camera, promotion capped, budget 2.5 vCPU-h, 120 GB disk", D(90), P_HI, P_HI_R, PROMO_CAP_FRAMES, ITEMS_HI * 24, D("2.5"), D(120), D("0.21"), stack)
+    results[stack, "uncapped"] = scenario("worst WITHOUT caps: high packets, R=90, 24 h, 30 items, every frame promoted + embedded, 200 GB disk", D(90), P_HI, P_HI_R, IDLE_PER_DAY, IDLE_PER_DAY * ITEMS_HI, D("115.2"), D(200), D("0.21"), stack)
+    print(f"[{stack}] retention 30 vs 90 (expected): ${q(results[stack, 'exp90'][0] - results[stack, 'exp30'][0])} per user-month")
+
+print()
+print("=== C.8 Sensitivity rows at the v1.2 A_b (hosted rounded up) ===")
+FEE_RATE, FEE_FIXED, H = D("0.029"), D("0.30"), D("0.75")
+def fee(P):
+    return FEE_RATE * P + FEE_FIXED
+def margin(P, A, S):
+    return (P - fee(P) - A - H - S) / P
+A_new = D("0.72")
+A_worst_tab = D("1.10")
+chat_cheap, chat_haiku, chat_sonnet = D("0.135"), D("1.35"), D("2.70")
+for label, A in (("(b) Hosted v1.2 A=0.72", A_new), ("(b) Hosted worst A=1.10 (unchanged)", A_worst_tab),
+                 (f"(c) + chat cheap A={A_new + chat_cheap}", A_new + chat_cheap), (f"(c) + chat $1/$5 A={A_new + chat_haiku}", A_new + chat_haiku), (f"(c) + chat $2/$10 A={A_new + chat_sonnet}", A_new + chat_sonnet)):
+    cells = [f"{pct(margin(P, A, S))} %" for S in (D(3), D(8)) for P in (D(5), D(10), D(15))]
+    pstar = [(FEE_FIXED + A + H + S) / (1 - FEE_RATE) for S in (D(3), D(8))]
+    p40 = [(FEE_FIXED + A + H + S) / (1 - FEE_RATE - D("0.40")) for S in (D(3), D(8))]
+    print(f"{label}: " + " | ".join(cells) + f" ; P* S3 ${q(pstar[0], '0.01')} S8 ${q(pstar[1], '0.01')}; P@40% S3 ${q(p40[0], '0.01')} S8 ${q(p40[1], '0.01')}")
+    for S in (D(3), D(8)):
+        for P in (D(5), D(10), D(15)):
+            contrib = P - fee(P) - A - S
+            if contrib <= 0:
+                print(f"    P={P} S={S}: contribution {q(contrib)} -> never")
+            else:
+                print(f"    P={P} S={S}: contribution {q(contrib)} -> {(D(150) / contrib).to_integral_value(rounding=ROUND_CEILING)} users (F=150) / {(D(4150) / contrib).to_integral_value(rounding=ROUND_CEILING)} users (F=4150)")
+print(f"summary subtotal at P=10 (no S): hosted v1.2 {q(fee(D(10)) + A_new + H)} ; +S=3 {q(fee(D(10)) + A_new + H + 3)} ; +S=8 {q(fee(D(10)) + A_new + H + 8)}")
+
+print()
+print("=== C.9 Erasure / VACUUM INTO headroom ===")
+for label, hh_db_gb in (("per-household DB, expected (idle at cap + promoted + rows + embeddings)", D("0.21") + (PROMO_CAP_FRAMES * IDLE_TARGET * 90 + (ITEMS_HI * 24 + EP_DAY * OBS_PER_EP) * (OBS_ROW + EMB_ROW) * 90) / GB),
+                        ("per-household DB if packets also live in SQLite (the rig), R=90 typical", D("0.21") + (PROMO_CAP_FRAMES * IDLE_TARGET * 90 + (ITEMS_HI * 24 + EP_DAY * OBS_PER_EP) * (OBS_ROW + EMB_ROW) * 90) / GB + EP_DAY * (3 * P_TYP + 87 * P_TYP_R) / GB)):
+    print(f"{label}: {q(hh_db_gb, '0.01')} GB -> VACUUM INTO needs 2x = {q(2 * hh_db_gb, '0.01')} GB free; x100 households in ONE multi-tenant file = {q(100 * hh_db_gb, '0.1')} GB -> 2x = {q(200 * hh_db_gb, '0.1')} GB")
 ```

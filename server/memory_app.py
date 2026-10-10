@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 import hmac
 import json
 import os
@@ -20,6 +20,28 @@ from starlette.background import BackgroundTask
 ROOT = Path(__file__).resolve().parents[1]
 PHONE = ROOT / "phone"
 MAX_EPISODE_BYTES = 4 * 1024 * 1024
+# CP4 idle keyframes (POST /api/idle): the route enforces this body cap before the
+# store parses a byte, exactly as MAX_EPISODE_BYTES does for episodes. Equal to
+# perception.episode.MAX_IDLE_BYTES (the store raises PacketTooLarge above it too).
+MAX_IDLE_BYTES = 256 * 1024
+# CP4 erasure: the phrase the caregiver types for POST /api/erase-all; equal to
+# perception.episode_store.ERASE_PROFILE_CONFIRM, which the store checks again.
+ERASE_ALL_PHRASE = "ERASE EVERYTHING"
+# CP4 migration (B-10): a real run of POST /api/migrate needs this environment
+# variable to be exactly "1" (read per request, never logged) and is attributed to
+# the operator, not to the PIN session, because it is a one-off reviewed conversion.
+MIGRATION_ENV = "PAM_ALLOW_MIGRATION"
+MIGRATION_ACTOR = "operator"
+# Erase report counts are the store's names except the embeddings count, which the
+# browser sees as appearance_signatures (the disclosure's own wording).
+REPORT_COUNT_NAMES = {"embeddings": "appearance_signatures"}
+# CP4 worker maintenance: after a processing batch the worker runs apply_retention
+# (at most RETENTION_LIMIT packets reduced) then reobserve (at most REOBS_LIMIT
+# item/frame pairs), and in any case at least every MAINTENANCE_INTERVAL seconds of
+# the app's clock (the injected clock in tests, wall time in production).
+MAINTENANCE_INTERVAL = 300.0
+RETENTION_LIMIT = 64
+REOBS_LIMIT = 16
 SESSION_TTL = 8 * 60 * 60
 COOKIE = "pam_session"
 ITEM_ID = re.compile(r"^[A-Za-z0-9_-]{1,160}$")
@@ -122,6 +144,76 @@ class CorrectionRefused(Exception):
     def __init__(self, code):
         super().__init__(code)
         self.code = code if code in CORRECTION_REFUSALS else "invalid_correction"
+
+
+# CP4 refusals: {code: (status, fixed safe sentence)}, rendered as {detail, code}
+# so the browser can branch on the code. consent_required and erased_before are
+# the store's two capture refusals (ValueError "consent required" / "captured
+# before erasure" from ingest_episode and ingest_idle); the browser must drop its
+# IndexedDB mirror of a packet refused with erased_before. The store's own message
+# never reaches a body.
+REFUSALS = {
+    "consent_required": (409, "Capture is paused until the current privacy disclosure has been acknowledged in the Privacy view."),
+    "erased_before": (409, "This capture is from before everything was erased and cannot be stored again."),
+    "confirm_mismatch": (409, "The typed confirmation does not match."),
+    "pin_mismatch": (409, "The PIN does not match."),
+    "migration_disabled": (503, "Migration is not enabled on this server."),
+}
+# The store's fixed refusal messages that become a coded 409 (checked before the
+# generic 400 for any other ValueError).
+STORE_REFUSALS = {"consent required": "consent_required", "captured before erasure": "erased_before"}
+
+
+class Refused(Exception):
+    """A CP4 refusal; rendered as REFUSALS[code] = (status, detail) plus the code."""
+    def __init__(self, code):
+        if code not in REFUSALS:
+            raise ValueError("unknown refusal code")
+        super().__init__(code)
+        self.code = code
+
+
+class StoreGate:
+    """Shared/exclusive gate over store calls. erase_profile swaps the database
+    file under the store, so it runs alone (exclusive); every other store call
+    runs shared and may overlap with the others as before. Writers waiting are
+    served before new readers, so an erase-all cannot starve."""
+    def __init__(self):
+        self._cond = threading.Condition()
+        self._shared = 0
+        self._exclusive = False
+        self._waiting = 0
+
+    @contextmanager
+    def shared(self):
+        with self._cond:
+            while self._exclusive or self._waiting:
+                self._cond.wait()
+            self._shared += 1
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._shared -= 1
+                if not self._shared:
+                    self._cond.notify_all()
+
+    @contextmanager
+    def exclusive(self):
+        with self._cond:
+            self._waiting += 1
+            try:
+                while self._exclusive or self._shared:
+                    self._cond.wait()
+            finally:
+                self._waiting -= 1
+            self._exclusive = True
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._exclusive = False
+                self._cond.notify_all()
 
 
 def _model_name(value, suffixes=None):
@@ -439,6 +531,10 @@ def create_app(database_path=None, profile_id="local", processor=None, clock=Non
     global_attempts = deque()
     active_requests = 0
     processing_stats = {"status": "idle"}
+    # CP4 maintenance state: when the last apply_retention + reobserve pass ran
+    # (app clock seconds) and the counts of the last reobserve pass (health).
+    maintenance = {"at": None, "reobservation": {}}
+    gate = StoreGate()
     # Identity model state (CP3): injected embedders are never replaced; a
     # server-constructed one follows the gate, and a failed construction is
     # remembered (reason only, never a path) until the gate closes again.
@@ -486,9 +582,15 @@ def create_app(database_path=None, profile_id="local", processor=None, clock=Non
             sync_embedder(server_models_now())
         return store
 
-    async def call_store(method, *args, **kwargs):
+    async def call_gated(acquire, method, args, kwargs):
+        """One store call off the event loop under the gate (shared or exclusive),
+        with the store's errors mapped to safe responses: KeyError 404; ValueError
+        413 (PacketTooLarge), 409 (RevisionLimitError), a coded 409 for the store's
+        capture refusals (STORE_REFUSALS: consent_required, erased_before, mapped
+        before the generic case), else 400; anything else 503."""
         def invoke():
-            return getattr(get_store(), method)(*args, **kwargs)
+            with acquire():
+                return getattr(get_store(), method)(*args, **kwargs)
         try:
             return await asyncio.to_thread(invoke)
         except HTTPException:
@@ -501,9 +603,20 @@ def create_app(database_path=None, profile_id="local", processor=None, clock=Non
                 raise HTTPException(413, "Request body is too large.") from None
             if isinstance(exc, RevisionLimitError):
                 raise HTTPException(409, "Episode revision limit reached.") from None
+            if str(exc) in STORE_REFUSALS:
+                raise Refused(STORE_REFUSALS[str(exc)]) from None
             raise HTTPException(400, "Invalid memory request.") from None
         except Exception:
             raise HTTPException(503, "Local memory is temporarily unavailable.") from None
+
+    async def call_store(method, *args, **kwargs):
+        return await call_gated(gate.shared, method, args, kwargs)
+
+    async def call_store_exclusive(method, *args, **kwargs):
+        """The same call alone: no other store call runs while it does (erase_profile
+        swaps the database file). The caller also holds processing_lock so the
+        worker's batch cannot start around it."""
+        return await call_gated(gate.exclusive, method, args, kwargs)
 
     async def call_correction(method, *args, **kwargs):
         """A CP3 correction (link / unlink / assign) with the actor fixed to the
@@ -532,25 +645,55 @@ def create_app(database_path=None, profile_id="local", processor=None, clock=Non
         except Exception:
             raise HTTPException(503, "Local memory is temporarily unavailable.") from None
 
-    async def process_once():
+    def numeric_counts(value):
+        """A counts dict reduced to its finite numeric entries (no ids, no text)."""
+        if not isinstance(value, dict):
+            return {}
+        return {key: item for key, item in value.items() if isinstance(key, str) and not isinstance(item, bool)
+                and (type(item) is int or (type(item) is float and item == item and abs(item) != float("inf")))}
+
+    async def maintain_once():
+        """CP4 worker maintenance, inside processing_lock: apply_retention (which
+        expires idle frames itself) then reobserve, both bounded. A failure is
+        swallowed like a processing failure (durable rows stay; nothing is logged)
+        and the pass still counts as run, so a broken store is retried on the
+        interval rather than every second."""
+        try:
+            await call_store("apply_retention", limit=RETENTION_LIMIT)
+            maintenance["reobservation"] = numeric_counts(await call_store("reobserve", limit=REOBS_LIMIT))
+        except Exception:
+            pass
+        maintenance["at"] = now()
+
+    async def process_once(maintain=False):
         nonlocal processing_stats
         # A single in-flight batch per app, not one unbounded task per episode.
         if not db_path or processing_lock.locked():
             return
         async with processing_lock:
+            worked = False
             try:
                 result = await call_store("process_pending", processor=processor, limit=8)
                 processing_stats = {"status": "available", **{key: result[key] for key in
                     ("processed", "failed", "context_only", "observations", "pending", "context_only_total")
                     if type(result.get(key)) is int and result[key] >= 0}}
+                worked = any(processing_stats.get(key, 0) > 0 for key in ("processed", "failed"))
             except Exception:
                 # Durable jobs remain recoverable; never expose evidence in logs.
                 processing_stats = {"status": "unavailable"}
+            # Maintenance follows a batch that did work or a wake (a new packet or a
+            # retained idle frame), and runs anyway once MAINTENANCE_INTERVAL of the
+            # app's clock has passed since the last pass, so idle frames expire and
+            # placements are re-observed with no new packets at all.
+            last = maintenance["at"]
+            if maintain or worked or last is None or now() - last >= MAINTENANCE_INTERVAL:
+                await maintain_once()
 
     async def worker():
         while True:
+            woken = wake.is_set()
             wake.clear()
-            await process_once()
+            await process_once(maintain=woken)
             try:
                 await asyncio.wait_for(wake.wait(), timeout=1.0)
             except asyncio.TimeoutError:
@@ -575,6 +718,11 @@ def create_app(database_path=None, profile_id="local", processor=None, clock=Non
     async def correction_refused(request, exc):
         return JSONResponse({"detail": CORRECTION_REFUSALS[exc.code], "code": exc.code}, status_code=409)
 
+    @app.exception_handler(Refused)
+    async def refused(request, exc):
+        status, detail = REFUSALS[exc.code]
+        return JSONResponse({"detail": detail, "code": exc.code}, status_code=status)
+
     def authenticated(request):
         t = now()
         for token, expires in list(sessions.items()):
@@ -596,7 +744,8 @@ def create_app(database_path=None, profile_id="local", processor=None, clock=Non
         public = path in {"/api/auth/session", "/api/auth/login"}
         # Unknown legacy endpoints remain retired, even if their original verbs changed.
         known = path in {"/api/auth/session", "/api/auth/login", "/api/auth/logout",
-                         "/api/health", "/api/episodes", "/api/items", "/api/chat"} or path.startswith("/api/items/")
+                         "/api/health", "/api/episodes", "/api/items", "/api/chat",
+                         "/api/idle", "/api/consent", "/api/retention", "/api/erase-all", "/api/migrate"} or path.startswith("/api/items/")
         if is_api and not known:
             response = JSONResponse({"error": "Route retired."}, status_code=410)
         elif is_api and not public and not authenticated(request):
@@ -747,16 +896,86 @@ def create_app(database_path=None, profile_id="local", processor=None, clock=Non
             observation = provenance.get("observation_id")
             result["provenance"] = {"observation_id": observation if isinstance(observation, str) and OBSERVATION_ID.fullmatch(observation) else None,
                                     "identity_status": provenance.get("identity_status") if isinstance(provenance.get("identity_status"), str) else None}
+        # CP4 fields. inference (location_status "inferred" only): the container
+        # item this one is thought to be with, {container (item id),
+        # container_name (its name or null), since_ms}; null otherwise.
+        # stale_since_ms: when a stale location became stale (an age cut-off or
+        # the negative re-observation; stale_reason then reads
+        # "negative_reobservation"); null otherwise. evidence_expired: the
+        # placement's packet bytes were expired by retention, so image_url will
+        # 404 and reference_image is null ("evidence image expired"). The store's
+        # internal last_event_ms never crosses (the whitelist above omits it).
+        result["inference"] = inference(item.get("inference"))
+        stale_since = item.get("stale_since_ms")
+        result["stale_since_ms"] = stale_since if type(stale_since) is int and stale_since >= 0 else None
+        result["evidence_expired"] = item.get("evidence_expired") is True
+        return result
+
+    def inference(value):
+        if not isinstance(value, dict) or not isinstance(value.get("container"), str) or not ITEM_ID.fullmatch(value["container"]):
+            return None
+        since = value.get("since_ms")
+        name = value.get("container_name")
+        return {"container": value["container"],
+                "container_name": name if isinstance(name, str) and 0 < len(name) <= 120 else None,
+                "since_ms": since if type(since) is int and since >= 0 else None}
+
+    def present_report(report, **extra):
+        """An erase report (erase_item / erase_profile): counts only, never ids or
+        text, and never a forensic claim: erased, already, affected_items, counts
+        {name: int}, scope "logical", forensic_erasure false, plus the caller's
+        fixed extras (item_id; swap for erase-all)."""
+        counts = report.get("counts") if isinstance(report, dict) else None
+        # The store's "embeddings" count is renamed: no response carries a key that
+        # reads as an identity internal (CP3 ruling 7), even for a count.
+        counts = {REPORT_COUNT_NAMES.get(key, key): value for key, value in counts.items()
+                  if isinstance(key, str) and type(value) is int and value >= 0} if isinstance(counts, dict) else {}
+        affected = report.get("affected_items") if isinstance(report, dict) else None
+        return {"erased": isinstance(report, dict) and report.get("erased") is True,
+                "already": isinstance(report, dict) and report.get("already") is True,
+                "affected_items": affected if type(affected) is int and affected >= 0 else counts.get("items", 0),
+                "counts": counts, "scope": "logical", "forensic_erasure": False, **extra}
+
+    def present_retention(row):
+        """The retention row: the build's consent_version, the three windows,
+        updated_ms, acknowledged_version and erased_at_ms (null until set)."""
+        return {key: row.get(key) for key in ("consent_version", "episodes_days", "idle_hours", "landmarks_hours",
+                                              "updated_ms", "acknowledged_version", "erased_at_ms")}
+
+    def present_consent(state):
+        return {"required_version": state.get("required_version"), "acknowledged_version": state.get("acknowledged_version"),
+                "ok": state.get("ok") is True}
+
+    def present_migration(report):
+        """The migrate_v1 report: status, dry_run, from_version, counts (ints),
+        samples (at most 5 of the store's sample rows, fixed keys), mutates_data
+        and the migrations row {migration_id, from_version, counts, at_ms, actor}.
+        Nothing here is a path: legacy media are counted by the store, never named."""
+        result = {"status": report.get("status"), "dry_run": report.get("dry_run") is True,
+                  "from_version": report.get("from_version"), "counts": numeric_counts(report.get("counts")),
+                  "mutates_data": report.get("mutates_data") is True}
+        samples = report.get("samples")
+        if isinstance(samples, list):
+            result["samples"] = [{key: sample.get(key) for key in ("item_id", "label", "outcome", "location_text", "observed_at_ms", "identity_state", "legacy_event_id")}
+                                 for sample in samples[:5] if isinstance(sample, dict)]
+        migration = report.get("migration")
+        if isinstance(migration, dict):
+            result["migration"] = {"migration_id": migration.get("migration_id"), "from_version": migration.get("from_version"),
+                                   "counts": numeric_counts(migration.get("counts")), "at_ms": migration.get("at_ms"), "actor": migration.get("actor")}
         return result
 
     def present_evidence(ident, row):
         """One evidence row of GET /api/items/{id}/evidence: the plan's fields plus
         candidates (item ids) and embedded (bool); image_url names the
-        observation-image route. No vectors or scores."""
+        observation-image route. No vectors or scores. CP4: source names where
+        the row came from ("local_evidence" a processed packet, "reobservation" a
+        promoted idle frame, "legacy_v1" the migrated ledger)."""
         observation = row.get("observation_id")
         valid = isinstance(observation, str) and OBSERVATION_ID.fullmatch(observation) is not None
         candidates = row.get("candidates")
+        source = row.get("source")
         return {"observation_id": observation if valid else None, "item_id": ident,
+                "source": source if isinstance(source, str) and 0 < len(source) <= 40 and source.isascii() else "local_evidence",
                 "observed_at_ms": row.get("observed_at_ms"), "frame_id": row.get("frame_id"),
                 "reference_image": reference_image(row.get("reference_image")),
                 "identity_status": row.get("identity_status"),
@@ -799,8 +1018,11 @@ def create_app(database_path=None, profile_id="local", processor=None, clock=Non
     async def session(request: Request):
         return {"authenticated": authenticated(request), "configured": bool(pin)}
 
-    @app.post("/api/auth/login")
-    async def login(request: Request):
+    def pin_attempt(request):
+        """Charge one PIN comparison to the sign-in rate limit (5 per client and
+        60 overall per minute; 429 beyond) and return the app time. Login and the
+        CP4 erase-all PIN check share these counters, so neither is a cheaper way
+        to guess the PIN than the other."""
         t = now()
         while global_attempts and global_attempts[0] <= t - 60:
             global_attempts.popleft()
@@ -814,6 +1036,11 @@ def create_app(database_path=None, profile_id="local", processor=None, clock=Non
             raise HTTPException(429, "Too many sign-in attempts. Try again later.")
         global_attempts.append(t)
         attempts.setdefault(client, deque()).append(t)
+        return t
+
+    @app.post("/api/auth/login")
+    async def login(request: Request):
+        t = pin_attempt(request)
         data = await json_body(request, {"pin"}, maximum=1024)
         supplied = data.get("pin")
         if not pin:
@@ -850,10 +1077,160 @@ def create_app(database_path=None, profile_id="local", processor=None, clock=Non
         /api/items returns."""
         models = await asyncio.to_thread(models_synced)
         capabilities = await call_store("capabilities") if db_path else []
+        # CP4: "retention" is the store's live counts (retention_counts), "consent"
+        # its consent state without the disclosure text, "reobservation" the counts
+        # of the worker's last reobserve pass ({} before the first). "processing"
+        # keeps its CP1 shape.
+        if db_path:
+            retention = numeric_counts(await call_store("retention_counts"))
+            consent = present_consent(await call_store("consent_state"))
+        else:
+            retention, consent = {}, {"required_version": consent_constants()[0], "acknowledged_version": None, "ok": False}
         return {"status": "ok" if db_path else "setup_required",
                 "capabilities": policy(capabilities, models), "models": models,
                 "processing": dict(processing_stats),
+                "retention": retention, "consent": consent,
+                "reobservation": dict(maintenance["reobservation"]),
                 "chat": {"configured": False, "enabled": False}}
+
+    def consent_constants():
+        """(CONSENT_VERSION, DISCLOSURE_TEXT) from perception.consent, read when a
+        route needs them so importing this module stays free of perception."""
+        from perception.consent import CONSENT_VERSION, DISCLOSURE_TEXT
+        return CONSENT_VERSION, DISCLOSURE_TEXT
+
+    @app.post("/api/idle")
+    async def idle(request: Request):
+        """CP4 idle keyframe (the browser's 30 s still while nothing happens):
+        protected and origin-checked by the middleware; the body cap MAX_IDLE_BYTES
+        is enforced here (413) before the store parses it (400 for anything
+        malformed, 409 consent_required / erased_before). 200 with the store's
+        ack: {frame_id, retained: true, expires_at_ms, evicted} or, over a cap,
+        {frame_id, retained: false, reason: "idle_cap" | "idle_cache_full"}. The
+        ack never echoes the frame. A retained frame wakes the worker so it is
+        re-observed promptly."""
+        raw = await body_bytes(request, MAX_IDLE_BYTES)
+        ack = await call_store("ingest_idle", raw)
+        retained = ack.get("retained") is True
+        result = {"frame_id": ack.get("frame_id") if isinstance(ack.get("frame_id"), str) else None, "retained": retained}
+        if retained:
+            expires = ack.get("expires_at_ms")
+            evicted = ack.get("evicted")
+            result["expires_at_ms"] = expires if type(expires) is int else None
+            result["evicted"] = evicted if type(evicted) is int and evicted >= 0 else 0
+            wake.set()
+        else:
+            reason = ack.get("reason")
+            result["reason"] = reason if reason in ("idle_cap", "idle_cache_full") else "idle_cap"
+        return result
+
+    @app.get("/api/consent")
+    async def consent():
+        """{required_version, acknowledged_version, ok, disclosure_text}: the
+        build's consent version, what this profile acknowledged, whether capture
+        is allowed, and the disclosure the Privacy view shows verbatim. Session
+        required like every other route (the text itself is not personal)."""
+        state = present_consent(await call_store("consent_state"))
+        return {**state, "disclosure_text": consent_constants()[1]}
+
+    @app.post("/api/consent")
+    async def acknowledge(request: Request):
+        """{"acknowledge": "<version>"} records that the disclosure for exactly the
+        required version was shown and acknowledged (audited, actor literal) ->
+        {required_version, acknowledged_version, ok}. Any other version is 400:
+        a bump of the build constant makes the browser re-acknowledge."""
+        data = await json_body(request, {"acknowledge"}, maximum=1024)
+        version = data.get("acknowledge")
+        if not isinstance(version, str) or not 1 <= len(version) <= 80 or not version.isascii():
+            raise HTTPException(400, "Invalid request fields.")
+        return present_consent(await call_store("acknowledge_consent", version, CORRECTION_ACTOR))
+
+    @app.get("/api/retention")
+    async def retention_get():
+        """{retention: the row (consent_version, episodes_days, idle_hours,
+        landmarks_hours, updated_ms, acknowledged_version, erased_at_ms), counts:
+        the live counts (idle_cached, idle_promoted, revisions_expired,
+        landmarks_reduced, revisions_erased)}."""
+        row = present_retention(await call_store("get_retention"))
+        counts = numeric_counts(await call_store("retention_counts"))
+        return {"retention": row, "counts": counts}
+
+    @app.put("/api/retention")
+    async def retention_put(request: Request):
+        """{episodes_days? 7..365, idle_hours? 1..72, landmarks_hours? 1..168}
+        (integers, at least one) -> the row (audited with the actor literal).
+        400 for an empty or invalid update, and for any other key: consent_version
+        is a build constant, never a setting."""
+        ranges = {"episodes_days": (7, 365), "idle_hours": (1, 72), "landmarks_hours": (1, 168)}
+        data = await json_body(request, set(ranges), maximum=1024)
+        if not data:
+            raise HTTPException(400, "Invalid request fields.")
+        for name, (low, high) in ranges.items():
+            if name in data:
+                value = data[name]
+                if isinstance(value, bool) or type(value) is not int or not low <= value <= high:
+                    raise HTTPException(400, "Invalid retention window.")
+        return present_retention(await call_store("set_retention", actor=CORRECTION_ACTOR, **data))
+
+    @app.post("/api/items/{ident}/erase")
+    async def erase(ident: str, request: Request):
+        """Erase this item and everything seen with it (B-07): {"confirm":
+        "<item_id>"} -> the report (counts only). 400 without a string confirm,
+        409 confirm_mismatch when it is not this item's id, 404 for an unknown
+        item. Audited by the store with the actor literal; logical erasure, no
+        forensic claim."""
+        target = item_id(ident)
+        data = await json_body(request, {"confirm"}, maximum=1024)
+        confirm = data.get("confirm")
+        if not isinstance(confirm, str):
+            raise HTTPException(400, "Invalid request fields.")
+        if not hmac.compare_digest(confirm.encode(), target.encode()):
+            raise Refused("confirm_mismatch")
+        return present_report(await call_store("erase_item", target, CORRECTION_ACTOR), item_id=target)
+
+    @app.post("/api/erase-all")
+    async def erase_all(request: Request):
+        """Erase everything in the profile (B-07, P-107): {"confirm": "ERASE
+        EVERYTHING", "pin": "<pin>"} -> the report. In order: 400 unless confirm
+        is a string, 409 confirm_mismatch for any phrase but the exact one, 400
+        unless pin is a string, then the PIN is compared in constant time under
+        the sign-in rate limit (429) and 409 pin_mismatch on a mismatch. The store
+        runs alone (processing_lock and the exclusive gate) because it swaps the
+        database file; sessions live in memory and survive. After a success the
+        browser must clear its IndexedDB mirror: anything captured before this
+        instant is refused with erased_before from now on."""
+        data = await json_body(request, {"confirm", "pin"}, maximum=1024)
+        confirm, supplied = data.get("confirm"), data.get("pin")
+        if not isinstance(confirm, str):
+            raise HTTPException(400, "Invalid request fields.")
+        if not hmac.compare_digest(confirm.encode(), ERASE_ALL_PHRASE.encode()):
+            raise Refused("confirm_mismatch")
+        if not isinstance(supplied, str):
+            raise HTTPException(400, "Invalid request fields.")
+        pin_attempt(request)
+        if not pin:
+            raise HTTPException(503, "Local sign-in setup is required.")
+        if not hmac.compare_digest(supplied.encode(), pin.encode()):
+            raise Refused("pin_mismatch")
+        async with processing_lock:
+            report = await call_store_exclusive("erase_profile", actor=CORRECTION_ACTOR, confirm=ERASE_ALL_PHRASE)
+        swap = report.get("swap") if isinstance(report, dict) else None
+        return present_report(report, swap=swap if swap in ("replaced", "in_place", "none") else None)
+
+    @app.post("/api/migrate")
+    async def migrate(request: Request):
+        """The v1 ledger conversion (B-10): {"dry_run": true|false}, default true;
+        anything but a JSON boolean is 400. A dry run reports counts and samples
+        without writing. A real run additionally requires the environment variable
+        PAM_ALLOW_MIGRATION to be exactly "1" (503 migration_disabled otherwise),
+        is attributed to "operator", and is idempotent (status already_migrated)."""
+        data = await json_body(request, {"dry_run"}, maximum=1024)
+        dry_run = data.get("dry_run", True)
+        if type(dry_run) is not bool:
+            raise HTTPException(400, "Invalid request fields.")
+        if not dry_run and os.environ.get(MIGRATION_ENV) != "1":
+            raise Refused("migration_disabled")
+        return present_migration(await call_store("migrate_v1", dry_run=dry_run, actor=MIGRATION_ACTOR))
 
     @app.post("/api/episodes")
     async def episodes(request: Request):

@@ -324,16 +324,228 @@ DINOv2 at the pinned commit, download the checkpoint and record its hash, run th
 export, run `scripts/fetch_models.py`, then register and approve a real calibration
 before enabling the capability. Until then identity stays provisional by design.
 
-**CP4 retention.** Idle keyframe every 30 s in automatic mode to `POST /api/idle`; 24 h
-idle cache; landmark reduction (decided at CP2 with Oversight): landmarks stay processing
-inputs in the packet, and after `process_pending` completes the stored revision's landmark
-samples are reduced to per-hand bbox plus the busy scalars, with raw landmarks retained at
-most 72 h (spec rule; biometric-law exposure); rule-13 re-observation (negative re-observation sets `stale`, positive
-promotes the idle frame into evidence); containment as `inferred`; retention windows
-and `consent_version`; SQL erasure that redacts personal text in every revision, derived
-view and index with replay that does not resurrect (B-07, P-107); WAL/journal privacy
-test (B-09); the real v1 migration with dry-run (B-10). Oversight: data-class map for
-G-PRIV. Finance: storage growth per user-day measured from the synthetic runs.
+### CP4 in detail: re-observation, retention and erasure (architect, 2026-10-09)
+
+**Why this is next.** After CP3 the system knows what it saw and when, but only when a
+hand moved something. It cannot notice that an item is no longer where it was placed,
+it keeps every keyframe forever, it still stores raw hand landmarks, and its erasure is
+a logical tombstone over rows that still contain personal text. CP4 closes Part 1 rule
+13 (re-observation), the retention tiers, and gates G-PRIV: blockers B-07, B-08, B-09,
+B-10, plus the CP3 deferrals (hand hull, crop geometry in the embedder tag).
+
+**Interfaces (fixed by the architect; builders implement, tester tests).**
+
+*Idle keyframes* (C → B → A). In automatic mode, with the camera running, the
+controller idle, motion off and no hand present for at least 2 s, the browser captures
+one capture-resolution JPEG every `IDLE_KEYFRAME_MS = 30000` and posts it to
+`POST /api/idle` as `{"schema_version": 1, "device_id", "session_id", "frame_id",
+"t_ms", "clock_anchor": {mono_ms, wall_ms}, "capture": {width, height}, "jpeg_b64",
+"motion_energy": float}`; body cap `MAX_IDLE_BYTES = 256 KiB`, target ≤ 64 KiB (JPEG
+quality 0.5). No IndexedDB mirror: a failed post increments the browser's
+`idle_dropped` counter and is coverage, not evidence. Server: protected, origin-checked,
+413/400 as for episodes; store `ingest_idle(raw) -> {"frame_id", "retained": true,
+"expires_at_ms"}`. Store table `idle_frames(profile_id, device_id, frame_id, t_wall_ms,
+received_ms, width, height, jpeg BLOB, motion_energy, expires_at_ms, promoted INTEGER)`;
+`expires_at_ms = received_ms + IDLE_TTL_MS (24 h)`; `expire_idle(now_ms)` hard-deletes
+expired unpromoted rows (a rolling cache, not evidence); caps `IDLE_MAX_PER_DAY = 2880`,
+`IDLE_CACHE_BYTES = 200 MiB` (oldest unpromoted evicted first). Idle frames are never
+listed or served to the browser except when promoted (then as ordinary observation
+images).
+
+*Re-observation (rule 13; A)*. `reobserve(now_ms, *, limit=16) -> counts` runs in the
+worker after `process_pending`: for every item whose location is `placed` or
+`inferred` with a reference image, and every unprocessed idle frame from the same
+device newer than that placement: register the idle frame to the item's reference
+keyframe with the localizer's registration (same LK + partial-affine, same bounds);
+registration fails → no decision (`result: "unknown"`); succeeds → `region_diff` =
+mean absolute difference / 255 over the item's bbox after a 3×3 box blur (reuse
+`perception/motion.py`): `≤ REOBS_SAME_MAX = 0.06` → `present`, `≥ REOBS_GONE_MIN =
+0.18` → `gone`, between → `unknown`. With an embedder present, `present` additionally
+requires the registered region's embedding to match the item's bank under the active
+calibration (set contains the item); without one it is diff-only and the observation's
+identity stays `provisional`. Table `reobservations(profile_id, item_id, frame_id,
+t_wall_ms, result, region_diff, registered INTEGER, embedded INTEGER)`. Effects:
+`present` → the idle frame is promoted (`promoted=1`, never expires) and a new
+observation row is written with `outcome: "sighted"`, `source: "reobservation"`,
+`location_text` and `location_status` inherited from the placement, `identity_state`
+= the item's state if embedder-confirmed else `provisional`; the projection's
+`observed_at_ms` advances (ageing resets without a hand event). `gone` → the item's
+projection gets `location_status: "stale"`, `stale_reason: "negative_reobservation"`,
+`stale_since_ms`; a later `present` reverses it. `unknown` → nothing. Thresholds are
+initial values pending P-105; the tester pins the arithmetic with synthetic frames.
+
+*Containment as `inferred` (A)*. When a placed item A's rest bbox lies at least 80 %
+inside the rest bbox of another item B placed in the same frame, record
+`containment(profile_id, inner_item, outer_item, since_ms, frame_id)` (most recent
+wins; a pickup of A clears it). When B's location later changes (a new placement of
+B, or B becomes stale), A's projection becomes `location_status: "inferred"`,
+`location_text` = B's current location text, `inference: {"container": B,
+"since_ms"}`; A's own last-observed location is kept in history. The answer shape for
+an inferred location is `hedged` with text "I think {A} is with {B}, which I last saw
+at {location}." A negative re-observation of A at its old place does not contradict an
+inferred location (A is expected to be gone).
+
+*Retention and consent (A, B)*. Table `retention(profile_id PRIMARY KEY,
+consent_version TEXT, episodes_days INTEGER, idle_hours INTEGER, landmarks_hours
+INTEGER, updated_ms)`; defaults 30, 24, 72 (changed from 90 on Finance's cost analysis; `consent_version` is the build constant `perception.consent.CONSENT_VERSION = "rig-2026-10"`);
+`set_retention(**fields, actor)` audited; `apply_retention(now_ms) -> counts` runs in
+the worker: (a) revisions older than `episodes_days` have their packet bytes replaced
+by NULL and `redacted_reason = "retention"` (metadata, digests, observations and
+embeddings stay; `reference_image`/`image_url` become null and the item shows
+"evidence image expired"); (b) idle expiry as above; (c) *landmark reduction*: packets
+older than `landmarks_hours` are rewritten with `landmarks: []` and a new server-only
+optional field `landmark_summary: [{frame_id, t_ms, hands: [{hand_bbox, busy, basis}]}]`
+(bounded as `landmarks` is); `parse_packet` accepts it, `ingest_episode` rejects a
+client packet that carries it (400); `episode_revisions.reduced_ms` records when; the
+stored transport/semantic digest columns are unchanged (duplicate detection uses the
+columns, never re-hashing bytes). Reduction must leave the packet parseable and
+`item_image` working.
+
+*Erasure (B-07, B-08, P-107; A)*. `erase_item(item_id, actor) -> report` replaces the
+CP1 `redact_item`: within one transaction it (1) tombstones the item and every item
+reached by the CP1 co-visibility closure; (2) deletes `embeddings`, `reobservations`,
+`containment` and promoted idle frames of those items and blanks their `corrections` rows (`erased=1`); (3)
+rewrites `local_observations.record` to a minimal non-identifying stub `{"erased": true,
+"observed_at_ms"}` (no label, bbox, location text, candidates or match); (4) blanks
+`item_names.name`, `local_audit.detail` and `corrections.payload` text for those items
+(row kept with `erased=1`); (5) NULLs the packet bytes of the affected revisions and
+marks `redacted_reason = "erasure"`; (6) writes one audit row `erased` carrying only
+counts. `erase_profile(actor, confirm)` does the same for everything in the profile and
+also deletes unpromoted idle frames, calibrations stay (they are not personal), then
+runs `VACUUM INTO` a fresh file and swaps it in under the private-file rules (documented
+as reducing, not guaranteeing, residue — no forensic claim). `rebuild_all`, `as_of`
+views, `/history`, `/evidence` and chat must never resurrect erased content; a resent
+packet for an erased episode is refused by the existing tombstone. The old
+`redact_item` name is kept as an alias. No SQL roles, no triggers that pretend to be
+permissions (B-08): erasure is an explicit audited method behind the same actor rule.
+
+*WAL and journal privacy (B-09; A)*. The store already opens with
+`journal_mode=PERSIST`. Before the first `connect`, the database file and the
+`-journal` sidecar are created through `private_append_fd` so SQLite inherits private
+modes; after any write the store asserts (debug method `sidecar_report()`) that every
+sidecar present (`-journal`, `-wal`, `-shm`) is owner-only on POSIX (mode 0600) and
+carries the protected DACL on Windows, and the tester checks both paths it can.
+
+*v1 migration (B-10; A)*. `migrate_v1(*, dry_run=True, actor) -> report`: reads the
+legacy v1 tables (`objects`, `candidates`, `observations`, `decisions`, `api_calls`) and
+converts each confirmed legacy observation into a new `local_observations` row with
+`source: "legacy_v1"`, `identity_state: "provisional"` (never trusted), `outcome` from
+the legacy event type, `location_text` from the legacy scene surface and room fields only (never the VLM description, geolocation, file paths or actor), `observed_at_ms`
+from its timestamp, and no image (legacy frames are paths on disk, not stored bytes:
+`reference_image` null); legacy budgets, unknown spend and leases are untouched;
+`dry_run` returns counts and up to 5 sample rows without writing; a real run is one
+transaction with a `migrations` row `{migration_id, from_version, counts, at_ms,
+actor}` and is idempotent (a second run reports `already_migrated`). Any exception
+rolls back everything. The tester builds the v1 fixture with the v1 `ObjectStore` API
+(as `test_memory_lifecycle.py` does).
+
+*Hand hull and crop geometry (CP3 deferrals; A)*. `perception/hand_hull.py:
+hand_hull_mask(hands, width, height) -> np.ndarray[bool]` (convex hull of the 21
+image-normalised points per hand, dilated by 3 % of the frame width); in
+`process_pending` the identity crop's mask excludes the hull of any hand in the
+landmark sample nearest in time (≤ 150 ms) to the keyframe; crop padding `CROP_PAD =
+0.10` of the bbox on each side (clamped). Both rules are part of the embedder recipe:
+`RECIPE = "r2"`, so any existing calibration for `r1` is not active for `r2` (the
+server reports it).
+
+*Server (B)*: `POST /api/idle`; `GET /api/retention` → the retention row plus live
+counts (`idle_cached`, `idle_promoted`, `revisions_expired`, `landmarks_reduced`);
+`PUT /api/retention {episodes_days (7..365), idle_hours (1..72), landmarks_hours (1..168)}`
+→ the row (audited, actor literal; `consent_version` is a build constant, not a field); `POST /api/items/{id}/erase
+{"confirm": "<item_id>"}` → report (409 on mismatch); `POST /api/erase-all {"confirm":
+"ERASE EVERYTHING"}` → report; `POST /api/migrate {"dry_run": true|false}` — a real run
+also requires env `PAM_ALLOW_MIGRATION=1` (503 otherwise); the worker loop calls
+`expire_idle`, `apply_retention` and `reobserve` after each processing batch and at
+least every 5 minutes; health adds `retention` counts; items carry `inference` and
+`stale_since_ms`; `present_item` whitelists them. `redact_item` route, if any, maps to
+`erase_item`.
+
+*Browser (C)*: idle keyframe capture and post with the conditions above and the
+counter in the camera summary; a "Privacy" view: retention settings (read, edit with
+confirmation), the idle-cache and expiry counts, "Erase this item" in the item view and
+"Erase everything" (typed confirmation), with the server's reports; rendering of
+`inferred` ("probably with {B}, last seen at {location}"), `negative_reobservation`
+("it was no longer there when Pam looked at {time}"), and "evidence image expired".
+
+*Tester*: `server/test_cp4_idle.py` (caps, expiry, eviction, promotion, re-observation
+present / gone / unknown on synthetic registered frames, ageing reset, stale reason,
+embedder-confirmed vs diff-only identity), `server/test_cp4_containment.py`,
+`server/test_cp4_retention.py` (windows, landmark reduction keeps packets parseable and
+images servable, digests stable, `landmark_summary` rejected from clients),
+`server/test_cp4_erasure.py` (P-107: synthetic PII markers planted in every text field
+and every table vanish from every table, from `rebuild_all`, from `as_of` views, from
+`/history`, `/evidence`, `/api/items`, chat, and from a byte scan of the main database
+file after `erase_profile`; sidecar modes, B-09), `server/test_cp4_migration.py`
+(v1 fixture → dry-run counts → real run → provisional-only rows, idempotence,
+rollback on an injected failure, budgets untouched), `server/test_cp4_api.py` (routes,
+auth, confirmations, env gate), `phone/test/test_ui_smoke.py` extended (idle post with
+the fake camera, Privacy view, erase flow, inferred and negative-reobservation
+rendering). No skipped-green tests.
+
+*Oversight*: the G-PRIV data-class map (every table and column: personal or not,
+retention window, which operation removes it, what survives as audit), consent-version
+semantics and what a version bump must trigger, the biometric reduction (landmarks →
+bbox + scalars at 72 h) against the spec rule, confirmation that erasure covers derived
+data and that no claim of forensic erasure appears in code or UI; `docs/OVERSIGHT_CP4.md`.
+
+*Finance*: storage per user-day measured from the tester's synthetic runs (durable
+revisions, embeddings, idle cache) against the FINANCE caps; retention 30 vs 90 days;
+update `docs/FINANCE.md` §5 if a cap moves.
+
+**CP4 acceptance.** `server/test_cp4_*.py` and the extended smoke test pass; all earlier
+suites still pass; a placed item becomes `stale/negative_reobservation` from an idle
+frame alone and fresh again from a positive one; erased content is absent from every
+read path and from the database bytes after `erase_profile`; a v1 fixture migrates to
+provisional-only evidence and never to trusted; packets older than 72 h hold no raw
+landmarks; no new runtime dependency; no request leaves the origin.
+
+**Not in CP4.** Room names, OCR, the notices page (CP5), real-device thresholds.
+
+### CP4 result (2026-10-10)
+
+**Passed: 341/341 methods, 0 skips**, reproduced by the coordinator in a clean process: eight
+new `server/test_cp4_*.py` suites (api 10, containment 9, erasure 7, fixtures 9, hull 4, idle 20,
+migration 6, retention 10), `phone/test/test_ui_smoke.py` grown to 19 (Privacy view, consent
+gate, erase flows, idle keyframe posting under a fake clock), every earlier suite unchanged.
+Oversight's pass 2 (`docs/OVERSIGHT_CP4.md`) closes **G-PRIV from the software side**: every
+reader filters erased rows; `secure_delete=ON`; private `VACUUM INTO` swap; no forensic claim in
+any UI copy; the landmark summary schema is closed; migration copies no prose, geolocation or
+paths; the disclosure text covers each data class. What remains for G-PRIV is human (below).
+
+Decisions made during CP4 (binding; each has a test):
+
+1. **Consent gate.** `perception/consent.py` holds `CONSENT_VERSION` and `DISCLOSURE_TEXT`; the
+   profile acknowledges a version (`acknowledged_version`, audited); `/api/episodes` and
+   `/api/idle` refuse with 409 `consent_required` until it matches; rows are stamped with the
+   version at ingest; a version bump stops capture until re-acknowledged and never lengthens
+   retention or erases by itself.
+2. **Retention default** `episodes_days = 30` (Finance: 30 vs 90 is $0.18/user-month hosted and
+   shorter is better for privacy); idle 24 h; landmarks 72 h; ranges 7..365 / 1..72 / 1..168.
+3. **Rule 13 is continuous but bounded:** hourly refresh per item, an unchanged-frame gate that
+   compares the previous decision's bbox window (a whole-frame gate hid removals of small
+   objects — the tester caught it), and a per-day compute budget `REOBS_CPU_BUDGET_S = 300`
+   with `reobs_deferred` (embeds skipped, decisions diff-only). `reobservations` rows expire with
+   `episodes_days`; promoted idle stills follow `episodes_days` and are labelled "seen while idle".
+4. **Erasure** stubs observations (`erased=1`, filtered by every reader), blanks names, audit
+   detail and corrections, NULLs packet bytes, deletes embeddings/reobservations/containment and
+   `own-footage` calibrations, and (profile) swaps in a `VACUUM INTO` copy created privately;
+   `secure_delete=ON` on every connection; erase-all requires the typed phrase and the PIN again;
+   captures dated before an erasure are refused (`erased_before`, 5-minute phone-clock tolerance).
+5. **Superseded revisions** lose their packet bytes after 72 h (`redacted_reason 'superseded'`);
+   the item image is served from the newest accepted revision; digest columns never change.
+6. **Hand hull:** identity crops exclude the dilated hull of any hand within 150 ms; a crop whose
+   surviving mask is under 25 % is not embedded at all (`embedding_skipped_hand`, reason
+   "hand covers the region"); landmark reduction skips revisions still waiting to be processed.
+   Recipe tag `r2`; crop padding 10 %.
+7. **Migration** converts confirmed legacy objects to provisional-only evidence with
+   `location_text = "{surface}, {room}"`, counts legacy media files and never touches them,
+   is idempotent and rolls back whole.
+8. **Hosted variant rule:** one SQLite file per household (the erasure swap rewrites the file).
+
+Human actions outstanding (`docs/OVERSIGHT_CP4.md` §P2.6): the signed landmark release for
+anyone whose hands are in frame on the rig; confirm the BIPA §15 wording at the primary source
+before any consent packet is used with a household; the Windows laptop run of `sidecar_report()`,
+the PRAGMAs and the erase-all swap path; the Playwright no-egress smoke test with real assets.
 
 **CP5 resolver and harness.** Five shapes end to end with photo; `perception/rubric.py`
 scoring every scripted query into the five outcomes with coverage reported separately;

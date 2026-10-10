@@ -41,6 +41,9 @@ LEGACY = "SYNTHETIC-LEGACY-CONTENT-MUST-NOT-ESCAPE"
 DEVICE = "11111111-1111-4111-8111-111111111111"
 SESSION = "22222222-2222-4222-8222-222222222222"
 ANCHOR_MS = 1790000000000
+# CP4 (coordinator ruling 1): the build's consent version every capture needs
+# acknowledged. Pinned here as a literal so a bump is a deliberate test change.
+CONSENT_VERSION = "rig-2026-10"
 ITEM_FIELDS = {"item_id", "name", "identity_status", "relevance", "location_status",
                "observed_at_ms", "location_text", "stale_reason", "index_pending", "image_url", "source"}
 RETIRED = ("/api/dg-token", "/api/agent-config", "/api/fake-dg", "/api/stt",
@@ -188,11 +191,24 @@ class MemoryApiFixture(unittest.TestCase):
         self.enterContext(client)
         return client
 
-    def login(self, client=None):
+    def login(self, client=None, *, consent=True):
+        """Sign in and, once per app client, acknowledge the build's consent version
+        (CP4 coordinator ruling 1: capture is refused until POST /api/consent
+        {"acknowledge": CONSENT_VERSION} has been accepted for the profile). The
+        acknowledgement is skipped with consent=False (the consent-gate tests) and
+        tolerates 503 on a database the app cannot open (the corrupt-DB case); a
+        silently unacknowledged client fails loudly at its first capture (409)."""
         client = self.client if client is None else client
         response = client.post("/api/auth/login", json={"pin": PIN}, headers={"origin": ORIGIN})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json(), {"authenticated": True})
+        consented = self.__dict__.setdefault("_consented_clients", set())
+        if consent and id(client) not in consented:
+            acknowledged = client.post("/api/consent", json={"acknowledge": CONSENT_VERSION}, headers={"origin": ORIGIN})
+            self.assertIn(acknowledged.status_code, (200, 503), acknowledged.text)
+            if acknowledged.status_code == 200:
+                self.assertIs(acknowledged.json().get("ok"), True, acknowledged.text)
+                consented.add(id(client))
         return response
 
     def packet(self, *, phase=0, identity="trusted", register=True):

@@ -296,7 +296,11 @@ class IdentityFixture(bootstrap.MemoryApiFixture):
 
     def make_store(self, embedder, profile="local"):
         from perception.object_memory import ObjectStore
-        return attach_embedder(ObjectStore(self.db, profile_id=profile, clock=self.clock), embedder)
+        store = attach_embedder(ObjectStore(self.db, profile_id=profile, clock=self.clock), embedder)
+        # CP4 (coordinator ruling 1): a store-level fixture acknowledges the build's
+        # consent version before any capture; idempotent per profile.
+        store.acknowledge_consent(bootstrap.CONSENT_VERSION, "test")
+        return store
 
     def register(self, calibration_id=CAL_WIDE, *, quantile=None, embedder=EMBEDDER_TAG, approve=True, approved_field=False, store=None, created_ms=ANCHOR_MS):
         store = self.store if store is None else store
