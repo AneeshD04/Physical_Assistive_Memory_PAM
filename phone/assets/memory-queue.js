@@ -30,8 +30,13 @@ function finished(transaction) {
 // captured before "Erase everything" and is dropped (reported as a coverage gap).
 export const CONSENT_REQUIRED = 'consent_required', ERASED_BEFORE = 'erased_before';
 export class RetryQueue {
-  constructor({ notify = () => {}, unauthorized = () => {}, retained = () => {}, dropped = () => {}, consentRequired = () => {} } = {}) {
+  // CP5 frame accounting: `sent(record)` is called once per upload attempt (the
+  // record carries its exact byte size), `acked(record)` once per matching durable
+  // acknowledgement, `reported({count, bytes})` whenever the queue re-counts what is
+  // still waiting (also kept as `pending` for the Status panel). Counts only.
+  constructor({ notify = () => {}, unauthorized = () => {}, retained = () => {}, dropped = () => {}, consentRequired = () => {}, sent = () => {}, acked = () => {}, reported = () => {} } = {}) {
     this.notify = notify; this.unauthorized = unauthorized; this.retained = retained; this.dropped = dropped; this.consentRequired = consentRequired;
+    this.sent = sent; this.acked = acked; this.reported = reported; this.pending = { count: 0, bytes: 0 };
     this.enabled = false; this.flushing = false; this.db = null; this.abort = null;
   }
   async open() {
@@ -123,6 +128,8 @@ export class RetryQueue {
     const bytes = rows.reduce((sum, row) => sum + row.size, 0);
     const old = rows.some(row => Date.now() - row.created_at > 7 * 86400000);
     this.notify(rows.length ? `${rows.length} capture${rows.length === 1 ? '' : 's'} awaiting durable acknowledgement · ${(bytes / 1048576).toFixed(1)} MiB.${old ? ' Some are over 7 days old; still retained here. Browser eviction would cause coverage loss.' : ''}` : 'No captures waiting to sync.');
+    this.pending = { count: rows.length, bytes };
+    try { this.reported({ ...this.pending }); } catch { /* a listener failure never blocks the queue */ }
     return { count: rows.length, bytes };
   }
   async flush() {
@@ -139,6 +146,7 @@ export class RetryQueue {
         this.abort = new AbortController();
         const timer = setTimeout(() => this.abort?.abort(), 20000);
         let response;
+        try { this.sent(record); } catch { /* accounting never blocks an upload */ }
         try {
           response = await fetch('/api/episodes', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: record.body, signal: this.abort.signal });
         } finally { clearTimeout(timer); }
@@ -164,6 +172,7 @@ export class RetryQueue {
           break;
         }
         await this.remove(record.episode_id);
+        try { this.acked(record); } catch { /* accounting never blocks the queue */ }
         this.retained(result);
         await this.report();
       }

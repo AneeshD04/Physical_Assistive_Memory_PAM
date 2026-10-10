@@ -430,8 +430,12 @@ class ReobservationMixin:
                     "registered": True, "embedded": decision["embedded"] == 1}
                 if decision["match"] is not None:
                     new_record["match"] = decision["match"]
-                db.execute("INSERT INTO local_observations(profile_id,observation_id,item_id,device_id,episode_id,revision_no,observed_at_ms,decided_at_ms,record,candidates,erased) VALUES(?,?,?,?,?,?,?,?,?,NULL,0)",
-                           (self.profile_id, signature, item_id, row["device_id"], row["episode_id"], row["revision_no"], frame["t_wall_ms"], now, _json(new_record)))
+                # CP5: the row carries the consent version the idle frame was captured under.
+                consent = db.execute("SELECT consent_version FROM idle_frames WHERE profile_id=? AND device_id=? AND frame_id=?",
+                                     (self.profile_id, frame["device_id"], frame["frame_id"])).fetchone()
+                db.execute("INSERT INTO local_observations(profile_id,observation_id,item_id,device_id,episode_id,revision_no,observed_at_ms,decided_at_ms,record,candidates,erased,consent_version) VALUES(?,?,?,?,?,?,?,?,?,NULL,0,?)",
+                           (self.profile_id, signature, item_id, row["device_id"], row["episode_id"], row["revision_no"], frame["t_wall_ms"], now, _json(new_record),
+                            consent[0] if consent is not None else None))
                 db.execute("UPDATE idle_frames SET promoted=1 WHERE profile_id=? AND device_id=? AND frame_id=?", (self.profile_id, frame["device_id"], frame["frame_id"]))
                 counts["promoted"] += 1
                 rebuild = True

@@ -198,8 +198,11 @@ def main():
                  check=lambda b: f"shape={b['shape']}" if b["shape"] == "abstain" else False)
             time.sleep(0.01)
             step("idle after erase-all (fresh capture)", client.post("/api/idle", content=encode(idle(device, session)), headers=h), 200)
-            stale = idle(device, session, clock_anchor={"mono_ms": 0, "wall_ms": now_ms() - 60000})
-            step("idle captured before erase-all", client.post("/api/idle", content=encode(stale), headers=h), 409, "erased_before")
+            # A capture older than the store's ERASED_BEFORE_TOLERANCE_MS (5 min: a phone
+            # clock may lag the laptop's) before the erasure is refused; one inside the
+            # tolerance is accepted, which the browser covers by clearing its mirror.
+            stale = idle(device, session, clock_anchor={"mono_ms": 0, "wall_ms": now_ms() - 10 * 60 * 1000})
+            step("idle captured 10 min before erase-all", client.post("/api/idle", content=encode(stale), headers=h), 409, "erased_before")
             print("== migrate")
             os.environ.pop("PAM_ALLOW_MIGRATION", None)
             step("migrate default (dry run)", client.post("/api/migrate", json={}, headers=h), 200,

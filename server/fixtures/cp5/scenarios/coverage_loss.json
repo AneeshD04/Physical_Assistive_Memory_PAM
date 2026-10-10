@@ -1,0 +1,56 @@
+{
+ "name": "coverage_loss",
+ "basis": "synthetic scenario, authored by the tester 2026-10-10; software-correctness expectations, not accuracy",
+ "clock_start_ms": 1790000000000,
+ "description": "Part 1 section 10 case 6 on the rig: network loss and a screen lock are coverage loss, recorded in the telemetry windows and reported by coverage(), never hidden; the placement before them still answers, and an idle still after them refreshes it.",
+ "items": {
+  "case": {
+   "label": "synthetic hearing aid case",
+   "tag": 0
+  }
+ },
+ "steps": [
+  {
+   "kind": "episode",
+   "item": "case",
+   "outcome": "placed_on_surface",
+   "to": [
+    60,
+    40,
+    100,
+    80
+   ],
+   "location": "fixture nightstand"
+  },
+  {
+   "kind": "gap",
+   "reason": "network_loss",
+   "duration_ms": 120000
+  },
+  {
+   "kind": "gap",
+   "reason": "screen_lock",
+   "duration_ms": 300000
+  },
+  {
+   "kind": "advance",
+   "minutes": 1
+  },
+  {
+   "kind": "idle",
+   "after_ms": 30000
+  },
+  {
+   "kind": "query",
+   "text": "where is my synthetic hearing aid case",
+   "truth": {
+    "item": "case"
+   },
+   "expect": {
+    "outcome": "correct",
+    "shape": "confident"
+   },
+   "expected_gap_ms": 420000
+  }
+ ]
+}

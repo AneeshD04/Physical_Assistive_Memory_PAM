@@ -81,7 +81,7 @@
         <div class="section-heading"><div><p class="eyebrow">What Pam keeps, and for how long</p><h1 id="privacy-title" tabindex="-1">Privacy</h1></div><button id="refresh-privacy" class="secondary" type="button">Refresh</button></div>
         <p id="privacy-status" class="notice" role="status" aria-live="polite" hidden></p>
         <div class="privacy-layout">
-          <section class="card" aria-labelledby="disclosure-title"><h2 id="disclosure-title">Camera disclosure</h2><p id="privacy-disclosure" class="disclosure">Checking the camera disclosure…</p><p id="privacy-consent-state" role="status" class="muted">Checking the acknowledgement state…</p><button id="privacy-acknowledge" type="button" disabled>I understand</button></section>
+          <section class="card" aria-labelledby="disclosure-title"><h2 id="disclosure-title">Camera disclosure</h2><p id="privacy-disclosure" class="disclosure">Checking the camera disclosure…</p><p id="privacy-consent-state" role="status" class="muted">Checking the acknowledgement state…</p><button id="privacy-acknowledge" type="button" disabled>I understand</button><p class="muted notices-line">Third-party software in this build, with its licences: <a id="notices-link" href="/notices" target="_blank" rel="noopener">Licences and notices</a> (opens on this local service; the camera keeps running).</p></section>
           <section class="card" aria-labelledby="retention-title"><h2 id="retention-title">Retention windows</h2><p class="muted">Disclosure version in force: <span id="retention-consent">unknown</span>. Changes apply on this local service only and are recorded in its audit log.</p>
             <form id="retention-form" novalidate>
               <div><label for="retention-episodes-days">Memories and their photos, in days (7 to 365)</label><input id="retention-episodes-days" name="episodes_days" type="number" inputmode="numeric" min="7" max="365" step="1" required disabled></div>
@@ -100,6 +100,50 @@
             </dl>
             <p id="idle-counters" class="muted">This browser: idle stills: 0 sent · 0 dropped</p>
             <p id="counts-status" role="status" class="muted">Loading counts…</p></section>
+          <section id="status-panel" class="card status-panel" aria-labelledby="status-title"><h2 id="status-title">Status</h2>
+            <p class="muted">What the camera did today on this local service, and what this browser's current capture session has counted. These are counts and times of this rig's own implementation; none of them says how well items are recognised.</p>
+            <p id="status-interrupted" class="notice" role="status" hidden></p>
+            <p id="status-queued" class="notice" role="status" hidden></p>
+            <h3>Today's coverage</h3>
+            <dl id="coverage-today" class="counts" aria-label="Today's coverage">
+              <div><dt>Camera on</dt><dd><span data-coverage-words="camera_on_ms">not loaded</span> <span class="muted">(<span data-coverage="camera_on_ms">–</span> ms)</span></dd></div>
+              <div><dt>Gaps while the camera was on</dt><dd><span data-coverage-words="gap_ms">not loaded</span> <span class="muted">(<span data-coverage="gap_ms">–</span> ms)</span></dd></div>
+              <div><dt>Episodes finished</dt><dd data-coverage="episodes">–</dd></div>
+              <div><dt>Packets sent</dt><dd data-coverage="packets">–</dd></div>
+              <div><dt>Idle stills sent</dt><dd data-coverage="idle_sent">–</dd></div>
+              <div><dt>Idle stills dropped</dt><dd data-coverage="idle_dropped">–</dd></div>
+              <div><dt>Camera sessions</dt><dd data-coverage="sessions">–</dd></div>
+            </dl>
+            <p id="coverage-status" role="status" class="muted">Loading today's coverage…</p>
+            <p class="muted">Coverage loss is time the camera was off or the page was hidden; Pam cannot know what happened then.</p>
+            <h3>This capture session</h3>
+            <dl id="live-counters" class="counts counts-compact" aria-label="Counters of the current capture session">
+              <div><dt>Frames captured</dt><dd data-counter="frames_captured">0</dd></div>
+              <div><dt>Frames analysed</dt><dd data-counter="frames_analysed">0</dd></div>
+              <div><dt>Frames skipped (busy)</dt><dd data-counter="frames_skipped_busy">0</dd></div>
+              <div><dt>Frames dropped (backpressure)</dt><dd data-counter="frames_dropped_backpressure">0</dd></div>
+              <div><dt>Hand results</dt><dd data-counter="landmark_results">0</dd></div>
+              <div><dt>Hand timeouts</dt><dd data-counter="landmark_timeouts">0</dd></div>
+              <div><dt>Episodes started</dt><dd data-counter="episodes_started">0</dd></div>
+              <div><dt>Episodes finished</dt><dd data-counter="episodes_finished">0</dd></div>
+              <div><dt>Episodes aborted</dt><dd data-counter="episodes_aborted">0</dd></div>
+              <div><dt>Packets sent</dt><dd data-counter="packets_sent">0</dd></div>
+              <div><dt>Packets acknowledged</dt><dd data-counter="packets_acked">0</dd></div>
+              <div><dt>Idle stills sent</dt><dd data-counter="idle_sent">0</dd></div>
+              <div><dt>Idle stills dropped</dt><dd data-counter="idle_dropped">0</dd></div>
+              <div><dt>Gaps</dt><dd data-counter="gaps">0</dd></div>
+              <div><dt>Gap time, ms</dt><dd data-counter="gap_ms">0</dd></div>
+              <div><dt>Bytes sent</dt><dd data-counter="bytes_sent">0</dd></div>
+            </dl>
+            <dl id="live-timing" class="counts counts-compact" aria-label="Timing of the current window and the camera settings">
+              <div><dt>Frames per second observed</dt><dd data-timing="fps_observed">0</dd></div>
+              <div><dt>Hand inference, ms (median)</dt><dd data-timing="infer_ms_p50">0</dd></div>
+              <div><dt>Hand inference, ms (95th percentile)</dt><dd data-timing="infer_ms_p95">0</dd></div>
+              <div><dt>Frame processing, ms (95th percentile)</dt><dd data-timing="tick_ms_p95">0</dd></div>
+              <div><dt>Camera settings</dt><dd><span data-setting="width">0</span> × <span data-setting="height">0</span> at <span data-setting="frame_rate">0</span> fps</dd></div>
+            </dl>
+            <p id="telemetry-counters" class="muted">Counter reports from this browser: <span data-telemetry="sent">0</span> accepted by the local service · <span data-telemetry="dropped">0</span> refused or lost (not retried).</p>
+            <p id="status-status" role="status" class="muted"></p></section>
           <section class="card erase-card" aria-labelledby="erase-title"><h2 id="erase-title">Erase everything</h2>
             <p>Removes every memory, photo, idle still, hand position, name, correction and appearance record from this local service's database, and the captures waiting in this browser. It cannot be undone. Traces may remain on the device or in backups; this is a removal from the app's database, not a forensic wipe.</p>
             <form id="erase-all-form" novalidate>

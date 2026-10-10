@@ -1,0 +1,63 @@
+{
+ "name": "new_item_before_indexing",
+ "basis": "synthetic scenario, authored by the tester 2026-10-10; software-correctness expectations, not accuracy",
+ "clock_start_ms": 1790000000000,
+ "description": "Part 1 section 10 case 1: a new unlabelled item queried before indexing completes. The first answer is an honest pending state (index_pending true, never 'I haven't seen it'); once the clock advances and processing drains, the placement answers confidently.",
+ "items": {
+  "tin": {
+   "label": "synthetic new tin",
+   "tag": 0
+  }
+ },
+ "steps": [
+  {
+   "kind": "episode",
+   "item": "tin",
+   "outcome": "placed_on_surface",
+   "to": [
+    60,
+    40,
+    100,
+    80
+   ],
+   "location": "fixture counter",
+   "process": false
+  },
+  {
+   "kind": "query",
+   "text": "where is my synthetic new tin",
+   "truth": {
+    "item": "tin"
+   },
+   "expect": {
+    "outcome": "abstain",
+    "shape": "abstain"
+   },
+   "expected_index_pending": true,
+   "expected_basis": [
+    "index_pending"
+   ]
+  },
+  {
+   "kind": "advance",
+   "minutes": 5,
+   "process": true
+  },
+  {
+   "kind": "query",
+   "text": "where is my synthetic new tin",
+   "truth": {
+    "item": "tin"
+   },
+   "expect": {
+    "outcome": "correct",
+    "shape": "confident"
+   },
+   "expected_index_pending": false,
+   "expected_basis": [
+    "trusted_match",
+    "placed"
+   ]
+  }
+ ]
+}

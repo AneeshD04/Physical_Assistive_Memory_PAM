@@ -13,8 +13,18 @@ MAX_PACKET_BYTES = 4 * 1024 * 1024
 # CP4 idle keyframes (POST /api/idle): one capture-resolution JPEG every
 # IDLE_KEYFRAME_MS while the controller is idle; body cap 256 KiB, target <= 64 KiB.
 MAX_IDLE_BYTES = 256 * 1024
+# CP5 frame accounting (POST /api/telemetry): counters only, body cap 64 KiB.
+MAX_TELEMETRY_BYTES = 64 * 1024
 MAX_TIME = 9007199254740991
 Millis = Annotated[int, Field(ge=0, le=MAX_TIME)]
+# Bounds for one telemetry window: a counter never exceeds MAX_COUNT, a window
+# never spans more than a day, a timing never exceeds MAX_TIMING ms (or fps).
+MAX_COUNT = 10 ** 12
+MAX_WINDOW_MS = 24 * 3600 * 1000
+MAX_TIMING = 10 ** 7
+MAX_FRAME_RATE = 240.0
+Count = Annotated[int, Field(ge=0, le=MAX_COUNT)]
+Timing = Annotated[float, Field(ge=0, le=MAX_TIMING)]
 
 
 class PacketTooLarge(ValueError):
@@ -279,6 +289,80 @@ class IdleFrame(StrictModel):
         return self.clock_anchor.wall_ms + self.t_ms - self.clock_anchor.mono_ms
 
 
+class TelemetryCounters(StrictModel):
+    """CP5 frame accounting: the browser's per-window counters (spec item 4:
+    source frames, frames selected / transmitted / received, dropped frames and
+    observation gaps). Every key is required and a bounded nonnegative int; no
+    free text. gap_ms is the coverage loss inside the window (screen lock,
+    backgrounding, network loss) that the browser reports rather than hides."""
+    frames_captured: Count
+    frames_analysed: Count
+    frames_skipped_busy: Count
+    frames_dropped_backpressure: Count
+    landmark_results: Count
+    landmark_timeouts: Count
+    episodes_started: Count
+    episodes_finished: Count
+    episodes_aborted: Count
+    packets_sent: Count
+    packets_acked: Count
+    idle_sent: Count
+    idle_dropped: Count
+    gaps: Count
+    gap_ms: Count
+    bytes_sent: Count
+
+
+class TelemetryTiming(StrictModel):
+    """Rig timings for the window (measurements of the rig's JavaScript, never a
+    bound on a native target): observed fps and inference / tick percentiles in ms."""
+    fps_observed: Annotated[float, Field(ge=0, le=MAX_FRAME_RATE)]
+    infer_ms_p50: Timing
+    infer_ms_p95: Timing
+    tick_ms_p95: Timing
+
+
+class TelemetrySettings(Dimensions):
+    """The negotiated stream settings (getSettings()): width, height, frame_rate."""
+    frame_rate: Annotated[float, Field(ge=0, le=MAX_FRAME_RATE)]
+
+
+class Telemetry(StrictModel):
+    """One frame-accounting window (POST /api/telemetry, CP5). Same strict rules
+    as a packet: UUID ids, a clock anchor, closed key sets, bounded numbers, no
+    text. t_ms is the window's end on the observation clock; window_ms its
+    length (1 <= window_ms <= MAX_WINDOW_MS: a window covers time). No identity,
+    processor, profile or image field crosses this boundary."""
+    schema_version: Literal[1]
+    device_id: str
+    session_id: str
+    t_ms: Millis
+    clock_anchor: ClockAnchor
+    window_ms: int = Field(ge=1, le=MAX_WINDOW_MS)
+    counters: TelemetryCounters
+    timing: TelemetryTiming
+    settings: TelemetrySettings
+
+    @model_validator(mode="before")
+    @classmethod
+    def strict_version(cls, value):
+        if isinstance(value, dict) and type(value.get("schema_version")) is not int:
+            raise ValueError("Schema version must be an integer")
+        return value
+
+    @model_validator(mode="after")
+    def identifiers(self):
+        for value in (self.device_id, self.session_id):
+            if str(uuid.UUID(value)) != value.lower():
+                raise ValueError("Invalid UUID")
+        return self
+
+    @property
+    def wall_ms(self) -> int:
+        """The window's end as wall time through the anchor (the store checks plausibility)."""
+        return self.clock_anchor.wall_ms + self.t_ms - self.clock_anchor.mono_ms
+
+
 def _load_json(raw: bytes):
     def pairs(values):
         result = {}
@@ -309,3 +393,13 @@ def parse_idle(raw: bytes) -> IdleFrame:
     if len(raw) > MAX_IDLE_BYTES:
         raise PacketTooLarge("Idle frame exceeds 256 KiB")
     return IdleFrame.model_validate(_load_json(raw))
+
+
+def parse_telemetry(raw: bytes) -> Telemetry:
+    """Strict telemetry parsing (CP5); PacketTooLarge above MAX_TELEMETRY_BYTES
+    (413), ValueError for anything malformed (400)."""
+    if not isinstance(raw, bytes):
+        raise ValueError("Telemetry must be bytes")
+    if len(raw) > MAX_TELEMETRY_BYTES:
+        raise PacketTooLarge("Telemetry exceeds 64 KiB")
+    return Telemetry.model_validate(_load_json(raw))

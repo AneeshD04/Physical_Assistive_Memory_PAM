@@ -1,0 +1,70 @@
+{
+ "name": "caregiver_relocation_observed",
+ "basis": "synthetic scenario, authored by the tester 2026-10-10; software-correctness expectations, not accuracy",
+ "clock_start_ms": 1790000000000,
+ "description": "Part 1 section 10 case 2 (in view): the wearer places the pill box; a caregiver (other_person) moves it in view of the camera. The observed relocation is recalled (admission-vs-update rule: any observed actor updates the location).",
+ "items": {
+  "pillbox": {
+   "label": "synthetic pill box",
+   "tag": 0,
+   "medication": true
+  }
+ },
+ "steps": [
+  {
+   "kind": "episode",
+   "item": "pillbox",
+   "outcome": "placed_on_surface",
+   "to": [
+    60,
+    40,
+    100,
+    80
+   ],
+   "location": "fixture counter"
+  },
+  {
+   "kind": "query",
+   "text": "where is my synthetic pill box",
+   "truth": {
+    "item": "pillbox"
+   },
+   "expect": {
+    "outcome": "correct",
+    "shape": "confident"
+   }
+  },
+  {
+   "kind": "advance",
+   "hours": 1
+  },
+  {
+   "kind": "episode",
+   "item": "pillbox",
+   "outcome": "placed_on_surface",
+   "to": [
+    20,
+    20,
+    56,
+    56
+   ],
+   "location": "fixture shelf",
+   "actor": "other_person"
+  },
+  {
+   "kind": "query",
+   "text": "where is my synthetic pill box",
+   "truth": {
+    "item": "pillbox"
+   },
+   "expect": {
+    "outcome": "correct",
+    "shape": "confident"
+   },
+   "expected_basis": [
+    "trusted_match",
+    "placed"
+   ]
+  }
+ ]
+}

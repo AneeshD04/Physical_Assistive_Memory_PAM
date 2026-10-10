@@ -1,4 +1,4 @@
-# PAM finance model v1.2: cost per user-month, subscription sensitivity, caps
+# PAM finance model v1.3: cost per user-month, subscription sensitivity, caps
 
 Finance agent. **v1** 2026-10-08, written for the coordinator after CP1 (`fbf6719`), before
 CP2 landed. **v1.1** 2026-10-09, after CP2, for the CP3 identity stage
@@ -13,6 +13,15 @@ delta at the plan's 90-day retention default exceeds $0.05/user-month (§9.6), t
 and chat rows of §2.4, §3.2 and §3.3 are recomputed at `A_b = 0.72` and marked "v1.2";
 the v1 values (`A_b = 0.50`) are preserved side by side in §9.6 and remain valid within
 $0.05 at a 30-day retention default. §1, §4, §6, §8 and Appendices A–B are unchanged.
+**v1.3** 2026-10-10, at `7ab0e5e` (CP4 landed, 341/341; the architect's "CP5 in detail" is
+an uncommitted edit of `docs/BUILD_PLAN.md` in the working tree), for the CP5 stage (that
+section's *Finance* line): adds §10 (CP5: the telemetry cost, the support-cost measurement
+plan for the first households, the list of rig measurements that replace each assumption,
+and a pre-rig bottom line with every value labelled), Appendix D (its arithmetic) and open
+questions 18–22. No table in §2–§3 is recomputed: CP4's decision 2 made `episodes_days = 30`
+the default [M-code], at which §9.6 already gives `A_b = 0.5413`; §10.4 tabulates that value
+beside the 90-day `0.72` the §3 tables keep as the conservative case. §1–§9 and Appendices
+A–C are unchanged. Nothing is measured on a device yet; §10.3 is the list of what will be.
 Scope and authority: `BUILD_PLAN.md` §0 ("Finance: unit economics, cost caps the builders
 must respect") and §2 ("FINANCE.md v1"). This file proposes; the coordinator decides.
 Nothing here is a selected price, a measured margin or a commercial term (RESEARCH_LOG
@@ -56,6 +65,21 @@ synthetic frames. Those carry a new label, **[M-sandbox]**: measured on this ses
 Linux sandbox (Intel Xeon @ 2.10 GHz, 2 vCPU, OpenCV 5.0.0, numpy 2.5.3, single thread),
 which is neither the household laptop nor a t3.medium; they bound the order of magnitude
 and nothing more. The coordinator measures on-device later (§9.7).
+
+*v1.3 session (2026-10-10):* `WebFetch` permission requests for `aws.amazon.com/ebs/pricing/`,
+`aws.amazon.com/s3/pricing/` and `stripe.com/pricing` were withdrawn unanswered, and web
+search again returned titles and URLs only (no page text), so **no price was re-read and
+every price in §10 reuses the v1 figure with its `[Q-UNVERIFIED]` label.** The one new
+in-session measurement is the byte size of the plan's telemetry body, sized with
+`json.dumps` on the architect's fixed schema with representative values ([M-sandbox],
+§10.1). CP5 code does not exist in the commit `7ab0e5e`; where §10 names a CP5 counter it
+is the architect's fixed interface name, and where it names a CP4 counter (`reobs_cpu_s`,
+`reobs_deferred`, `retention_counts`, `maintenance_counters`) it is [M-code] at `7ab0e5e`.
+While this section was being written an **uncommitted builder draft** of the CP5 store
+side (`perception/episode.py` `Telemetry*` models and `parse_telemetry`,
+`perception/episode_store.py` `frame_counters`, `ingest_telemetry`, `coverage`,
+`telemetry_expired` in `apply_retention`) appeared in the working tree; it is read, not
+reviewed, and noted where it confirms or extends a name used here.
 
 Labels used throughout: **[A]** assumption (ours), **[Q-UNVERIFIED]** quoted list price not
 verified in session, **[Q-REPO]** price recorded in this repository's research notes with
@@ -1210,6 +1234,348 @@ and 3 are the slots. None of §9 is an on-device measurement.
 
 ---
 
+## 10. CP5: telemetry, the support-cost measurement plan, and the rig measurements that replace assumptions (v1.3, 2026-10-10)
+
+What CP5 adds (`BUILD_PLAN.md` "CP5 in detail"): the resolver, the rubric and the scenario
+runner (pure functions and a test harness: no cost line), the notices page (static), and
+**frame accounting**: the browser keeps counters per capture session and posts them every
+60 s and at stop to `POST /api/telemetry` (`schema_version`, `device_id`, `session_id`,
+`t_ms`, `clock_anchor`, `window_ms`, 16 integer `counters`, 4 `timing` floats, 3
+`settings` values; "all integers/floats, bounded; no free text"; 64 KiB body cap); the
+store keeps them in `frame_counters` and derives `coverage(day_utc) -> {camera_on_ms,
+gap_ms, episodes, packets, idle_sent, idle_dropped, sessions}`; `GET /api/coverage?day=`
+and health `coverage` expose today's; the Privacy view gains a **Status panel** with the
+coverage and the live counters; telemetry rows expire with `episodes_days`. Two things in
+that list matter to this file. The telemetry is the measurement hook §5 and §6 have pointed
+at since v1 ("CP5 frame counters are the measurement hook"; §6 items 1, 3, 5), so §10.3
+names, for every assumption in §1–§9, the field that replaces it. The Status panel is the
+only lever CP2–CP5 have on `S` (cap 9: "the only lever ... is making failures
+self-explanatory"), so §10.2 says what the ticket log must record for that lever to be
+measured rather than assumed. §10.1 prices the telemetry itself; §10.4 restates the cost
+table with every value labelled, which is what the rig will be measured against.
+
+### 10.1 Telemetry cost: negligible, with the arithmetic
+
+Inputs:
+
+| Parameter | Value | Label and source |
+| --- | --- | --- |
+| Posts per session | one per 60 s while the camera is on, plus one at stop | [D] plan: "every 60 s and at stop" |
+| Camera-on hours per day | 8 (worked example); 24 (bound) | [A] as §9: 481 rows/day; 1,441 rows/day |
+| Body bytes, the plan's schema with representative values, compact JSON | **656 B** (716 B with default spacing; 805 B with every counter at 2³¹ − 1) | [M-sandbox] v1.3 session, `json.dumps` of the schema in Appendix D.1 |
+| Stored row (three JSON columns + `profile_id`, `device_id`, `session_id`, `t_ms`, `received_ms`, `window_ms`, SQLite record and index) | ~848 B typical; **2 KB used as the bound** | [A] ~192 B of key columns and overhead |
+| Body cap | 64 KiB | [D] plan |
+| Retention | `episodes_days`: 30 default; 90 shown | [M-code] `RETENTION_DEFAULTS` at `7ab0e5e`; [D] plan: "telemetry rows expire with `episodes_days`" |
+| Ingest CPU | ~1 ms per post (JSON parse, validation, one INSERT) | [A] |
+| Prices | gp3 $0.08/GB, snapshot $0.05/GB, egress $0.09/GB, t3.medium $0.0208/vCPU-h; Hetzner volume €0.044 × 1.08 | all [Q-UNVERIFIED] (header note) |
+
+Results (Appendix D.2; rows × bytes × days; storage and its snapshot at the rates above):
+
+| Case | Rows/day | Bytes/day | Held at R = 30 | $/user-month, R = 30 (AWS gp3 + snapshot) | Held at R = 90 | $/user-month, R = 90 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 8 h camera, typical 848 B row | 481 | 408 KB | 12.2 MB | 0.0016 | 36.7 MB | 0.0048 |
+| **8 h camera, 2 KB bound** | 481 | **985 KB** | **29.6 MB** | **0.0038** | 88.7 MB | 0.0115 |
+| 24 h camera, 2 KB bound | 1,441 | 2.95 MB | 88.5 MB | 0.0115 | 265.6 MB | 0.0345 |
+| 8 h camera, every post at the 64 KiB cap (a broken client, not the schema) | 481 | 31.5 MB | 946 MB | 0.1229 | 2.84 GB | 0.3688 |
+| 24 h camera, every post at the cap | 1,441 | 94.4 MB | 2.83 GB | 0.3683 | 8.50 GB | 1.1049 |
+
+The other lines: ingest CPU 14,430 posts/month × ~1 ms = 14.4 CPU-s = 0.004 vCPU-h =
+**$0.00008**; the Status panel's `GET /api/coverage` at 20 reads/day × 2 KB = 1.2 MB/month of
+egress = **$0.0001**; **no object-store request** (the posts hit our own VM, not S3, so cap 4
+is untouched); ingress is free. On the phone's radio the telemetry is 985 KB/day at the
+bound against ≈ 39 MB/day of episode packets (§9.1.2): **2.5 %**. On the rig it is 0.4–1
+MB/day inside the laptop's SQLite file, 12–30 MB at 30 days: no consequence for the
+`VACUUM INTO` headroom of §9.5. Hetzner figures are 0.75× the AWS ones (D.2).
+
+**Reading: telemetry costs under one cent per user-month in every case the schema allows
+(the maximum under the schema is $0.035, at 24 h of camera, 90-day retention and the 2 KB
+bound), i.e. below the $0.05 threshold this file uses for recomputing tables, and it is
+not added to `A_b`.** The only way above the threshold is a client that posts cap-sized
+bodies every minute, which the fixed schema cannot produce (656–805 B), so Finance
+proposes no new cap; it asks only that `ingest_telemetry` enforce what the plan already
+says (closed key set, numeric values, no free text), which bounds the row at ~1 KB without
+a byte cap of its own. *Where the builder's draft already stands (read, not reviewed;
+uncommitted at the time of writing):* `Telemetry`, `TelemetryCounters`, `TelemetryTiming`
+and `TelemetrySettings` are `StrictModel`s (closed key sets, every counter a bounded
+nonnegative int, `MAX_TELEMETRY_BYTES = 64 * 1024`), `ingest_telemetry` stores the three
+`model_dump()` JSON columns and is idempotent on `(device, session, t_ms)`, and
+`apply_retention` counts `telemetry_expired` with `episodes_days`: exactly the bound
+assumed above. Cap 9's diagnostic value exceeds any cost here by orders of
+magnitude: one support minute avoided per household-month ($0.30, §5 item 9) pays for a
+year of telemetry at the bound. One retention note for the privacy agent, not a cost
+one: the raw 60 s rows can expire at 30 days, but the dozen integers of `coverage(day)` are
+the only durable record of camera-on hours and episodes per day that §10.3 depends on; if
+they also expire at `episodes_days`, the one-week template below must be filled in from
+the live panel within the window (open question 20).
+
+### 10.2 Support-cost measurement plan for the first households
+
+`S` is the only line in this file that can make $10 negative in every variant (§6, riskiest
+assumption 1), it is unmeasured, and the pilot's ticket log is the only instrument that
+measures it (§6 item 6; open question 7 asked who keeps it). This section says what the log
+must contain so that `S` is a number at the first monthly report, what number ends the $10
+case, and which calls CP5's Status panel is expected to turn into self-service.
+
+#### 10.2.1 What the log records: one row per contact
+
+A flat table (a spreadsheet outside the product is fine; it must never hold a name, an
+address, a phone number, a photo or any item name; the pseudonym map is held by the pilot
+lead alone and is not needed for any number here). Closed vocabularies everywhere a number
+is later computed from the field.
+
+| Field | Values | Why Finance needs it |
+| --- | --- | --- |
+| `household_id` | pseudonymous (`hh-007`); not the `profile_id`, not the `device_id` | per-household minutes, the p50/p90 split, and the join to the roster below |
+| `contact_date` | UTC date | the monthly window |
+| `channel` | one of `phone`, `video`, `visit`, `text`, `email`, `self_serve` (a contact the household resolved from the Status panel or notices page and only told us about; 0 staff minutes) | the channel mix decides the loaded rate; `self_serve` rows measure cap 9's effect |
+| `minutes` | integer staff minutes, including write-up; travel minutes in a separate `travel_minutes` column for visits | the numerator of `S` |
+| `staff` | `founder`, `support`, `agency` | founder time is unpaid cash but real cost: it is counted at the loaded rate, never at zero |
+| `kind` | `onboarding` (first-contact setup) or `ongoing` | onboarding is amortised over tenure, ongoing is not (§3.1) |
+| `category` | **closed list:** `setup/mount`, `consent questions`, `Wi-Fi/TLS`, `camera permission`, `false answer`, `missed capture`, `erasure request`, `other` | the category shares say which failures the product should explain itself; `other` above 20 % of minutes means the list needs a new entry, not a bigger `other` |
+| `self_explanatory` | `yes` (the Status panel / "Why this answer" / notices page showed the cause and the caller could have acted on it), `no` (the state was not visible), `n/a` | measures, rather than assumes, the minute reduction §10.2.4 expects from CP5 |
+| `resolution` | `explained`, `setting_changed`, `reprovisioned` (model assets, certificate), `hardware_replaced`, `escalated`, `unresolved` | repeat contacts and hardware cost |
+| `hardware_cost_usd` | dollars of parts shipped, if any | the `W` line of §2.1 becomes a measured number |
+| `coverage_day` | the `GET /api/coverage?day=` day the staff looked at, if any | ties the call to the counters that explain it |
+| `variant` | `rig` or `hosted` | §6 item 10: the claim that `S` is not lower on the rig |
+
+A second, smaller table, the **roster**: `household_id`, `channel_class` (`family` /
+`agency`), `variant`, `enrolled` (date), `hardware_supplied` ($, the mount kit if any),
+`ended` (date) and `end_reason` (closed list: `death`, `moved_to_care`, `abandoned`,
+`dissatisfied`, `pilot_ended`, `other`). It gives the denominators (active
+household-months) and, by the second month, the first tenure number (§6 item 7), which
+replaces the 12-month onboarding amortisation and the 24-month hardware amortisation.
+
+#### 10.2.2 How `S` is computed from the log, monthly
+
+```
+N          = active household-months in the month (roster: enrolled, not ended)
+M_ongoing  = Σ minutes over contacts with kind = ongoing in the month (all channels, incl. founder)
+M_onboard  = Σ minutes over contacts with kind = onboarding in the month
+N_onboard  = households whose first contact fell in the month
+T          = tenure in months (12 [A] until the roster measures it)
+r          = loaded $/h: 18.00 lean, 19.20 heavy [A] until payroll replaces it (§3.1)
+
+S = r/60 × ( M_ongoing / N  +  (M_onboard / N_onboard) / T )
+```
+
+Reported alongside, every month: minutes per household p50 and p90 (support in elder care
+is heavy-tailed; a mean of 10 min can be nine quiet households and one at 90 min, and the
+two cases need different products), minutes by category, contacts per household-month,
+the `self_explanatory = yes` share of minutes, travel minutes (visits are a different
+business), and the three numbers of §10.2.3 next to the measured `S`. Appendix D.4 shows
+the formula on an illustrative month (10 households, 200 ongoing minutes, 450 onboarding
+minutes: `S` = $7.13), which is an input-format check and not a prediction. **`S` is
+reported as a measurement only from a month with ≥ 10 active households and every
+contact logged**; until then it is a running estimate with the household count beside it.
+
+#### 10.2.3 The threshold at which $10 stops working
+
+From the §3.1 formula at P = 10 (fee 0.59, `H` 0.75): margin is zero at **`S` = 8.66 − `A`**
+and 40 % at **`S` = 4.66 − `A`**; in minutes at $18/h (Appendix D.3):
+
+| Variant (`A` $/user-month) | `S` at zero margin | = minutes/household-month | `S` for a 40 % margin | = minutes | Where the §3 assumptions sit |
+| --- | ---: | ---: | ---: | ---: | --- |
+| (a) Rig (0) | **$8.66** | 28.9 | **$4.66** | 15.5 | S=3 is 10 min at $18/h; S=8 is 25 min at $19.20/h |
+| (b) Hosted, CP4 30-day default (0.5413) | **$8.12** | 27.1 | **$4.12** | 13.7 | |
+| (b) Hosted at 90 days (0.72, the §3 table value) | $7.94 | 26.5 | $3.94 | 13.1 | |
+| (b) Hosted worst (1.10) | $7.56 | 25.2 | $3.56 | 11.9 | |
+| (c) + chat, cheap tier (0.676) | $7.98 | 26.6 | $3.98 | 13.3 | |
+| (c) + chat, $1/$5 tier (1.891) | $6.77 | 22.6 | $2.77 | 9.2 | lean support no longer reaches 40 % |
+| (c) + chat, $2/$10 tier (3.241) | $5.42 | 18.1 | $1.42 | 4.7 | |
+
+Reading, as a rule for the monthly report: **every minute of support per household-month
+costs $0.30 = 3 margin points at $10.** $10 earns a working margin (≥ 40 %) only while
+support stays under **≈ 14–15 minutes per household-month all-in** (onboarding amortised),
+and loses money above **≈ 27–29 minutes**. The §3 readings stand ("$10 works only if
+support stays near $3/user-month" = 10 min): the log turns that sentence into a monthly
+number. Two early-warning rules for the first report, before `S` is a measurement: an
+onboarding contact above **45 min** (the §3.1 lean assumption) or ongoing minutes above
+**10 per household** in the first full month each means the heavy column (S=8) is the one
+to read, and the §3.2 table says what that does at $10 (−4.4 % to +6.6 % without chat).
+
+#### 10.2.4 The self-explanatory failure states that reduce minutes
+
+v1's `S = 3` assumed "good in-app diagnostics (§5, item 8)". CP5 is the checkpoint that
+ships them, so this table maps each log category to the CP5 state that lets the family
+or the caregiver see the cause without a call. The reduction is not assumed here: the
+`self_explanatory` field of §10.2.1 measures it, and the first month's share of minutes
+with `self_explanatory = no` is the backlog for the next UI checkpoint.
+
+| Category | What the caller sees at CP4 | CP5 state that explains it (counter / panel) | Where |
+| --- | --- | --- | --- |
+| `missed capture` ("it didn't see me put it down") | nothing: a missed episode is silent | `coverage.camera_on_ms` and `gap_ms` ("camera on 3 h 10 min today, 2 gaps: screen lock 41 min"), `episodes_started / finished / aborted`, `frames_skipped_busy`, `landmark_timeouts` (the phone could not keep up), `idle_sent / idle_dropped` | Status panel; `GET /api/coverage` |
+| `Wi-Fi/TLS` (phone not on the home LAN, certificate not trusted, laptop asleep) | queue retries; a "retained/dropped" notice | `packets_sent` vs `packets_acked` ("4 captures waiting to upload"), `gaps` / `gap_ms` (the counters are counts; the reason text stays in the Camera view's gap log and the packet's `gaps` entries [M-code `memory-camera.js`]), `bytes_sent` flat while the camera is on; health unreachable = the laptop/cert explanation page (cap 9) | Status panel; health |
+| `camera permission` | "Waiting for camera permission" | `sessions = 0` and `camera_on_ms = 0` for the day; `settings.width/height/frame_rate` present means the camera did start | Status panel |
+| `setup/mount` | the camera preview | `fps_observed`, `settings` (the delivered resolution and rate), `frames_captured` per minute: the mount and phone are delivering what the controller expects | Status panel |
+| `false answer` ("it showed the wrong place") | the photo answer | the "Why this answer" basis list (`aged`, `expired`, `provisional_match`, `lookalikes`, `negative_reobservation`, `index_pending`): the caregiver reads why before calling; `revisions_expired` explains a missing photo (30-day retention) | chat view; `GET /api/retention` counts |
+| `consent questions` | the Privacy view disclosure; 409 `consent_required` | health `consent.ok` / `required_version`; the `/notices` page for "what is in this thing" | Privacy view |
+| `erasure request` | the CP4 erase flows and their count-only report | unchanged; `revisions_erased` in the retention counts confirms it happened | Privacy view |
+| `other` (model not provisioned, worker behind) | health `models[]`, `processing.status` | `reobs_deferred` and `reobs_cpu_s` against the 300 s budget ("the laptop is behind on re-observation today"), `processing.pending` | health |
+
+Two categories have no self-serve state and should not: `erasure request` is a human
+obligation whatever the UI says, and `consent questions` are answered by a person. The
+minutes Finance expects the panel to remove are in `missed capture` and `Wi-Fi/TLS`, the
+two silent failures of the rig (§2.1: "every one of those is a support call waiting to
+happen"); if the first month's log shows those two categories at `self_explanatory = yes`
+and still consuming minutes, the panel is visible but not understood, which is a UI
+finding for C, not a finance one.
+
+### 10.3 The rig measurement list: what replaces each assumption
+
+Every assumption row of §1, §8 and §9, the CP5 counter, CP4 counter or store query that
+measures it, and the experiment it belongs to (`RESEARCH_EXPERIMENTS.md` "Proposed
+experiment queue"). "Counter" means a `POST /api/telemetry` field (browser, per 60 s
+window, summed by `coverage(day)`), "health" the `GET /api/health` block, "retention
+counts" `GET /api/retention` / `retention_counts()`, "reobservation" the worker's last
+`reobserve()` counts in health, "query" a read-only SQL over the household's SQLite file
+by Builder B (never a route; packet bytes never leave the store). The builder's
+uncommitted draft of `coverage(day)` returns, beyond the plan's seven keys, `packets_acked`,
+`episodes_started`, `frames_captured`, `frames_analysed`, `frames_dropped`, `bytes_sent`
+and `windows` per day, which gives rows 1, 7, 8, 10 and 21 below a per-day number without
+summing the 60 s rows by hand.
+
+| # | Assumption (section) | Current value and label | What measures it at CP5 | Protocol |
+| --- | --- | --- | --- | --- |
+| 1 | Episodes per day (§1) | 50 [D, "estimate; measure"] | `episodes_finished` (and `episodes_started`, `episodes_aborted`) summed per day = `coverage.episodes`; cross-check `count(*)` of accepted `episode_revisions` per day | P-105 (20-min sustain gives the hourly rate), then whole rig days on the user's iPhone (P-101/P-103 as §6 item 1 names them) |
+| 2 | Keyframes per episode (§1) | ≤ 8 selected [D] | query: keyframe count per stored packet | same |
+| 3 | Packet bytes as stored (§9.1.2) | 786 KB typical / 1,660 KB high [A] | query: `length(packet)` per revision, p50/p95; wire bytes per packet = `bytes_sent / packets_sent` from the counters | P-105, P-103 |
+| 4 | Keyframe bytes at capture resolution (§1, §9) | 50 KB typical / 100 KB high [A]; synthetic 84 KiB at 720p q0.72 [M-sandbox] | query: base64 length × 3/4 per keyframe inside the packet; `settings.width/height` says the resolution it was taken at | P-105 |
+| 5 | Burst bytes (§9) | 10 × ~8 KB [A]; synthetic 13–18 KiB [M-sandbox] | query: burst frame lengths per packet | P-105 |
+| 6 | Landmark bytes and the 72 h reduction (§9.1.2) | 140.6 KB typical / 473.5 KiB worst [M-sandbox on the real schema]; −92 % after reduction | query: `length(packet)` before vs after `reduced_ms` is set; retention counts `landmarks_reduced` | P-105 (first packets pass 72 h on day 4) |
+| 7 | Camera-on hours per day (§9) | 8 [A] | `coverage.camera_on_ms`, `sessions`, `gap_ms` per day | P-105, then whole days |
+| 8 | Idle frames per day (§9.1.1) | 960 at 8 h; 2,880 bound [D] | `idle_sent`, `idle_dropped` (counters); the browser's drop reasons `oversize / capped / failed` [M-code `memory-camera.js`]; retention counts `idle_cached` | P-105 |
+| 9 | Idle frame bytes (§9.1.1) | ≤ 64 KiB target [D]; synthetic 65 KiB at 720p q50 [M-sandbox] | query: `sum(length(jpeg))` / count over `idle_frames`; cross-check `bytes_sent` minus packet bytes | P-105 |
+| 10 | Phone uplink per day (§1) | 39 MB/day packets + idle [A] | `bytes_sent` per day | P-105 |
+| 11 | Items with a placed location (§9) | 10–30 [A] | query: `count(*)` of items with `location_status = placed` | P-105 |
+| 12 | Promotion rate (§9.1.3) | ≤ 24 per item-day under the hourly refresh [D]; 0–10 % of frames [A] | reobservation `promoted` per pass, retention counts `idle_promoted`, `apply_retention` `idle_promoted_expired` | P-105 |
+| 13 | Re-observation CPU per pair (§9.2) | 10 ms laptop-class [A]; 8.5 ms [M-sandbox] | ≈ `reobs_cpu_s / (checked − gated)` per pass (gated frames cost a 0.5–2 ms diff each, inside the same clock); the day total in `maintenance_counters` (`reobs_cpu_s`) against `REOBS_CPU_BUDGET_S = 300`; `reobs_deferred > 0` means the budget bound | P-105 |
+| 14 | Pairs per day and the gate's share (§9.2, cap 7b) | ≤ 10 % of frames change [A] | reobservation `checked`, `gated`, `pending` per pass, summed per day | P-105 |
+| 15 | DINOv2 ViT-S/14 ms per 224 px crop (§8) | 60–150 ms [A]; FLOP-bounded | `(reobs_cpu_s − registered pairs × t_pair) / embedded` per pass on the laptop; the ONNX export benchmark on the laptop and on a t3.medium-class VM | P-104 (export + calibration), §6 item 2 |
+| 16 | Write-path CPU per episode (localizer + crops + embed) (§1, §2.2) | 0.3–1.0 s [A] | **no CP5 field.** `processing_stats` carries counts only (`processed`, `failed`, `observations`, `pending`). Proposed: a per-UTC-day `maintenance_counters` row `process_cpu_s` charged by `process_pending` with the same `perf_counter` pattern as `reobs_cpu_s` (open question 18) | P-105; the hosted load test (§6 item 2) |
+| 17 | Queries (chats) per day (§1, §2.3) | 20 [A] | **no CP5 field** (cloud chat is 503 `chat_not_configured`; local answers are not counted). Proposed: `chat_local` per day in `maintenance_counters` (open question 18); the provider checkpoint's micro-USD ledger (cap 10) measures tokens and retries | the bounded-cost provider checkpoint; §6 item 4 |
+| 18 | Photo serves per day and photo answer bytes (§1, §2.2, cap 8) | 800/month; ~100 KB [A] | **no CP5 field** (cap 8 asked for it "in the frame counters (CP5)"; the plan's counters are browser-side and do not see `GET /api/items/{id}/image`). Proposed: `image_serves` and `image_bytes` per day in `maintenance_counters` (open question 18) | P-105; the caregiver browsing pattern needs whole days |
+| 19 | Support minutes per household-month (§3.1) | S = 3 / 8 [A] | the ticket log of §10.2, not telemetry | the pilot (v4 "Pilot criteria") |
+| 20 | Tenure / churn (§3.1, §4) | 12 months onboarding, 24 months hardware [A] | the roster of §10.2.1 | the pilot and the first paying cohort |
+| 21 | Laptop uptime, certificate and LAN incidents (§2.1, §6 item 10) | "S is not lower on the rig" [A] | `gaps` and `gap_ms` with reasons; `packets_sent − packets_acked` per day; log categories `Wi-Fi/TLS` | P-105 and the log |
+| 22 | 100 users per 2-vCPU VM at 25 % (§2.2) | [A], 3× safety factor | **not a rig measurement**: needs the hosted load test with rows 15–16 measured first; the rig gives the per-episode and per-day CPU that feeds it | §6 item 2 |
+| 23 | Telemetry row bytes (§10.1) | 656 B body [M-sandbox]; 2 KB bound [A] | query: `length(counters) + length(timing) + length(settings)` per `frame_counters` row | P-105 (first run) |
+
+Rows 16–18 are the gaps: three finance assumptions that CP5's browser-side counters cannot
+see because the quantity is produced on the server. Each is one `maintenance_counters`
+row per UTC day (the table and the upsert pattern already exist for `reobs_cpu_s`
+[M-code]), exposed as integers in `GET /api/coverage`; without them §6 items 2, 4 and 5
+have no slot after the rig run and stay assumptions. This is open question 18 for the
+architect; it is not a cap.
+
+**One-week measurement template.** To be filled from the first seven rig days (the
+`coverage(day)` aggregates for each day, the health and retention counts at the end of
+each day, the queries once at the end of the week, the log continuously). "Who" names the
+role: the rig operator is the user running the iPhone (`CONTINUATION_HANDOFF.md`: real
+iPhone tests are the user's), Builder B runs the read-only queries on the household file,
+the Tester supplies the same numbers from the synthetic scenario runs as a software
+baseline (they are not device numbers and are labelled so), the pilot lead keeps the log,
+and Finance compiles the column into v1.4.
+
+| Assumption | Current value | Source after one week | Who records it |
+| --- | ---: | --- | --- |
+| Episodes/day | 50 [D] | mean and max of `coverage.episodes` over 7 days; `episodes_aborted` share | rig operator (panel), Tester (baseline) |
+| Camera-on h/day; gaps | 8 h [A] | `camera_on_ms`, `gap_ms`, `sessions` per day | rig operator |
+| Stored packet bytes, p50/p95 | 786 KB [A] | `length(packet)` query at day 7, split by `reduced_ms` null / set | Builder B |
+| Keyframe bytes; resolution | 50 KB [A] | base64 lengths × 3/4; `settings.width × height` | Builder B; rig operator |
+| Landmark bytes, before/after 72 h | 141 KB → 12 KB [M-sandbox] | packet length delta for the day-1..3 cohort at day 7; `landmarks_reduced` | Builder B |
+| Idle frames/day; dropped; reasons | 960 [D] | `idle_sent`, `idle_dropped`; browser reasons | rig operator |
+| Idle frame bytes | 64 KiB [D] | `sum(length(jpeg))/count` over `idle_frames` | Builder B |
+| Uplink bytes/day | 39 MB [A] | `bytes_sent` per day | rig operator |
+| Items placed | 10–30 [A] | `location_status = placed` count | Builder B |
+| Promotions/day | ≤ 24 per item [D] | `promoted` per day; `idle_promoted` | rig operator (health), Builder B |
+| Re-obs CPU per pair; per day; deferred | 10 ms [A]; ≤ 300 s [D] | `reobs_cpu_s`, `checked`, `gated`, `embedded`, `reobs_deferred` per day | rig operator (health), Builder B (`maintenance_counters`) |
+| Embed ms per crop | 60–150 ms [A] | derived from the row above; the P-104 laptop benchmark | Builder B; Tester |
+| Write-path s per episode | 0.3–1.0 s [A] | `process_cpu_s / processed` if open question 18 is adopted; otherwise a one-off timer run by Builder B | Builder B |
+| Local chat questions/day | 20 [A] | `chat_local` if adopted; otherwise the operator's count | rig operator |
+| Image serves/day; bytes | 27/day; 100 KB [A] | `image_serves` if adopted; otherwise the uvicorn access log count for the week | Builder B |
+| Support minutes; categories; self-explanatory share | S=3 (10 min) [A] | the ticket log, week 1 (onboarding week: expect the 45 min row) | pilot lead |
+| Telemetry row bytes | 656 B [M-sandbox] | `frame_counters` row lengths | Builder B |
+| Database file size at day 7 | 43.5 MB/day → 0.3 GB [A] | `stat` of the SQLite file before and after `apply_retention` | Builder B |
+
+Every value entered goes into `RESEARCH_EXPERIMENTS.md` under the X-ID the run creates
+(its "Minimum run record": device, OS, browser, mount, commit, uncommitted changes), with
+the [M] label and the date; Finance then recomputes §2–§3 from the measured column and the
+labels in §10.4 change from [A] to [M] one row at a time.
+
+### 10.4 Pre-rig bottom line: the cost table as it stands after CP4, every value labelled
+
+Costs before and with support, at P = $10 (fee = 0.029 × 10 + 0.30 = 0.59), BYOD, 30-day
+retention as CP4 decided (`A_b = 0.5413`, §9.6 R=30 row; the 90-day `0.72` the §3 tables
+keep is shown beside it; Appendix D.5):
+
+| Variant | `A` metered cloud | Fee | `H` | Subtotal (no S) | + S=3 → margin | + S=8 → margin | Label of each value |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| (a) Rig, BYOD | 0.0000 | 0.5900 | 0.7500 | **1.3400** | 4.3400 → **56.60 %** | 9.3400 → 6.60 % | A: [D] zero cloud; fee: [Q-UNVERIFIED] rate at an [A] price point; H: [A]; S: [A]; W: 0 by [A] policy |
+| (b) Hosted, CP4 30-day default | 0.5413 | 0.5900 | 0.7500 | **1.8813** | 4.8813 → **51.19 %** | 9.8813 → 1.19 % | A: [A] workload × [Q-UNVERIFIED] prices, composition below |
+| (b) Hosted at 90 days (the §3 table value) | 0.7200 | 0.5900 | 0.7500 | 2.0600 | 5.0600 → 49.40 % | 10.0600 → −0.60 % | same |
+| (b) Hosted, worst with the §9.4 caps | 1.1000 | 0.5900 | 0.7500 | 2.4400 | 5.4400 → 45.60 % | 10.4400 → −4.40 % | [A] bound |
+| (c) + chat, cheap tier, 30-day | 0.6763 | 0.5900 | 0.7500 | 2.0163 | 5.0163 → 49.84 % | 10.0163 → −0.16 % | chat: [A] 20/day × 1,650 tokens × [Q-REPO/Q-UNVERIFIED] tier |
+| (c) + chat, $1/$5 tier, 30-day | 1.8913 | 0.5900 | 0.7500 | 3.2313 | 6.2313 → 37.69 % | 11.2313 → −12.31 % | same; tier [Q-REPO] 2026-10-06 |
+| (c) + chat, $2/$10 tier, 30-day | 3.2413 | 0.5900 | 0.7500 | 4.5813 | 7.5813 → 24.19 % | 12.5813 → −25.81 % | same |
+
+Composition of the hosted `A_b = 0.5413` (AWS, batched objects, 30 days; §9.6 and Appendix
+D.5), each line with the label of the quantity and of the price it multiplies:
+
+| Line | $/user-month | Quantity label | Price label |
+| --- | ---: | --- | --- |
+| VM share, t3.medium at 100 users/VM (write-path compute inside) | 0.3277 | [A] 100 users/VM at 25 % utilisation | [Q-UNVERIFIED] $0.0416/h |
+| Packet objects, 1.00 GB × $0.023 | 0.0230 | [A] 50 ep/day × 786 KB (the bytes are [M-sandbox] on the real schema; the counts are [A]) | [Q-UNVERIFIED] |
+| Block storage: idle cache at its cap, promoted frames, rows; 0.34 GB × $0.08 | 0.0269 | [D] caps, [A] rates of promotion | [Q-UNVERIFIED] |
+| Snapshot of both, 1.34 GB × $0.05 | 0.0669 | [A] daily snapshot of the full set | [Q-UNVERIFIED] |
+| Re-observation budget, 2.5 vCPU-h net of v1's 0.6667 | 0.0381 | [D] `REOBS_CPU_BUDGET_S = 300` [M-code], taken as fully used | [Q-UNVERIFIED] |
+| Extra VM disk, (80 − 30) GB × $0.08 / 100 | 0.0400 | [A] per-household files (CP4 decision 8) | [Q-UNVERIFIED] |
+| PUT requests, batched (cap 4) | 0.0111 | [A] 74 objects/day | [Q-UNVERIFIED] |
+| GET requests | 0.0003 | [A] 800/month | [Q-UNVERIFIED] |
+| Egress, photo answers | 0.0072 | [A] 800 × 100 KB | [Q-UNVERIFIED] |
+| **Sum** | **0.5412** (0.5413 unrounded) | | |
+
+Status of the inputs, counted: of the 23 assumption rows in §10.3, **0 are measured on a
+device**; 6 carry [M-sandbox] bounds on synthetic inputs (synthetic keyframe, burst and
+idle-frame sizes, landmark bytes on the real schema, registration ms, the telemetry body);
+the [D]/[M-code] constants in rows 2, 8, 12 and 13 are caps and budgets that bound rather
+than measure; everything else is [A]. Every external price is [Q-UNVERIFIED] except the
+two Anthropic tiers [Q-REPO]. The §7 sentence therefore stands unchanged: none of this is
+a margin claim (RESEARCH_LOG B-17, C-10), and the difference between the rig and the
+hosted variant ($0.54 at 30 days, 5.4 points at $10) is less than two support minutes
+($0.60).
+
+**The three numbers that most change the margin and must be measured first**, in order of
+leverage at P = 10, with the instrument that measures each from day one of the rig:
+
+1. **Support minutes per household-month (`S`).** 3 margin points per minute; the
+   assumed range (10–25 min) spans 50 points, from +56.6 % to +6.6 % on the rig, and
+   crosses zero at 27–29 min. Instrument: the ticket log of §10.2 from the first
+   onboarding contact, with the roster for the denominator and the `self_explanatory`
+   field for cap 9's effect. Nothing in the code measures it; nothing in the code can
+   bound it.
+2. **Episodes per day × stored bytes per episode** (`coverage.episodes`,
+   `length(packet)`), together with camera-on hours. It is the multiplier on every metered
+   hosted line (the VM share through its compute; the packet, packet-snapshot and PUT
+   lines directly: $0.084 of the $0.54 at 30 days, $0.227 of the $0.72 at 90) and on the
+   rig's disk and laptop load; a 2× miss is +$0.08 (30 days) to +$0.23 (90 days), the 10×
+   that cap 3 exists for would be +$0.76 to +$2.04; and it is the number that decides
+   whether caps 2–3 ever engage. Instrument: the CP5 counters and one SQL query, available
+   on day one.
+3. **CPU per episode on the write path and per day in re-observation** (`reobs_cpu_s`,
+   `reobs_deferred`, and the proposed `process_cpu_s`). It sets users per VM, the
+   largest hosted line: a measured p95 could move the $0.33 VM share to $0.11 or $1.09
+   (§6 item 5: +2 to −8 margin points at $10), and on the rig it is whether the household
+   laptop keeps up (`reobs_deferred > 0` is coverage lost, not money). Instrument: CP4's
+   `maintenance_counters` today and open question 18 for the write path.
+
+The chat tier is the fourth lever (up to 26 points between tiers at 20/day, §2.3) and is
+deliberately not in the list: at CP5 it is a decision bounded by cap 1, not a measurement,
+because no provider exists (`POST /api/chat` `mode=cloud` returns 503). What the rig can
+measure now is the local question count per day (the proxy for the 20/day policy), which
+is why `chat_local` is in open question 18.
+
+---
+
 ## Open questions for the coordinator
 
 1. **Chat policy vs cap.** The 20/day × 1.5k/150 policy on a $2/$10 model costs $2.70;
@@ -1289,6 +1655,40 @@ and 3 are the slots. None of §9 is an on-device measurement.
     would cut the stored set by a quarter and is not in CP4's scope)? Finance has no
     preference beyond consistency of the number; the tester's CP4 runs will measure it
     (§9.7).
+
+*Added in v1.3 (CP5):*
+
+18. **Three server-side daily counters the browser cannot see.** CP5's telemetry is
+    browser-side, so three finance assumptions have no slot after the rig run: write-path
+    CPU per episode (§6 item 2), local chat questions per day (the proxy for the 20/day
+    policy, §6 item 4) and photo serves per day with their bytes (cap 8 asked for them "in
+    the frame counters (CP5)", §6 item 5). May CP5 add one `maintenance_counters` row per
+    UTC day for each (`process_cpu_s` charged by `process_pending` with the `perf_counter`
+    pattern `reobs_cpu_s` already uses, `chat_local`, `image_serves`, `image_bytes`) and
+    expose them as integers in `GET /api/coverage`? Counts only, no text; not a cap.
+19. **The ticket log and roster (§10.2.1): owner, place and vocabulary.** Who keeps them,
+    where (outside the product; no personal data; the pseudonym map with the pilot lead
+    alone), and is the closed category list (`setup/mount`, `consent questions`,
+    `Wi-Fi/TLS`, `camera permission`, `false answer`, `missed capture`, `erasure request`,
+    `other`) accepted as the one the first monthly `S` is computed from? Founder minutes
+    count at the loaded rate; the first report with ≥ 10 active households is the first
+    `S` that is a measurement.
+20. **Retention of the daily coverage aggregates.** The plan expires telemetry rows with
+    `episodes_days` (30). The raw 60 s rows can go; the dozen integers of `coverage(day)`
+    are the only durable record of camera-on hours, gaps and episodes per day, and §10.3
+    needs them for weeks, not days. Privacy agent: are per-day integer aggregates keyed by
+    `profile_id` and day personal data under the G-PRIV map, and if not, may they be kept
+    for 365 days in a separate table?
+21. **The loaded support rate.** $18/h lean and $19.20/h heavy are [A]; the pilot's
+    support person is the founder. Finance will report minutes as the primary number and
+    dollars at both rates until payroll exists; does the coordinator want a third rate
+    (an agency's billed rate) carried for the agency channel?
+22. **Status panel wording for the two silent failures.** §10.2.4 expects `missed
+    capture` and `Wi-Fi/TLS` to become self-service; that needs the panel to say, in
+    plain words, "camera on N h today, M gaps (reason)", "K captures waiting to upload",
+    and "the laptop/certificate/Wi-Fi" explanation (cap 9), not only the raw counters. C
+    and Oversight own the wording; Finance asks that the `self_explanatory` field of the
+    log be read against it at the first report.
 
 ---
 
@@ -1879,4 +2279,123 @@ print("=== C.9 Erasure / VACUUM INTO headroom ===")
 for label, hh_db_gb in (("per-household DB, expected (idle at cap + promoted + rows + embeddings)", D("0.21") + (PROMO_CAP_FRAMES * IDLE_TARGET * 90 + (ITEMS_HI * 24 + EP_DAY * OBS_PER_EP) * (OBS_ROW + EMB_ROW) * 90) / GB),
                         ("per-household DB if packets also live in SQLite (the rig), R=90 typical", D("0.21") + (PROMO_CAP_FRAMES * IDLE_TARGET * 90 + (ITEMS_HI * 24 + EP_DAY * OBS_PER_EP) * (OBS_ROW + EMB_ROW) * 90) / GB + EP_DAY * (3 * P_TYP + 87 * P_TYP_R) / GB)):
     print(f"{label}: {q(hh_db_gb, '0.01')} GB -> VACUUM INTO needs 2x = {q(2 * hh_db_gb, '0.01')} GB free; x100 households in ONE multi-tenant file = {q(100 * hh_db_gb, '0.1')} GB -> 2x = {q(200 * hh_db_gb, '0.1')} GB")
+```
+
+## Appendix D: CP5 arithmetic (v1.3)
+
+The tables in §10 were produced by the script below (Python 3, `decimal` for money, `json` only to size the telemetry body). Run it with `python3 -I appendix_d.py` after pasting it to a file; it prints the telemetry body size, the rows/bytes/storage/cost grid, the `S` thresholds at P=10, an illustrative month through the §10.2.2 formula, and the line-by-line hosted `A_b` at the CP4 30-day default with the sensitivity rows at that value. The one [M-sandbox] input is the body size it computes itself (656 B compact) from the architect's fixed schema with representative values; it is a size of the schema, not a device measurement.
+
+```python
+"""PAM FINANCE.md v1.3 (CP5) arithmetic. Decimal only for money; json only to size the
+telemetry row. Every input is an assumption, a plan constant or an unverified list price;
+see docs/FINANCE.md section 10 for labels.
+"""
+import json
+from decimal import Decimal as D, getcontext, ROUND_HALF_UP, ROUND_CEILING
+
+getcontext().prec = 28
+
+
+def q(x, places="0.0001"):
+    return x.quantize(D(places), rounding=ROUND_HALF_UP)
+
+
+def pct(x):
+    return (x * 100).quantize(D("0.01"), rounding=ROUND_HALF_UP)
+
+
+print("=== D.1 Telemetry row size (the plan's POST /api/telemetry body, realistic values) ===")
+body = {"schema_version": 1, "device_id": "d" * 32, "session_id": "s" * 32, "t_ms": 1760000000000,
+        "clock_anchor": 1760000000000, "window_ms": 60000,
+        "counters": {"frames_captured": 600, "frames_analysed": 598, "frames_skipped_busy": 2,
+                     "frames_dropped_backpressure": 0, "landmark_results": 598, "landmark_timeouts": 0,
+                     "episodes_started": 1, "episodes_finished": 1, "episodes_aborted": 0,
+                     "packets_sent": 1, "packets_acked": 1, "idle_sent": 2, "idle_dropped": 0,
+                     "gaps": 0, "gap_ms": 0, "bytes_sent": 804864},
+        "timing": {"fps_observed": 9.97, "infer_ms_p50": 38.4, "infer_ms_p95": 71.2, "tick_ms_p95": 96.5},
+        "settings": {"width": 1280, "height": 720, "frame_rate": 10}}
+compact = len(json.dumps(body, separators=(",", ":")).encode())
+pretty = len(json.dumps(body).encode())
+worst = {**body, "counters": {k: 2**31 - 1 for k in body["counters"]},
+         "timing": {k: 99999.99 for k in body["timing"]}}
+worst_len = len(json.dumps(worst, separators=(",", ":")).encode())
+row_overhead = 64 + 32 + 32 + 8 + 8 + 8 + 40  # profile_id, device_id, session_id, t_ms, received_ms, window_ms, SQLite record+index [A]
+print(f"compact JSON body: {compact} B; with default spacing: {pretty} B; every counter at 2^31-1: {worst_len} B")
+print(f"stored row = body JSON columns ({compact} B compact) + key columns/overhead ~{row_overhead} B = ~{compact + row_overhead} B; bound used: 2,048 B; body cap 65,536 B")
+
+print()
+print("=== D.2 Telemetry rows, bytes, storage, hosted cost ===")
+ROW_BOUND, ROW_TYP, CAP = D(2048), D(compact + row_overhead), D(65536)
+GB = D(10) ** 9
+GP3, SNAP = D("0.08"), D("0.05")      # [Q-UNVERIFIED] v1 rates
+HETZ_VOL = D("0.044") * D("1.08")
+VCPU_H_AWS = D("0.0416") / 2
+for hours, sessions in ((D(8), 1), (D(24), 1)):
+    rows_day = hours * 60 + sessions          # one per 60 s + one at stop
+    for label, rb in (("bound 2 KB", ROW_BOUND), (f"typical {ROW_TYP} B", ROW_TYP), ("every post at the 64 KiB cap", CAP)):
+        day_b = rows_day * rb
+        for R in (D(30), D(90)):
+            held = day_b * R
+            cost = held / GB * (GP3 + SNAP)
+            print(f"camera {hours} h/day, {rows_day} rows/day x {label}: {q(day_b / 1000, '0.1')} KB/day; R={R}: {q(held / GB * 1000, '0.1')} MB held -> gp3+snapshot ${q(cost, '0.0001')}/user-month (Hetzner volume+snap ${q(held / GB * (HETZ_VOL + SNAP), '0.0001')})")
+posts_month = (D(8) * 60 + 1) * 30
+ingest_ms = D(1)  # [A] JSON parse + one INSERT
+print(f"ingest CPU at 8 h: {posts_month} POSTs/month x {ingest_ms} ms = {q(posts_month * ingest_ms / 1000, '0.1')} CPU-s = {q(posts_month * ingest_ms / 1000 / 3600, '0.0001')} vCPU-h = ${q(posts_month * ingest_ms / 1000 / 3600 * VCPU_H_AWS, '0.00001')}")
+coverage_gets = D(20) * 30 * D(2048)
+print(f"Status panel GET /api/coverage: 20/day x 2 KB = {q(coverage_gets / 1000, '0.1')} KB/month egress = ${q(coverage_gets / GB * D('0.09'), '0.00001')} at $0.09/GB")
+uplink = (D(8) * 60 + 1) * ROW_BOUND
+print(f"phone uplink for telemetry at 8 h: {q(uplink / 1000, '0.1')} KB/day vs ~39,300 KB/day of packets = {pct(uplink / D(39300000))} %")
+
+print()
+print("=== D.3 Support: S thresholds at P=10 from the section 3 formula ===")
+FEE_RATE, FEE_FIXED, H = D("0.029"), D("0.30"), D("0.75")
+def fee(P):
+    return FEE_RATE * P + FEE_FIXED
+P = D(10)
+RATE_LEAN, RATE_HEAVY = D(18), D("19.20")
+A_rows = (("(a) rig", D(0)), ("(b) hosted, CP4 30-day default (A_b 0.5413)", D("0.5413")),
+          ("(b) hosted at 90 days (A_b 0.72, the section 3 table value)", D("0.72")), ("(b) hosted worst (1.10)", D("1.10")),
+          ("(c) + chat cheap tier, 30-day (0.5413+0.135)", D("0.5413") + D("0.135")),
+          ("(c) + chat $1/$5 tier, 30-day (0.5413+1.35)", D("0.5413") + D("1.35")),
+          ("(c) + chat $2/$10 tier, 30-day (0.5413+2.70)", D("0.5413") + D("2.70")))
+for label, A in A_rows:
+    s_zero = P - fee(P) - A - H
+    s_40 = P * (1 - D("0.40")) - fee(P) - A - H
+    print(f"{label}: margin 0 at S = ${q(s_zero, '0.01')} = {q(s_zero / RATE_LEAN * 60, '0.1')} min/household-month at $18/h; 40 % margin at S <= ${q(s_40, '0.01')} = {q(s_40 / RATE_LEAN * 60, '0.1')} min; S=3 is {q(D(3) / RATE_LEAN * 60, '0.1')} min, S=8 is {q(D(8) / RATE_HEAVY * 60, '0.1')} min at $19.20/h")
+print("one minute per household-month = $", q(RATE_LEAN / 60, "0.01"), "= ", pct(RATE_LEAN / 60 / P), "margin points at P=10")
+
+print()
+print("=== D.4 Worked S from a hypothetical month of the ticket log (format check only) ===")
+# households active, minutes by category; onboarding amortised over tenure T months [A]
+N = D(10); T = D(12)
+ongoing_min = {"setup/mount": 25, "consent questions": 10, "Wi-Fi/TLS": 60, "camera permission": 20,
+               "false answer": 30, "missed capture": 40, "erasure request": 5, "other": 10}
+onboard_min_total = D(450)  # 10 households x 45 min first contact [A], amortised
+M_ongoing = D(sum(ongoing_min.values()))
+S = (M_ongoing / N + onboard_min_total / N / T) * RATE_LEAN / 60
+print(f"ongoing {M_ongoing} min / {N} households = {q(M_ongoing / N, '0.1')} min; onboarding {onboard_min_total} min / {N} / {T} months = {q(onboard_min_total / N / T, '0.1')} min; S = ${q(S, '0.01')} per household-month (illustrative input, not a measurement)")
+
+print()
+print("=== D.5 Hosted A_b at the CP4 30-day default, line by line (section 9.6 R=30 row) ===")
+lines = (("VM share, t3.medium at 100 users/VM (write-path compute inside)", D("0.3277"), "[Q-UNVERIFIED] x [A]"),
+         ("packet objects, 1.00 GB x $0.023", D("0.0230"), "[A] bytes x [Q-UNVERIFIED]"),
+         ("block storage (idle cache at cap, promoted frames, rows), 0.34 GB x $0.08", D("0.0269"), "[D]/[A] x [Q-UNVERIFIED]"),
+         ("snapshot of both, 1.34 GB x $0.05", D("0.0669"), "[A] x [Q-UNVERIFIED]"),
+         ("re-observation budget, 2.5 vCPU-h net of v1's 0.6667", D("0.0520") - D("0.6667") * VCPU_H_AWS, "[D] budget x [Q-UNVERIFIED]"),
+         ("extra VM disk, (80-30) GB x $0.08 / 100", D("0.0400"), "[A] x [Q-UNVERIFIED]"),
+         ("PUT requests, batched", D("0.0111"), "[A] x [Q-UNVERIFIED]"),
+         ("GET requests", D("0.0003"), "[A] x [Q-UNVERIFIED]"),
+         ("egress, photo answers", D("0.0072"), "[A] x [Q-UNVERIFIED]"))
+total = D(0)
+for label, v, lab in lines:
+    total += v
+    print(f"  {label}: ${q(v)} {lab}")
+print(f"  sum: ${q(total)} (section 9.6 prints 0.5413 from the unrounded C.7 lines)")
+A30 = D("0.5413")
+for label, A in (("rig", D(0)), ("hosted 30-day", A30), ("hosted 90-day", D("0.72")), ("hosted worst", D("1.10")),
+                 ("chat cheap 30-day", A30 + D("0.135")), ("chat $1/$5 30-day", A30 + D("1.35")), ("chat $2/$10 30-day", A30 + D("2.70"))):
+    sub = fee(P) + A + H
+    m3 = (P - sub - 3) / P
+    m8 = (P - sub - 8) / P
+    print(f"{label}: A={q(A)} subtotal (no S) {q(sub)} ; +S=3 {q(sub + 3)} margin {pct(m3)} % ; +S=8 {q(sub + 8)} margin {pct(m8)} %")
 ```

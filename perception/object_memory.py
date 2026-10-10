@@ -27,10 +27,11 @@ except ImportError:
 # SQLite user_version values this code can open. 0/1 are legacy (v1 tables only),
 # 2 is the CP0-CP2 episode ledger, 3 adds the CP3 identity tables and the
 # local_observations.candidates column, 4 (CP4) adds idle_frames, reobservations,
-# containment, retention, migrations and the erasure/retention columns. Anything
+# containment, retention, migrations and the erasure/retention columns, 5 (CP5)
+# adds frame_counters (telemetry) and local_observations.consent_version. Anything
 # newer is refused before any write.
-SUPPORTED_VERSIONS = (0, 1, 2, 3, 4)
-CURRENT_VERSION = 4
+SUPPORTED_VERSIONS = (0, 1, 2, 3, 4, 5)
+CURRENT_VERSION = 5
 # Sidecars SQLite may create next to the database. PERSIST journal mode uses only
 # the -journal file, which _connection pre-creates privately before SQLite opens
 # it (valid because PERSIST keeps the file; SQLite reuses an existing one). -wal

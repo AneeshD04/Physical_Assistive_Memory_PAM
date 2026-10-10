@@ -547,9 +547,170 @@ anyone whose hands are in frame on the rig; confirm the BIPA §15 wording at the
 before any consent packet is used with a household; the Windows laptop run of `sidecar_report()`,
 the PRAGMAs and the erase-all swap path; the Playwright no-egress smoke test with real assets.
 
-**CP5 resolver and harness.** Five shapes end to end with photo; `perception/rubric.py`
-scoring every scripted query into the five outcomes with coverage reported separately;
-the week-2-to-3 scripted cases as synthetic episode scripts; browser frame counters
-posted to the server and stored; coverage-loss reporting; the Playwright smoke test
-extended to a full placement-to-answer flow. After CP5 the user runs the rig on an
-iPhone (P-101, P-103, P-105) and the numbers replace every "initial value" above.
+### CP5 in detail: resolver, scoring harness, frame accounting, notices (architect, 2026-10-10)
+
+**Why this is last before the rig.** CP1–CP4 built every stage; CP5 makes the answer a
+single, inspectable contract (Part 1 section 7), makes the system scorable on scripted
+cases before any real footage (Part 1 section 9, the five-outcome rubric), makes the browser
+account for every frame (spec item 4, the counters that show when the rig stalls), and
+ships the notices the licence register requires. After CP5 the rig goes on the iPhone and
+P-101/P-103/P-105 replace the "initial values".
+
+**Interfaces (fixed by the architect).**
+
+*Resolver (A)*. `perception/resolver.py`: a pure function
+`resolve(query: str, items: list[dict], *, as_of_ms: int, index_pending: bool, policy: dict | None = None) -> Answer`
+that takes the aged projection (what `_projection` returns, including `lookalikes`,
+`inference`, `stale_reason`, `stale_since_ms`, `aged`, `evidence_expired`, `reference_image`,
+`observed_at_ms`, `location_status`, `identity_status`) and produces the answer; `answer_text`
+delegates to it (behaviour of every existing test preserved). `Answer` is a dict with exactly:
+`shape` ∈ confident|hedged|abstain|group|clarify; `text`; `members` (item DTOs); `reference_image`
+(`{frame_id, bbox}` or null; null for abstain); `target_indicated` (bool, false when
+reference_image is null); `capture_time_ms` (null for abstain); `identity_status` ∈
+matched_trusted|matched_provisional|group|unknown; `location_status` ∈ placed|sighted|inferred|
+stale|unknown; `room` ("room unknown" until a source exists); `index_pending`; `question`,
+`options`, `unresolved_observation_id` (clarify/group only); `basis` (ordered list of short
+machine reasons from a closed vocabulary: trusted_match, provisional_match, placed, sighted,
+inferred, aged, expired, negative_reobservation, picked_up, lookalikes, name_ambiguous,
+no_evidence, index_pending, consent_pending). Decision table, in precedence order, one row per
+test: no matching member → abstain (no "last saw", no image); several distinct items match the
+words → clarify; members are mutual lookalikes → group (no member upgraded; per-member
+provenance); single member: identity provisional → hedged ("I have a sighting that may be
+{name}…"); identity trusted and location placed, not aged, no negative re-observation →
+confident; inferred → hedged ("I think…"); negative re-observation → hedged (old place as
+history); aged 24 h–7 d → hedged; aged over 7 d → abstain; picked_up/stale by pickup → hedged
+without a current location; evidence expired → the same shape without an image
+(`target_indicated` false). `policy` may carry `max_members` (default 8) and `age_*` overrides;
+everything else is fixed. The hedged/abstain texts never claim a sighting they do not have.
+
+*Rubric (A)*. `perception/rubric.py`: `score(answer: dict, truth: dict) -> str` with truth
+`{item_id|None, location_status_now, location_text_now, moved_since: bool, medication: bool}`:
+`correct` = confident and the member is the true item and the location is current;
+`hedged-correct` = hedged with the true item and a location that is current or truthfully marked
+historical; `hedged-wrong` = hedged pointing at a wrong item or a stale place presented as
+current; `confident-wrong` = confident with a wrong item or a non-current place; `abstain` =
+abstain (clarify/group count as `abstain` for accuracy and as `asked` for coverage).
+`summarize(records) -> dict` reports accuracy among answered, coverage (answered / asked),
+confident-wrong rate over all queries, the same three over medication queries only, and the
+historical-fidelity vs current-usefulness split (a confident answer with a truthful old photo of
+a moved item is `confident-wrong` for usefulness and `fidelity_ok`). Pure, no store.
+
+*Scenario runner (A, scenarios by the Tester)*. `perception/scenario_runner.py`:
+`run_scenario(path, *, store_factory) -> list[record]` executes a JSON scenario against a real
+store with the fixture processor and the deterministic embedder, and `scripts/run_scenarios.py`
+runs a directory and prints the rubric summary. Scenario schema (fixed): `{"name", "basis",
+"clock_start_ms", "steps": [...]}` with step kinds `episode` (a packet description the runner
+materialises with the synthetic frame generator: items present, who placed what where, actor),
+`idle` (idle frame: which items are still at their place), `correction` (link/unlink/assign/
+rename), `gap` (coverage loss: screen lock, network loss — the runner records a gap and skips
+capture), `advance` (clock), and `query` (`text`, `truth`). The seven scripted cases from Part 1
+section 10 item 5 are mandatory: new unlabelled item queried before indexing; fast put-down;
+observed caregiver relocation; later sighting after an unobserved relocation; two refills with
+matching patient, drug and dose (lookalikes → group); network loss and screen lock as coverage
+loss; plus a medication query set. Expected outcomes in scenarios are software-correctness
+expectations on synthetic data, never accuracy claims; the summary prints that sentence.
+
+*Frame accounting (C → B → A)*. The browser keeps counters per capture session and posts them
+every 60 s and at stop to `POST /api/telemetry` `{schema_version: 1, device_id, session_id,
+t_ms, clock_anchor, window_ms, counters: {frames_captured, frames_analysed, frames_skipped_busy,
+frames_dropped_backpressure, landmark_results, landmark_timeouts, episodes_started,
+episodes_finished, episodes_aborted, packets_sent, packets_acked, idle_sent, idle_dropped, gaps,
+gap_ms, bytes_sent}, timing: {fps_observed, infer_ms_p50, infer_ms_p95, tick_ms_p95}, settings:
+{width, height, frame_rate}}` (all integers/floats, bounded; no free text). Store table
+`frame_counters(profile_id, device_id, session_id, t_ms, received_ms, window_ms, counters JSON,
+timing JSON, settings JSON)` with `ingest_telemetry(raw)` and `coverage(day_utc) -> {camera_on_ms,
+gap_ms, episodes, packets, idle_sent, idle_dropped, sessions}`; retention: telemetry rows expire
+with `episodes_days`. Server: `POST /api/telemetry` (protected, origin, 64 KiB cap), `GET
+/api/coverage?day=YYYY-MM-DD`, health `coverage` for today. Browser: a "Status" panel in the
+Privacy view showing today's coverage and the live counters; coverage loss is reported, never
+hidden.
+
+*Notices (B + C + Oversight)*. `server/notices.json` (B writes it; Oversight verifies it against
+`docs/LICENSES.md`): one entry per shipped or optionally provisioned component
+`{component, version, licence, source_url, notice_text}` including the Apache-2.0 NOTICE
+obligations (MediaPipe), DINOv2, ONNX Runtime, FastAPI/Starlette/uvicorn/pydantic/numpy/OpenCV,
+Tabler icons, and the CC BY 4.0 attribution for any CUTE-derived calibration (shown only when such
+a calibration exists). `GET /notices` renders it as a plain page (public, no session, no-store
+not required); the Privacy view links to it.
+
+*Small items carried from CP3/CP4 reviews*: `redact_item(item_id, actor="operator")` keeps the
+alias but takes the actor; `retention_set` audit records old and new values; migrated rows are
+stamped `consent_version = "legacy-v1"`; `server/requirements.txt` pins `onnxruntime==1.30.0`
+and `requirements-dev.txt` is referenced from the README's test instructions (B); the chat view
+shows a collapsible "Why this answer" listing the `basis` reasons in plain words (C).
+
+*Tester*: `server/test_cp5_resolver.py` (one test per decision-table row plus B-14 per-member
+precedence fixtures; `answer_text` parity with the resolver), `server/test_cp5_rubric.py`
+(scoring and summary arithmetic incl. medication split and fidelity/usefulness),
+`server/fixtures/cp5/scenarios/*.json` (the seven mandatory cases + medication set, each with
+`basis`) and `server/test_cp5_scenarios.py` (every scenario runs and matches its expected
+outcomes; the summary never claims accuracy), `server/test_cp5_telemetry.py` (ingest validation,
+caps, coverage math across sessions and gaps, expiry), `server/test_cp5_api.py` (routes, notices
+page content vs `server/notices.json`, no session for `/notices`), smoke: full flow placement →
+chat answer with photo, "Why this answer", correction, re-answer; counters posted under the fake
+clock; Status panel; notices link. No skipped-green tests.
+
+*Oversight*: `docs/OVERSIGHT_CP5.md`: answer-contract truthfulness review (every text template
+against Part 1 rule 12), notices completeness against the register, the rubric's claims
+language, and the consolidated **rig checklist** (every human step from CP2–CP4 §0 lists in one
+ordered list with the command, the expected output, and the gate it unblocks).
+
+*Finance*: `docs/FINANCE.md` v1.3: telemetry cost (negligible, state it), the support-cost
+measurement plan for the first households (what the ticket log must record), and the list of
+P-105 measurements that replace each assumption in the model.
+
+**CP5 acceptance.** `server/test_cp5_*.py` and the extended smoke test pass; every earlier suite
+passes; `scripts/run_scenarios.py server/fixtures/cp5/scenarios` prints a rubric summary with the
+expected outcomes and the no-accuracy-claim sentence; `/notices` lists every component in
+`docs/LICENSES.md` marked as shipped; the browser posts counters and the Status panel shows
+coverage; no new runtime dependency; no request leaves the origin.
+
+**Not in CP5.** Room names, OCR, speech, the native build, any real-footage number.
+
+### CP5 result (2026-10-10)
+
+**Passed: 431/431 methods, 0 skips**, reproduced by the coordinator in a clean process: six
+new `server/test_cp5_*.py` suites (fixtures 6, resolver 36, rubric 12, scenarios 9, telemetry 13,
+api 7), `phone/test/test_ui_smoke.py` grown to 26, every earlier suite unchanged;
+`scripts/run_scenarios.py` runs the eight scripted scenarios (24 queries, all matching their
+software-correctness expectations, 0 confident-wrong, the no-claim sentence printed first and
+last); `scripts/check_notices.py` reports the 22 notice entries in sync with the register.
+Oversight's pass 2 (`docs/OVERSIGHT_CP5.md`): every resolver template passes the permitted/
+forbidden sentence tables, the rubric prints no accuracy claim, telemetry adds no personal-data
+class (packet gap reasons are never copied), notices carry the required attribution lines.
+The one production defect the tester's final pin found (`max_members: 1` raised a TypeError)
+is fixed: a question needs two candidates, so the bound is 2..32.
+
+Decisions made during CP5 (binding; each has a test):
+
+1. **One answer contract.** `perception/resolver.py` is a pure decision table (14 named rows in
+   precedence order) producing `{shape, text, members, reference_image, target_indicated,
+   capture_time_ms, identity_status, location_status, room, index_pending, basis}`;
+   `answer_text` delegates to it. `basis` is a closed 15-token vocabulary in fixed order; the
+   browser renders it as "Why this answer".
+2. **Coverage gaps hedge** (Part 1 §7): a packet gap or a telemetry window with `gap_ms > 0`
+   ending after a placement adds `coverage_gap`; a trusted, placed, fresh item then answers
+   hedged ("…the camera was off or interrupted for a while since, so it may have moved.").
+3. **Certainty is monotone non-increasing:** provisional + older than 7 d → abstain; the
+   lowest-certainty condition always wins.
+4. `target_indicated` is true only for a trusted identity; provisional answers keep the
+   evidence image with a dashed "unverified" outline. Expired evidence keeps `capture_time_ms`.
+   Clarify options are names and last-seen dates only; group members keep their own status
+   and are outlined only when trusted.
+5. **Rubric:** five outcomes; the summary reports `correct_among_answered` (never "accuracy"),
+   coverage, confident-wrong and hedged-wrong rates, the medication split and the
+   fidelity-versus-usefulness split; `NO_CLAIM_SENTENCE` is mandatory.
+6. **Frame accounting:** per-window deltas every 60 s and at stop to `POST /api/telemetry`
+   (counters, timings and settings only; closed schema; not consent-gated); daily aggregates in
+   `coverage_days` kept 365 days; live rows expire with `episodes_days`; maintenance counters
+   (`process_cpu_s`, `reobs_cpu_s`, `chat_local`, `image_serves`, `image_bytes`) per UTC day.
+7. **Notices:** `server/notices.json` (22 entries with `condition`) rendered at `/notices`
+   (public, escaped); conditional entries (hand model, identity model, Tabler, CUTE) render only
+   when their condition holds; `scripts/check_notices.py` keeps it in sync with `LICENSES.md` §8.
+8. Word-subset name matching is intended; `frame_rate` may be 0 when the camera does not report it.
+
+**Status after CP5: the software plan (CP1–CP5) is complete.** What remains is the rig: the
+ordered 26-step human checklist in `docs/OVERSIGHT_CP5.md` §5 (model licences and hashes, the
+DINOv2 export, a real calibration, the landmark release, the Windows laptop run, the iPhone
+measurements P-101/P-103/P-105 that replace every "initial value"), and the deferred purge of
+the legacy AGPL/unused requirements, which needs the user's go.

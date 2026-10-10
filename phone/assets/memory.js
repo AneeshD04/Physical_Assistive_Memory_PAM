@@ -1,5 +1,5 @@
 import { RetryQueue } from './memory-queue.js';
-import { ManualCamera, idleSummary } from './memory-camera.js';
+import { ManualCamera, idleSummary, COUNTER_KEYS, TIMING_KEYS, SETTING_KEYS } from './memory-camera.js';
 const $ = id => document.getElementById(id);
 const text = (element, value) => { element.textContent = value == null ? '' : String(value); };
 function node(tag, content, className) { const element = document.createElement(tag); if (content != null) text(element, content); if (className) element.className = className; return element; }
@@ -18,6 +18,31 @@ const RETENTION_FIELDS = [
   { key: 'idle_hours', input: 'retention-idle-hours', min: 1, max: 72, label: 'Idle stills', unit: 'hours' },
   { key: 'landmarks_hours', input: 'retention-landmarks-hours', min: 1, max: 168, label: 'Hand positions', unit: 'hours' }];
 const COUNT_KEYS = ['idle_cached', 'idle_promoted', 'revisions_expired', 'landmarks_reduced', 'revisions_erased'];
+// CP5 Status panel: today's coverage (GET /api/coverage?day=, the UTC day) and this
+// browser's live counters. Counts and times only; never a battery, thermal or
+// "accuracy" figure, and never a claim that a gap was quiet.
+const COVERAGE_KEYS = ['camera_on_ms', 'gap_ms', 'episodes', 'packets', 'idle_sent', 'idle_dropped', 'sessions'];
+let coverageSequence = 0;
+// CP5 "Why this answer": the server's closed basis vocabulary in plain words. Each
+// token maps to one fixed sentence fragment; a token this page does not know is
+// counted, never invented, and nothing is ever added that the server did not send.
+const BASIS_WORDS = {
+  trusted_match: 'identity recorded as trusted (a calibrated match or your own confirmation)',
+  provisional_match: 'identity only provisional',
+  placed: 'an observed placement',
+  sighted: 'only a sighting',
+  inferred: 'with a container',
+  aged: 'the placement is more than a day old',
+  expired: 'the evidence image has been deleted by retention',
+  negative_reobservation: 'it was seen gone from that place',
+  coverage_gap: 'the camera was off or interrupted since the placement',
+  picked_up: 'last seen being picked up',
+  lookalikes: 'it looks like other stored items',
+  name_ambiguous: 'several items share that name',
+  no_evidence: 'nothing stored matches',
+  index_pending: 'recent events are still being processed',
+  consent_pending: 'the disclosure has not been acknowledged'
+};
 // The server's own verdict on automatic hand recognition (GET /api/health
 // capabilities); null until a health response names that capability.
 let handPolicy = null;
@@ -87,14 +112,20 @@ const IDLE_SOURCE = 'reobservation';
 const IDLE_SOURCE_TEXT = 'Seen while idle (automatic still), not a hand event';
 const LEGACY_SOURCE_TEXT = 'Imported from the earlier app, unverified';
 function idleBadge() { return node('p', IDLE_SOURCE_TEXT, 'badge badge-idle'); }
-function image(item) {
+// `outline` (CP5, the answer contract): 'solid' when target_indicated is true (a
+// trusted identity), 'dashed' when the answer carries a reference_image but
+// target_indicated is false (the region is where a change was recorded; the
+// identity is unverified), 'none' when the answer's reference_image is null;
+// undefined (a catalogue card or an older server) keeps the record's own region,
+// solid for a trusted identity and dashed otherwise.
+function image(item, outline) {
   // CP4 retention: the packet bytes of an old revision were replaced by NULL; the
   // observation stays, its photo does not.
   if (item && item.evidence_expired === true) return node('p', 'Evidence image expired: the photo was removed by the retention window; the observation itself is kept.', 'muted evidence-expired');
   const url = safeImageURL(item);
   if (!url) return node('p', 'No evidence image available.', 'muted');
-  const box = targetBox(item);
-  const verified = item.identity_status === 'trusted';
+  const box = outline === 'none' ? null : targetBox(item);
+  const verified = outline === 'solid' ? true : outline === 'dashed' ? false : item.identity_status === 'trusted';
   const idle = item.source === IDLE_SOURCE;
   const alt = `Recorded evidence for ${item.name || 'unnamed item'}; not a live view.` + (box ? (verified ? ' The recorded item is outlined.' : ' The outlined region is where a change was recorded; the item identity is unverified.') : '') + (idle ? ` ${IDLE_SOURCE_TEXT}.` : '');
   const figure = evidenceFigure({ url, box, verified, alt });
@@ -155,9 +186,9 @@ function describe(item, target) {
   if (item.source === 'legacy_v1') target.append(node('p', LEGACY_SOURCE_TEXT, 'badge badge-legacy'));
   target.append(node('p', `Relevance: ${item.relevance || 'unknown'} · Source: ${item.source || 'not recorded'}`, 'muted'));
 }
-function itemCard(item) {
+function itemCard(item, outline) {
   const card = node('article', null, 'card item-card'); card.dataset.itemId = item.item_id;
-  card.append(node('h2', item.name || 'Unnamed item'), image(item)); describe(item, card);
+  card.append(node('h2', item.name || 'Unnamed item'), image(item, outline)); describe(item, card);
   const button = node('button', 'View evidence & history', 'secondary'); button.dataset.itemId = item.item_id;
   button.addEventListener('click', () => openDetail(item.item_id, button)); card.append(button); return card;
 }
@@ -221,12 +252,17 @@ const queue = new RetryQueue({
     logGap(`A saved capture was ${reason}; the server will not keep it, so it was removed from this browser and counts as a coverage gap.`);
     if (authenticated) notice(`One saved capture was ${reason} and was dropped. Nothing from before the erasure is re-added.`);
   },
-  consentRequired: () => { if (authenticated) void refreshConsent(); }
+  consentRequired: () => { if (authenticated) void refreshConsent(); },
+  // CP5 frame accounting: upload attempts, their bytes and durable acknowledgements
+  // are counted by the camera's session ledger (the queue itself keeps no counters).
+  sent: record => { camera?.count('packets_sent'); camera?.count('bytes_sent', Number.isSafeInteger(record?.size) ? record.size : 0); renderStatusLive(); },
+  acked: () => { camera?.count('packets_acked'); renderStatusLive(); },
+  reported: () => renderStatusSentences()
 });
 function resetPrivateUI() {
   authGeneration++; catalogueSequence++; detailSequence++;
   authenticated = false; queue.setAuthenticated(false);
-  if (camera) void camera.stop('Signed out or session expired');
+  if (camera) void camera.stop('Signed out or session expired', { interrupted: false });
   closeConfirm(); $('item-dialog').close(); selectedId = null; detailItem = null;
   $('detail-body').replaceChildren(); $('history').replaceChildren(); $('evidence-list').replaceChildren(); $('link-target').replaceChildren(); $('item-name').value = '';
   $('link-item').disabled = true; $('erase-item').disabled = true;
@@ -246,6 +282,76 @@ function resetPrivacyUI() {
   $('erase-all-phrase').value = ''; $('erase-all-pin').value = ''; $('erase-all').disabled = true;
   text($('erase-all-status'), 'The button enables once the exact phrase and your PIN are entered. The PIN is sent with the request and never stored in this page.');
   privacyNotice('');
+  coverageSequence++; renderCoverage(null); text($('coverage-status'), "Loading today's coverage…"); text($('status-status'), ''); renderStatusLive();
+}
+// --- CP5 Status panel -------------------------------------------------------------------
+// "2 h 05 min", "4 min", "less than a minute" or "none" for a duration in ms.
+function durationWords(ms) {
+  if (!Number.isSafeInteger(ms) || ms <= 0) return 'none';
+  const minutes = Math.round(ms / 60000);
+  if (minutes < 1) return 'less than a minute';
+  const hours = Math.floor(minutes / 60), rest = minutes % 60;
+  return hours ? `${hours} h ${String(rest).padStart(2, '0')} min` : `${minutes} min`;
+}
+// The UTC calendar day the server's coverage is keyed by (the browser's clock).
+function utcDay(ms = Date.now()) { return new Date(ms).toISOString().slice(0, 10); }
+function statusCell(selector) { return $('status-panel').querySelector(selector); }
+// Today's coverage from the server: each value is rendered as the plain integer the
+// server gave (ms stay ms), with the two durations also in words.
+function renderCoverage(result) {
+  for (const key of COVERAGE_KEYS) {
+    const value = result && typeof result === 'object' ? result[key] : null;
+    const ok = Number.isSafeInteger(value) && value >= 0;
+    text(statusCell(`[data-coverage="${key}"]`), ok ? String(value) : '–');
+    const words = statusCell(`[data-coverage-words="${key}"]`);
+    if (words) text(words, ok ? durationWords(value) : 'not loaded');
+  }
+  renderStatusSentences(result);
+}
+// This browser's own ledger: the current session's running totals (what the page
+// POSTs are per-window deltas), the current window's timings, the negotiated camera
+// settings and how many counter reports the server accepted or refused.
+function renderStatusLive() {
+  const totals = camera?.totals || {}, timing = camera?.timingNow?.() || {}, settings = camera?.settings || {}, telemetry = camera?.telemetry || {};
+  for (const key of COUNTER_KEYS) text(statusCell(`[data-counter="${key}"]`), String(Number.isSafeInteger(totals[key]) && totals[key] >= 0 ? totals[key] : 0));
+  for (const key of TIMING_KEYS) text(statusCell(`[data-timing="${key}"]`), String(Number.isFinite(timing[key]) ? timing[key] : 0));
+  for (const key of SETTING_KEYS) text(statusCell(`[data-setting="${key}"]`), String(Number.isFinite(settings[key]) ? settings[key] : 0));
+  text(statusCell('[data-telemetry="sent"]'), String(Number.isSafeInteger(telemetry.sent) ? telemetry.sent : 0));
+  text(statusCell('[data-telemetry="dropped"]'), String(Number.isSafeInteger(telemetry.dropped) ? telemetry.dropped : 0));
+  renderStatusSentences();
+}
+// The two silent failures of the rig, in plain words, only when they occur: time
+// the camera was taken away from this page today (screen lock, app switch, a
+// track ending) and uploads still waiting in this browser.
+let lastCoverage = null;
+function renderStatusSentences(result) {
+  if (result !== undefined) lastCoverage = result;
+  const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
+  const interrupted = camera?.interrupted?.(dayStart.getTime()) || { count: 0, ms: 0 };
+  const serverGap = lastCoverage && Number.isSafeInteger(lastCoverage.gap_ms) && lastCoverage.gap_ms > 0 ? lastCoverage.gap_ms : 0;
+  const minutes = Math.round(interrupted.ms / 60000);
+  const sentence = interrupted.count ? `The camera was interrupted for ${minutes < 1 ? 'less than a minute' : `${minutes} minute${minutes === 1 ? '' : 's'}`} today (screen lock or app switch); captures during that time were not possible.`
+    : serverGap ? `Capture was interrupted for ${durationWords(serverGap)} today while the camera was on; captures during that time were not possible.` : '';
+  text($('status-interrupted'), sentence); $('status-interrupted').hidden = !sentence;
+  const queued = Number.isSafeInteger(queue.pending?.count) ? queue.pending.count : 0;
+  const uploads = queued ? `${queued} upload${queued === 1 ? ' is' : 's are'} still queued; check Wi-Fi.` : '';
+  text($('status-queued'), uploads); $('status-queued').hidden = !uploads;
+}
+async function refreshCoverage() {
+  if (!authenticated) return;
+  const sequence = ++coverageSequence, generation = authGeneration, day = utcDay();
+  text($('coverage-status'), "Loading today's coverage…");
+  try {
+    const result = await api(`/api/coverage?day=${encodeURIComponent(day)}`);
+    if (!authenticated || generation !== authGeneration || sequence !== coverageSequence) return;
+    renderCoverage(result);
+    text($('coverage-status'), `Coverage for ${day} (the UTC day) read ${new Date().toLocaleTimeString()} from the local service: the time the camera was on, summed over every counter report it received.`);
+  } catch (error) {
+    if (!authenticated || generation !== authGeneration || sequence !== coverageSequence) return;
+    renderCoverage(null);
+    text($('coverage-status'), `Today's coverage could not be loaded: ${error.message}`);
+  }
+  renderStatusLive();
 }
 function privacyNotice(message) { text($('privacy-status'), message); $('privacy-status').hidden = !message; }
 function expire() {
@@ -274,6 +380,7 @@ async function setupStorage() {
         text($('idle-counters'), `This browser: ${idleSummary(idle)}`);
         $('preview-placeholder').hidden = state.running;
         renderAutomatic(state);
+        renderStatusLive();
       },
       gap: gap => logGap(`${gap.reason} · ${((gap.t_to_ms - gap.t_from_ms) / 1000).toFixed(1)} seconds recorded as a gap.`),
       // The idle post shares api()'s session handling (401 expires the session) but
@@ -282,7 +389,13 @@ async function setupStorage() {
         try { const result = await api('/api/idle', { method: 'POST', body }); return { ok: true, status: 200, code: null, retained: result && result.retained === true }; }
         catch (error) { return { ok: false, status: error.status || 0, code: error.code || null, retained: false }; }
       },
-      consentRequired: () => { if (authenticated) { void refreshConsent(); void camera?.stop('Consent acknowledgement required'); } },
+      // CP5: the counters window, same session handling; the final window at stop
+      // is sent with keepalive. The camera counts the outcome and never retries.
+      postTelemetry: async (body, options) => {
+        try { await api('/api/telemetry', { method: 'POST', body, keepalive: options?.final === true }); return { ok: true, status: 200 }; }
+        catch (error) { return { ok: false, status: error.status || 0 }; }
+      },
+      consentRequired: () => { if (authenticated) { void refreshConsent(); void camera?.stop('Consent acknowledgement required', { interrupted: false }); } },
       unauthorized: () => expire()
     });
     if (handPolicy) camera.setServerPolicy(handPolicy);
@@ -360,7 +473,7 @@ async function refreshConsent() {
   } catch (error) {
     if (!authenticated || generation !== authGeneration) return;
     applyConsent({});
-    if (camera?.running || camera?.starting) void camera.stop('Consent state could not be confirmed');
+    if (camera?.running || camera?.starting) void camera.stop('Consent state could not be confirmed', { interrupted: false });
     if (currentView === 'camera' || currentView === 'privacy') notice(`${CONSENT_FALLBACK} ${error.message}`);
   }
 }
@@ -404,7 +517,7 @@ $('login-form').addEventListener('submit', async event => {
 });
 $('session-retry').addEventListener('click', session);
 $('logout').addEventListener('click', async () => {
-  $('logout').disabled = true; queue.setAuthenticated(false); await camera?.stop('Signed out by user');
+  $('logout').disabled = true; queue.setAuthenticated(false); await camera?.stop('Signed out by user', { interrupted: false });
   try { await api('/api/auth/logout', { method: 'POST' }); resetPrivateUI(); text($('auth-status'), 'Signed out. Server session revoked. Unsynced captures remain on this trusted browser.'); $('pin').focus(); }
   catch (error) { notice(`Sign-out was not confirmed by the server. ${error.message} Try signing out again.`); }
   finally { $('logout').disabled = false; }
@@ -452,6 +565,7 @@ function renderCounts(counts) {
 async function refreshPrivacy(saved = null) {
   if (!authenticated) return;
   const sequence = ++privacySequence, generation = authGeneration;
+  void refreshCoverage();
   if (!saved) text($('retention-status'), 'Loading retention settings…');
   text($('counts-status'), 'Loading counts…');
   try {
@@ -528,7 +642,7 @@ async function eraseEverything() {
   try {
     // The camera stops first: anything captured from now on carries a wall time
     // after the erasure, and a running episode would otherwise be refused later.
-    if (camera && (camera.running || camera.starting)) await camera.stop('Stopped for erasure');
+    if (camera && (camera.running || camera.starting)) await camera.stop('Stopped for erasure', { interrupted: false });
     const pin = $('erase-all-pin').value; $('erase-all-pin').value = '';
     const report = await api('/api/erase-all', { method: 'POST', body: JSON.stringify({ confirm: ERASE_ALL_PHRASE, pin }) });
     if (!authenticated || generation !== authGeneration) return;
@@ -597,7 +711,7 @@ async function refreshItems() {
     if (signature !== lastCatalogue) {
       const active = document.activeElement;
       const focusId = $('items-grid').contains(active) ? active.dataset.itemId : null;
-      $('items-grid').replaceChildren(...items.map(itemCard));
+      $('items-grid').replaceChildren(...items.map(item => itemCard(item)));
       if (!items.length) $('items-grid').append(node('p', query ? 'No stored items match this search. Try a different name.' : 'No stored items yet. Captures that contain only context will not appear as recognized objects.', 'empty'));
       if (focusId) [...$('items-grid').querySelectorAll('button')].find(button => button.dataset.itemId === focusId)?.focus({ preventScroll: true });
       lastCatalogue = signature;
@@ -802,16 +916,64 @@ function addMessage(role, message) {
 // an unresolved observation the choice is recorded (assign) first, then the chat
 // is re-asked with that member's item id (an exact-id question, the existing
 // clarify mechanism). Selecting a member never upgrades its certainty.
+// CP5 (B-14): each member keeps its own identity status and provenance on its card;
+// its recorded region is outlined solid only when its own identity is trusted and
+// dashed (unverified) otherwise; no region when the member has no reference_image.
 function groupMember(member, state) {
   const button = node('button', null, 'group-member'); button.type = 'button'; button.dataset.itemId = member.item_id;
   const name = member.name || 'Unnamed item';
   const url = safeImageURL(member);
-  if (url) { const img = node('img'); img.src = url; img.decoding = 'async'; img.alt = ''; button.append(img); }
-  else button.append(node('span', 'No photo available', 'muted'));
+  const trusted = member.identity_status === 'trusted', box = targetBox(member);
+  if (url && member.evidence_expired !== true) button.append(evidenceFigure({ url, box, verified: trusted, maxHeight: 220, lazy: false,
+    alt: `Recorded evidence for ${name}; not a live view.${box ? (trusted ? ' The recorded item is outlined.' : ' The outlined region is where a change was recorded; the item identity is unverified.') : ''}` }));
+  else button.append(node('span', member.evidence_expired === true ? 'Evidence image expired' : 'No photo available', 'muted'));
   const meta = [member.location_text || (member.location_status ? `location ${member.location_status}` : null), dateLabel(member.observed_at_ms)].filter(Boolean).join(' · ');
-  button.append(node('span', name, 'member-name'), node('span', meta, 'member-meta'));
-  button.setAttribute('aria-label', `This one: ${name}, ${meta}`);
+  const lookalikes = lookalikeCount(member);
+  const status = `Identity: ${member.identity_status || 'unknown'}${lookalikes ? ` · ${lookalikes} lookalike${lookalikes === 1 ? '' : 's'}` : ''}`;
+  button.append(node('span', name, 'member-name'), node('span', status, member.identity_status === 'ambiguous' ? 'member-status badge badge-ambiguous' : 'member-status badge'), node('span', meta, 'member-meta'));
+  const provenance = member.provenance && typeof member.provenance === 'object' ? member.provenance : null;
+  if (provenance && typeof provenance.identity_status === 'string') button.append(node('span', `This photo's own identity status: ${provenance.identity_status}`, 'member-provenance'));
+  button.setAttribute('aria-label', `This one: ${name}, ${status}, ${meta}`);
   button.addEventListener('click', () => chooseMember(member, state, button));
+  return button;
+}
+// CP5: the collapsible "Why this answer": the server's basis tokens, in the order
+// given, each as one plain sentence fragment. Nothing is added, scored or inferred.
+function whyAnswer(result) {
+  const details = node('details', null, 'why-answer');
+  details.append(node('summary', 'Why this answer'));
+  const tokens = Array.isArray(result.basis) ? result.basis.filter(token => typeof token === 'string').slice(0, 24) : [];
+  const known = [...new Set(tokens.filter(token => Object.hasOwn(BASIS_WORDS, token)))];
+  const unknown = tokens.filter(token => !Object.hasOwn(BASIS_WORDS, token)).length;
+  if (known.length) {
+    const list = node('ul', null, 'basis-list');
+    for (const token of known) { const li = node('li', BASIS_WORDS[token], 'basis-reason'); li.dataset.basis = token; list.append(li); }
+    details.append(list);
+  } else details.append(node('p', 'The local service did not report its reasons for this answer.', 'muted'));
+  if (unknown) details.append(node('p', `${unknown} further reason${unknown === 1 ? '' : 's'} reported by the local service ${unknown === 1 ? 'is' : 'are'} not explained by this page.`, 'muted'));
+  return details;
+}
+// CP5: the answer's own capture time and room, under the photo. Only what the
+// server sent: no time when capture_time_ms is null (no reliable sighting or an
+// expired image), the room exactly as given ("room unknown" until a source exists).
+function answerMeta(result) {
+  const parts = [];
+  if (Number.isSafeInteger(result.capture_time_ms) && result.capture_time_ms > 0) parts.push(`Observed: ${dateLabel(result.capture_time_ms)}`);
+  if (typeof result.room === 'string' && result.room.trim()) { const room = result.room.trim().slice(0, 120); parts.push(room.charAt(0).toUpperCase() + room.slice(1)); }
+  return parts.length ? node('p', parts.join(' · '), 'answer-meta muted') : null;
+}
+// CP5 (Oversight F4): a clarify option is a name and, when the server's member list
+// carries it, the last-seen date; no photo, no location, no status. Choosing one asks
+// about that item by id (the exact-id question), as a group tap does.
+function clarifyOption(option, members) {
+  const id = option && typeof option === 'object' && typeof option.item_id === 'string' ? option.item_id : null;
+  const name = typeof option === 'string' ? option : option && typeof option === 'object' ? option.name || option.text || option.label : null;
+  if (typeof name !== 'string' || !name.trim()) return null;
+  const member = id ? members.find(candidate => candidate && candidate.item_id === id) : null;
+  const seen = member && Number.isSafeInteger(member.observed_at_ms) && member.observed_at_ms > 0 ? ` · last seen ${dateLabel(member.observed_at_ms)}` : '';
+  const button = node('button', `${name.slice(0, 120)}${seen}`, 'secondary clarify-option'); button.type = 'button';
+  if (id) button.dataset.itemId = id;
+  button.addEventListener('click', () => { if (id) void ask(id, { display: `${name.slice(0, 120)} — this one` }); else { $('chat-text').value = name.slice(0, 2000); $('chat-text').focus(); } });
   return button;
 }
 async function chooseMember(member, state, button) {
@@ -844,23 +1006,28 @@ async function ask(question, options = {}) {
     if (!authenticated || generation !== authGeneration) return;
     const entry = addMessage('assistant', result.text || 'No answer is available from the stored evidence.');
     entry.append(node('p', `Answer type: ${result.shape || 'unknown'}${result.index_pending ? ' · processing pending' : ''}`, 'muted'));
+    const members = (Array.isArray(result.members) ? result.members : []).filter(member => member && typeof member.item_id === 'string');
     if (result.shape === 'group') {
       entry.append(node('p', "I can't tell these apart — which one is yours? Tap the photo of your item.", 'group-prompt'));
       const state = { unresolved: typeof result.unresolved_observation_id === 'string' ? result.unresolved_observation_id : null };
-      const members = node('div', null, 'group-members'); members.setAttribute('role', 'group'); members.setAttribute('aria-label', 'Items that look alike; choose yours');
-      for (const member of (Array.isArray(result.members) ? result.members : []).filter(member => member && typeof member.item_id === 'string').slice(0, 8)) members.append(groupMember(member, state));
-      entry.append(members);
-    } else if (result.shape !== 'abstain' && Array.isArray(result.members) && result.members.length) {
-      const members = node('div', null, 'items-grid'); for (const item of result.members.slice(0, 8)) members.append(itemCard(item)); entry.append(members);
+      const grid = node('div', null, 'group-members'); grid.setAttribute('role', 'group'); grid.setAttribute('aria-label', 'Items that look alike; choose yours');
+      for (const member of members.slice(0, 8)) grid.append(groupMember(member, state));
+      entry.append(grid);
+    } else if (result.shape === 'clarify') {
+      // Names only (Oversight F4): no card, no photo, no location for an item the
+      // user may not have meant.
+      if (typeof result.question === 'string' && result.question.trim()) entry.append(node('p', result.question.trim().slice(0, 400), 'group-prompt'));
+      const options = node('div', null, 'clarify-options'); options.setAttribute('role', 'group'); options.setAttribute('aria-label', 'Stored items that match; choose one');
+      for (const option of (Array.isArray(result.options) ? result.options.slice(0, 8) : [])) { const button = clarifyOption(option, members); if (button) options.append(button); }
+      if (options.childElementCount) entry.append(options);
+    } else if (result.shape !== 'abstain' && members.length) {
+      // The contract decides the outline: no reference_image -> none; target_indicated
+      // true -> solid; false -> dashed (unverified); absent -> the record's own.
+      const outline = result.reference_image === null ? 'none' : result.target_indicated === true ? 'solid' : result.target_indicated === false ? 'dashed' : undefined;
+      const grid = node('div', null, 'items-grid'); for (const item of members.slice(0, 8)) grid.append(itemCard(item, outline)); entry.append(grid);
     }
-    if (result.shape === 'clarify') {
-      if (result.question) entry.append(node('p', result.question));
-      for (const option of (Array.isArray(result.options) ? result.options.slice(0, 8) : [])) {
-        const value = typeof option === 'string' ? option : option.name || option.text || option.label;
-        if (typeof value !== 'string') continue;
-        const button = node('button', value, 'secondary'); button.addEventListener('click', () => { $('chat-text').value = value.slice(0, 2000); $('chat-text').focus(); }); entry.append(button);
-      }
-    }
+    if (result.shape !== 'abstain' && result.shape !== 'clarify') { const meta = answerMeta(result); if (meta) entry.append(meta); }
+    entry.append(whyAnswer(result));
     text($('chat-status'), 'Answer received.');
   } catch (error) { if (authenticated && generation === authGeneration) text($('chat-status'), error.message); }
   finally { $('chat-send').disabled = false; }
@@ -874,8 +1041,8 @@ $('camera-start').addEventListener('click', () => cameraAction(camera => {
   if (!consentOk) throw new Error('The camera disclosure must be acknowledged before the camera can start. Choose "I understand" above or in the Privacy view.');
   return camera.start();
 }));
-$('camera-pause').addEventListener('click', () => cameraAction(camera => camera.stop('Paused by user')));
-$('camera-stop').addEventListener('click', () => cameraAction(camera => camera.stop('Stopped by user')));
+$('camera-pause').addEventListener('click', () => cameraAction(camera => camera.stop('Paused by user', { interrupted: false })));
+$('camera-stop').addEventListener('click', () => cameraAction(camera => camera.stop('Stopped by user', { interrupted: false })));
 $('mark-before').addEventListener('click', () => cameraAction(camera => camera.before()));
 $('mark-rest').addEventListener('click', () => cameraAction(camera => camera.rest()));
 $('mark-cancel').addEventListener('click', () => cameraAction(camera => camera.cancel()));
@@ -885,5 +1052,5 @@ window.addEventListener('pagehide', () => { queue.setAuthenticated(false); void 
 window.addEventListener('pageshow', event => { if (event.persisted) { resetPrivateUI(); void session(); } });
 window.addEventListener('beforeunload', event => { if (camera?.unsaved || camera?.episode || camera?.saving) { event.preventDefault(); event.returnValue = ''; } });
 window.addEventListener('online', () => { if (authenticated) void queue.flush(); });
-setInterval(() => { if (authenticated && !document.hidden) { void queue.flush(); if (currentView === 'items') void refreshItems(); } }, 8000);
+setInterval(() => { if (authenticated && !document.hidden) { void queue.flush(); if (currentView === 'items') void refreshItems(); if (currentView === 'privacy') renderStatusLive(); } }, 8000);
 void session();

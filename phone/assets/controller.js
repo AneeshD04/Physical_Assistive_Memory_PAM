@@ -76,13 +76,16 @@ export function replay(samples) {
 //   {enabled:false, reason, analyze:null}                 until the worker is ready
 //   {enabled:true, reason:null, version, analyze(...)}     when ready
 //   {enabled:false, reason, analyze:null}                 after an unavailable report
-// analyze(t_ms, analysisGray, bitmap) -> Promise<{busy, motion, frame_valid, hands, basis, energy, infer_ms}>
+// analyze(t_ms, analysisGray, bitmap) -> Promise<{busy, motion, frame_valid, hands, basis, energy, infer_ms, posted}>
 //   analysisGray: {data: Uint8Array, width, height} at the packet's analysis resolution
 //   bitmap: an ImageBitmap for the worker (transferred and closed there; closed here
 //           when it cannot be posted). frame_valid is true only when this frame's
 //           landmark result arrived within ANALYSIS_TIMEOUT_MS; otherwise busy is the
 //           latest value (possibly null) and hands is null. motion is null until two
 //           consecutive analysis frames exist. A missing measurement is null, never a guess.
+//   posted (CP5 frame accounting): true when the frame was handed to the worker, so a
+//           frame_valid false with posted true is a landmark timeout and posted false
+//           means the worker still had a frame in flight (the frame was dropped).
 export const ANALYSIS_TIMEOUT_MS = 250;
 export const NO_WORKER_REASON = 'Cleared hand-model weights and device validation are unavailable.';
 const safeReason = value => typeof value === 'string' && value.trim() ? value.trim().slice(0, 240) : 'The hand model is unavailable.';
@@ -154,7 +157,7 @@ export function createAutomaticAdapter({ worker = null, motion = null, hands = n
       } catch { motionFlag = null; energy = null; }
     }
     if (gray) previousGray = gray;
-    let result = null;
+    let result = null, posted = false;
     // One frame in flight at a time bounds the worker's backlog; a worker that has
     // not replied for HUNG_MS is reported unavailable rather than silently
     // invalidating every frame from then on.
@@ -163,12 +166,12 @@ export function createAutomaticAdapter({ worker = null, motion = null, hands = n
       result = await new Promise(resolve => {
         const timer = setTimeout(() => settle(t_ms, null), timeoutMs);
         waiters.set(t_ms, { resolve, timer });
-        try { inFlight++; postedAt = clock(); worker.postMessage({ type: 'frame', t_ms, bitmap }, [bitmap]); }
+        try { inFlight++; postedAt = clock(); worker.postMessage({ type: 'frame', t_ms, bitmap }, [bitmap]); posted = true; }
         catch { inFlight--; closeBitmap(bitmap); settle(t_ms, null); }
       });
     } else closeBitmap(bitmap);
-    if (result) return { busy: result.busy, motion: motionFlag, frame_valid: true, hands: result.hands, basis: result.basis, present: result.present, energy, infer_ms: result.infer_ms };
-    return { busy: latest.busy, motion: motionFlag, frame_valid: false, hands: null, basis: `${latest.basis}; no landmark result for this frame within ${timeoutMs} ms`, present: null, energy, infer_ms: null };
+    if (result) return { busy: result.busy, motion: motionFlag, frame_valid: true, hands: result.hands, basis: result.basis, present: result.present, energy, infer_ms: result.infer_ms, posted };
+    return { busy: latest.busy, motion: motionFlag, frame_valid: false, hands: null, basis: `${latest.basis}; no landmark result for this frame within ${timeoutMs} ms`, present: null, energy, infer_ms: null, posted };
   }
   adapter.reset = () => { motionState = null; previousGray = null; latest = { busy: null, basis: 'no landmark result yet', t_ms: null }; };
   adapter.close = () => {

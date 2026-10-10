@@ -1,0 +1,51 @@
+{
+ "name": "fast_put_down",
+ "basis": "synthetic scenario, authored by the tester 2026-10-10; software-correctness expectations, not accuracy",
+ "clock_start_ms": 1790000000000,
+ "description": "Part 1 section 10 case 3: a fast interaction between idle samples. The episode lasts 400 ms between two idle stills; contact and release evidence still yield a placement that answers confidently, and the idle still afterwards confirms it.",
+ "items": {
+  "cup": {
+   "label": "synthetic fast cup",
+   "tag": 0
+  }
+ },
+ "steps": [
+  {
+   "kind": "idle",
+   "after_ms": 30000
+  },
+  {
+   "kind": "episode",
+   "item": "cup",
+   "outcome": "placed_on_surface",
+   "to": [
+    60,
+    40,
+    100,
+    80
+   ],
+   "location": "fixture desk",
+   "duration_ms": 400,
+   "after_ms": 400
+  },
+  {
+   "kind": "idle",
+   "after_ms": 30000
+  },
+  {
+   "kind": "query",
+   "text": "where is my synthetic fast cup",
+   "truth": {
+    "item": "cup"
+   },
+   "expect": {
+    "outcome": "correct",
+    "shape": "confident"
+   },
+   "expected_basis": [
+    "trusted_match",
+    "placed"
+   ]
+  }
+ ]
+}

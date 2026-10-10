@@ -1,0 +1,134 @@
+{
+ "name": "two_refills_lookalikes",
+ "basis": "synthetic scenario, authored by the tester 2026-10-10; software-correctness expectations, not accuracy",
+ "clock_start_ms": 1790000000000,
+ "identity": {
+  "embedder": "synthetic_tag",
+  "calibration": {
+   "calibration_id": "cp5-synthetic-wide",
+   "quantile": 0.17,
+   "n": 40,
+   "alpha": 0.05
+  }
+ },
+ "description": "Part 1 section 10 case 4: two refill bottles with matching patient, drug and dose (synthetic tags 0 and 1, lookalikes by construction). Seen together they stay two rows (cannot-link); a lone sighting of tag 0 cannot be told apart under the wide calibration: one group with both locations preserved, never one merged row. The user's choice (assign) dissolves the group; the other bottle, renamed, answers confidently.",
+ "items": {
+  "refill-a": {
+   "label": "synthetic refill bottle",
+   "tag": 0,
+   "medication": true
+  },
+  "refill-b": {
+   "label": "synthetic refill bottle",
+   "tag": 1,
+   "medication": true
+  }
+ },
+ "steps": [
+  {
+   "kind": "episode",
+   "placements": [
+    {
+     "item": "refill-a",
+     "outcome": "placed_on_surface",
+     "to": [
+      16,
+      40,
+      40,
+      64
+     ],
+     "location": "fixture shelf left"
+    },
+    {
+     "item": "refill-b",
+     "outcome": "placed_on_surface",
+     "to": [
+      100,
+      40,
+      124,
+      64
+     ],
+     "location": "fixture shelf right"
+    }
+   ]
+  },
+  {
+   "kind": "query",
+   "text": "where is my synthetic refill bottle",
+   "truth": {
+    "item": "refill-a"
+   },
+   "expect": {
+    "outcome": "abstain",
+    "shape": "clarify"
+   },
+   "expected_basis": [
+    "name_ambiguous"
+   ]
+  },
+  {
+   "kind": "advance",
+   "minutes": 1
+  },
+  {
+   "kind": "episode",
+   "item": "refill-a",
+   "outcome": "placed_on_surface",
+   "to": [
+    60,
+    40,
+    84,
+    64
+   ],
+   "location": "fixture shelf middle"
+  },
+  {
+   "kind": "query",
+   "text": "where is my synthetic refill bottle",
+   "truth": {
+    "item": "refill-a"
+   },
+   "expect": {
+    "outcome": "abstain",
+    "shape": "group"
+   },
+   "expected_basis": [
+    "lookalikes"
+   ]
+  },
+  {
+   "kind": "correction",
+   "op": "assign",
+   "item": "refill-a",
+   "observation": "unresolved"
+  },
+  {
+   "kind": "query",
+   "text": "where is my synthetic refill bottle",
+   "truth": {
+    "item": "refill-a"
+   },
+   "expect": {
+    "outcome": "abstain",
+    "shape": "clarify"
+   }
+  },
+  {
+   "kind": "correction",
+   "op": "rename",
+   "item": "refill-b",
+   "name": "synthetic evening bottle"
+  },
+  {
+   "kind": "query",
+   "text": "where is my synthetic evening bottle",
+   "truth": {
+    "item": "refill-b"
+   },
+   "expect": {
+    "outcome": "correct",
+    "shape": "confident"
+   }
+  }
+ ]
+}

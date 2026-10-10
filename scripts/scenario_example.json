@@ -1,0 +1,17 @@
+{
+  "name": "example_fast_put_down",
+  "basis": "synthetic scene; expectations are software-correctness checks, not accuracy",
+  "clock_start_ms": 1790000000000,
+  "items": {"pills": {"label": "pill bottle", "tag": 2, "medication": true}},
+  "steps": [
+    {"kind": "episode", "duration_ms": 600, "item": "pills", "outcome": "placed_on_surface",
+     "to": [60, 40, 100, 80], "location": "kitchen counter"},
+    {"kind": "query", "text": "where is my pill bottle", "truth": {"item": "pills", "medication": true},
+     "expect": {"outcome": "correct", "shape": "confident"}},
+    {"kind": "gap", "reason": "screen_lock", "duration_ms": 300000,
+     "moves": [{"item": "pills", "to": [20, 20, 56, 56], "location": "sofa"}]},
+    {"kind": "idle", "after_ms": 30000},
+    {"kind": "query", "text": "where is my pill bottle", "truth": {"item": "pills", "medication": true},
+     "expect": {"outcome": "hedged-correct", "shape": "hedged"}}
+  ]
+}

@@ -1,0 +1,105 @@
+{
+ "name": "unobserved_relocation_then_sighting",
+ "basis": "synthetic scenario, authored by the tester 2026-10-10; software-correctness expectations, not accuracy",
+ "clock_start_ms": 1790000000000,
+ "description": "Part 1 section 10 case 2 (out of view) and the fidelity/usefulness split: the remote is placed on the counter, then moved to the drawer during a screen lock. Asked after the gap, the system hedges with the old place and the coverage_gap reason (coordinator ruling 2): hedged-wrong for usefulness, fidelity ok (the photo was true for its time). An idle still then shows the counter empty (negative re-observation): the old place is reported as history (hedged-correct, coverage_gap still listed). A later observed placement in the drawer answers confidently.",
+ "items": {
+  "remote": {
+   "label": "synthetic remote",
+   "tag": 0
+  }
+ },
+ "steps": [
+  {
+   "kind": "episode",
+   "item": "remote",
+   "outcome": "placed_on_surface",
+   "to": [
+    60,
+    40,
+    100,
+    80
+   ],
+   "location": "fixture counter"
+  },
+  {
+   "kind": "gap",
+   "reason": "screen_lock",
+   "duration_ms": 600000,
+   "moves": [
+    {
+     "item": "remote",
+     "to": [
+      20,
+      20,
+      56,
+      56
+     ],
+     "location": "fixture drawer"
+    }
+   ]
+  },
+  {
+   "kind": "query",
+   "text": "where is my synthetic remote",
+   "truth": {
+    "item": "remote"
+   },
+   "expect": {
+    "outcome": "hedged-wrong",
+    "shape": "hedged"
+   },
+   "expected_basis": [
+    "trusted_match",
+    "placed",
+    "coverage_gap"
+   ]
+  },
+  {
+   "kind": "idle",
+   "after_ms": 30000
+  },
+  {
+   "kind": "query",
+   "text": "where is my synthetic remote",
+   "truth": {
+    "item": "remote"
+   },
+   "expect": {
+    "outcome": "hedged-correct",
+    "shape": "hedged"
+   },
+   "expected_basis": [
+    "negative_reobservation",
+    "coverage_gap"
+   ]
+  },
+  {
+   "kind": "advance",
+   "hours": 1
+  },
+  {
+   "kind": "episode",
+   "item": "remote",
+   "outcome": "placed_on_surface",
+   "to": [
+    20,
+    20,
+    56,
+    56
+   ],
+   "location": "fixture drawer"
+  },
+  {
+   "kind": "query",
+   "text": "where is my synthetic remote",
+   "truth": {
+    "item": "remote"
+   },
+   "expect": {
+    "outcome": "correct",
+    "shape": "confident"
+   }
+  }
+ ]
+}

@@ -1,0 +1,183 @@
+{
+ "name": "medication_set",
+ "basis": "synthetic scenario, authored by the tester 2026-10-10; software-correctness expectations, not accuracy",
+ "clock_start_ms": 1790000000000,
+ "description": "The medication query set: every question here is about a medication item, so the summary's medication split (accuracy, coverage, confident-wrong rate) is computed on them alone. Fresh placements answer confidently; after 25 h the answer hedges (aged); an idle still refreshes it; after a further 8 days the answer abstains; an observed pickup hedges without a current location; a caregiver relocation in view is recalled. No expectation here is a confident-wrong.",
+ "items": {
+  "morning": {
+   "label": "synthetic morning pills",
+   "tag": 0,
+   "medication": true
+  },
+  "evening": {
+   "label": "synthetic evening pills",
+   "tag": 2,
+   "medication": true
+  }
+ },
+ "steps": [
+  {
+   "kind": "episode",
+   "item": "morning",
+   "outcome": "placed_on_surface",
+   "to": [
+    20,
+    20,
+    56,
+    56
+   ],
+   "location": "fixture kitchen counter"
+  },
+  {
+   "kind": "episode",
+   "item": "evening",
+   "outcome": "placed_on_surface",
+   "to": [
+    100,
+    60,
+    136,
+    96
+   ],
+   "location": "fixture bedside table"
+  },
+  {
+   "kind": "query",
+   "text": "where are my synthetic morning pills",
+   "truth": {
+    "item": "morning"
+   },
+   "expect": {
+    "outcome": "correct",
+    "shape": "confident"
+   }
+  },
+  {
+   "kind": "query",
+   "text": "where are my synthetic evening pills",
+   "truth": {
+    "item": "evening"
+   },
+   "expect": {
+    "outcome": "correct",
+    "shape": "confident"
+   }
+  },
+  {
+   "kind": "advance",
+   "hours": 25
+  },
+  {
+   "kind": "query",
+   "text": "where are my synthetic morning pills",
+   "truth": {
+    "item": "morning"
+   },
+   "expect": {
+    "outcome": "hedged-correct",
+    "shape": "hedged"
+   },
+   "expected_basis": [
+    "aged"
+   ]
+  },
+  {
+   "kind": "idle",
+   "after_ms": 30000
+  },
+  {
+   "kind": "query",
+   "text": "where are my synthetic morning pills",
+   "truth": {
+    "item": "morning"
+   },
+   "expect": {
+    "outcome": "correct",
+    "shape": "confident"
+   }
+  },
+  {
+   "kind": "advance",
+   "days": 8
+  },
+  {
+   "kind": "query",
+   "text": "where are my synthetic evening pills",
+   "truth": {
+    "item": "evening"
+   },
+   "expect": {
+    "outcome": "abstain",
+    "shape": "abstain"
+   },
+   "expected_basis": [
+    "aged"
+   ]
+  },
+  {
+   "kind": "episode",
+   "item": "evening",
+   "outcome": "placed_on_surface",
+   "to": [
+    100,
+    60,
+    136,
+    96
+   ],
+   "location": "fixture bedside table"
+  },
+  {
+   "kind": "query",
+   "text": "where are my synthetic evening pills",
+   "truth": {
+    "item": "evening"
+   },
+   "expect": {
+    "outcome": "correct",
+    "shape": "confident"
+   }
+  },
+  {
+   "kind": "episode",
+   "item": "morning",
+   "outcome": "picked_up"
+  },
+  {
+   "kind": "query",
+   "text": "where are my synthetic morning pills",
+   "truth": {
+    "item": "morning"
+   },
+   "expect": {
+    "outcome": "hedged-correct",
+    "shape": "hedged"
+   },
+   "expected_basis": [
+    "picked_up"
+   ]
+  },
+  {
+   "kind": "episode",
+   "item": "morning",
+   "outcome": "placed_on_surface",
+   "to": [
+    20,
+    20,
+    56,
+    56
+   ],
+   "location": "fixture dining table",
+   "actor": "other_person"
+  },
+  {
+   "kind": "query",
+   "text": "where are my synthetic morning pills",
+   "truth": {
+    "item": "morning"
+   },
+   "expect": {
+    "outcome": "correct",
+    "shape": "confident"
+   }
+  }
+ ]
+}

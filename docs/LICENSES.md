@@ -2,7 +2,8 @@
 
 Owner: Oversight agent (`docs/OVERSIGHT_*.md`, this file). First version 2026-10-08
 (CP2); CP3 revision 2026-10-09 (identity model, ONNX Runtime, dev-only tools, CUTE
-attribution; see `docs/OVERSIGHT_CP3.md`). This register is machine-read, row by row. `server/memory_app.py:176-184`
+attribution; see `docs/OVERSIGHT_CP3.md`); CP5 revision 2026-10-10 (notices page:
+§5 corrections, new §8 sync list; see `docs/OVERSIGHT_CP5.md` §3). This register is machine-read, row by row. `server/memory_app.py:176-184`
 (`licence_verified`) reports `licence_recorded` for a manifest asset only when one
 line of this file names the asset's **base file name** together with the literal
 `VERIFIED-COMMERCIAL` token and carries neither `UNVERIFIED` nor `REJECTED`;
@@ -45,6 +46,11 @@ CONNECT; WebFetch permission for the PURL page not granted). The CC BY 4.0 text 
 read from the SPDX copy; the CUTE licence is corroborated by the authors' datasheet on
 GitHub and the 2026-10-08 PURL read stands.
 
+Fetch method on 2026-10-10 (CP5, notices): `raw.githubusercontent.com` reachable (bytes
+hashed, §7); `storage.googleapis.com` (the hand-model card) and `ilga.gov` (BIPA §15)
+**not reachable** (HTTP 403 on CONNECT; WebFetch permission not granted). Wheel contents
+were inspected with `importlib.metadata` on the sandbox installs named in §1.
+
 ## Rules: before any dependency or model is added
 
 1. **Register first, code second.** A new runtime dependency, npm package, model
@@ -79,10 +85,13 @@ GitHub and the 2026-10-08 PURL read stands.
    weights; server-side model files under `phone/assets/` (that route is public).
 6. **Notices.** Every shipped third-party component listed as `VERIFIED-COMMERCIAL`
    needs its licence text and copyright line in a third-party-notices page of the
-   served app (none exists yet; see `docs/OVERSIGHT_CP2.md` §2). Apache-2.0
+   served app (CP5: `server/notices.json` rendered at `GET /notices`; see
+   `docs/OVERSIGHT_CP5.md` §3 and §8 below). Apache-2.0
    components also need any upstream `NOTICE` file reproduced; the tasks-vision npm
    tarball ships no `LICENSE`/`NOTICE` file, so the MediaPipe repository `LICENSE`
-   is the text to ship.
+   is the text to ship (the repository itself has no `NOTICE` file: 404 at `master`
+   on 2026-10-10). The expected entries are the `notices-expected` list in §8; a
+   test compares it with `server/notices.json` both ways.
 
 ## 1. Python runtime dependencies actually imported by the served app
 
@@ -115,7 +124,7 @@ pins at all, which is itself a finding.
 | anthropic (Python SDK) | legacy dep (declared in `perception/requirements.txt`; imported only by `perception/vlm.py:11`) | 1.12.0 (sandbox; PyPI latest 1.12.1, 2026-10-08) | MIT | https://raw.githubusercontent.com/anthropics/anthropic-sdk-python/main/LICENSE | Yes (SDK) | Yes (SDK code); API use is governed by Anthropic's commercial terms, not this licence | oversight agent, fetched 2026-10-08 | **Not imported by `server/memory_app.py`** (checked 2026-10-08). The licence covers the SDK only; any paid provider call remains a separate bounded-cost checkpoint (BUILD_CONTRACT). `status: VERIFIED-COMMERCIAL` |
 | anyio, h11, click, typing-extensions, annotated-types, idna, sniffio | runtime deps (transitive of fastapi/starlette/uvicorn/pydantic) | 4.15.1, 0.16.0, 8.5.0, 4.16.0, 0.8.0, 3.20, 1.3.1 (sandbox) | MIT, MIT, BSD-3-Clause, PSF-2.0, MIT, BSD-3-Clause, MIT OR Apache-2.0 | PyPI JSON `license_expression` for each, 2026-10-08 | Yes | Yes | PyPI metadata only (publisher declaration), 2026-10-08 | All permissive; licence texts to be collected into the notices page when it is built. `status: VERIFIED-COMMERCIAL` (declaration-level) |
 | onnxruntime (`onnxruntime`, CPU wheel; imported lazily by `perception/identity.py` `DinoV2Embedder.__init__` only) | runtime dep (**CP3**, identity stage) | **1.30.0** (PyPI 2026-09-10; 1.31.0 was published 2026-10-09, inside the 7-day rule, not pinned) | MIT | https://raw.githubusercontent.com/microsoft/onnxruntime/main/LICENSE (MIT, Microsoft Corporation; SHA-256 `2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c`); wheel `onnxruntime-1.30.0-cp311-cp311-manylinux_2_28_x86_64.whl` downloaded from `files.pythonhosted.org` 2026-10-09, SHA-256 `fd54b314ea385bcecac69ab431f020ba503e3878dad4ebb645fec5a24b041242` (= PyPI digest), `METADATA` `License: MIT License`; the wheel bundles `onnxruntime/LICENSE` (identical bytes to the repository file) and `onnxruntime/ThirdPartyNotices.txt` (338,088 B, SHA-256 `143764b952fdb1a7c69ce653bfba74a7744d6a8a573bfb73e235fba356c83de3`) | Yes | Yes (server side; in a laptop installer, with the MIT text and the bundled `ThirdPartyNotices.txt`) | oversight agent, fetched 2026-10-09 (repository text and wheel bytes) | `ThirdPartyNotices.txt` is the union over all build configurations (70 entries: protobuf, zlib, pybind11, Eigen, abseil, flatbuffers, MKL under the Intel Simplified Software License, and others); the CPU wheel ships `libonnxruntime.so.1.30.0`, `libonnxruntime_providers_shared.so` and the pybind module. Execution-provider packages (CoreML, CUDA, DirectML) are separate wheels with vendor terms and are not pinned. Declared deps: `flatbuffers`, `numpy>=1.21.6`, `packaging`, `protobuf>=4.25.8` (next row). Windows cp311 wheel SHA-256 `0edd0145a6e3fce8a1276491dc784d615e3c58bcb952c9b4e5c876d5c6a12ad7` (PyPI digest, not downloaded). `status: VERIFIED-COMMERCIAL` |
-| flatbuffers, packaging, protobuf | runtime deps (transitive of onnxruntime, CP3) | 25.12.19, 26.3, 7.36.2 (PyPI latest 2026-10-09; resolver picks within onnxruntime's ranges) | Apache-2.0, Apache-2.0 OR BSD-2-Clause, BSD-3-Clause | PyPI JSON for each, 2026-10-09 (`license`/`license_expression` fields: "Apache 2.0", `Apache-2.0 OR BSD-2-Clause`, "3-Clause BSD License") | Yes | Yes | PyPI metadata only (publisher declaration), 2026-10-09 | Permissive; texts to the notices page when built. `status: VERIFIED-COMMERCIAL` (declaration-level) |
+| flatbuffers, packaging, protobuf | runtime deps (transitive of onnxruntime, CP3) | 25.12.19, 26.3, 7.36.2 (PyPI latest 2026-10-09; resolver picks within onnxruntime's ranges) | Apache-2.0, Apache-2.0 OR BSD-2-Clause, BSD-3-Clause | PyPI JSON for each, 2026-10-09 (`license`/`license_expression` fields: "Apache 2.0", `Apache-2.0 OR BSD-2-Clause`, "3-Clause BSD License") | Yes | Yes | PyPI metadata only (publisher declaration), 2026-10-09; flatbuffers repository `LICENSE` fetched 2026-10-10 (stock Apache-2.0 text, SHA-256 `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30`) | Permissive; texts to the notices page. The `flatbuffers` 25.12.19 wheel ships **no licence file** (checked with `importlib.metadata`, 2026-10-10), so the notices entry carries the Apache-2.0 text itself; `packaging` ships `LICENSE`, `LICENSE.APACHE`, `LICENSE.BSD`; `protobuf` ships `LICENSE` ("Copyright 2008 Google Inc."). `status: VERIFIED-COMMERCIAL` (declaration-level) |
 
 ### 1b. Development-only dependencies (never shipped, never imported by the served app)
 
@@ -222,18 +231,22 @@ of this row.
 | CUTE ("Common paired objects Under differenT Extrinsics"; "Dataset Accompanying 'Are These the Same Apple? Comparing Images Based on Object Intrinsics'", Klemen Kotar, Stephen Tian, Hong-Xing Yu, Daniel L. K. Yamins, Jiajun Wu, 2023) | dataset (identity evaluation, conformal calibration source `cute`) | DOI 10.25740/gj714cj0414 (2023-06-14) | CC-BY-4.0 | https://purl.stanford.edu/gj714cj0414 : "This work is licensed under a Creative Commons Attribution 4.0 International license (CC BY)." Use statement: "User agrees that, where applicable, content will not be used to identify or to otherwise infringe the privacy or confidentiality rights of individuals." Corroborated 2026-10-09 by the authors' datasheet https://raw.githubusercontent.com/s-tian/CUTE/main/datasheet.md (SHA-256 `8c0fcabce74f3b89d60c78d584a20fa73b12843c6f8011b2306702d1bfc56f4f`): "The dataset will be distributed under the CC-BY-4.0 license."; "Does the dataset relate to people? No."; "Have any third parties imposed IP-based or other restrictions on the data associated with the instances? No."; "There are 10,000 images in total." The repository's own code licence is MIT (`LICENSE`, SHA-256 `9b04efaa045e2e47b23a945a4dee7555370be3dfa39a9ab1757d609568060e60`), which covers the FFA code, not the images | Yes (evaluation and calibration during product development are permitted; attribution required when the material is shared) | Not shipped; a calibration quantile derived from it is not Adapted Material and shares no database contents (CC BY 4.0 §1(a), §3(a)(1), §4(c); reasoning in `docs/OVERSIGHT_CP3.md` §2.2), but PAM attributes it anyway with the text below; if any image or image-derived embedding is ever shipped, full attribution plus the privacy use statement apply | oversight agent, read via WebFetch 2026-10-08 (page text; download link needs JavaScript, not exercised); re-read attempted 2026-10-09 and not possible (host not reachable; WebFetch permission not granted), the 2026-10-08 read stands; a human re-opens the URL before the first calibration run | Attribution text to carry (notices page and the `calibrations` record's `source_note`): "Same-object calibration data: CUTE ('Common paired objects Under differenT Extrinsics'), the dataset accompanying 'Are These the Same Apple? Comparing Images Based on Object Intrinsics' by Klemen Kotar, Stephen Tian, Hong-Xing Yu, Daniel L. K. Yamins and Jiajun Wu, Stanford Digital Repository, 2023, https://purl.stanford.edu/gj714cj0414 (doi:10.25740/gj714cj0414), licensed under the Creative Commons Attribution 4.0 International License, https://creativecommons.org/licenses/by/4.0/. The dataset is provided without warranties (see the licence). PAM used cropped and resized copies of these images to estimate one similarity threshold; no CUTE image is included in PAM." CC BY 4.0 text read from the SPDX copy https://raw.githubusercontent.com/spdx/license-list-data/main/text/CC-BY-4.0.txt (SHA-256 `d557539df68e771cc1eedcc91d13f70fca930e508d11eedcafa4b15db49e3744`). `status: VERIFIED-COMMERCIAL` |
 | HoloAssist | dataset (future Hand Sentinel training; CP3 alternative calibration source `holoassist`, a "Result" under §3.1 with no obligation; egocentric video of people, so crops are processed on the laptop and never stored in PAM) | release per https://holoassist.github.io/ (unreachable here) | CDLA-Permissive-2.0 | https://raw.githubusercontent.com/Ember-HoloAssist/holoassist-release/main/README.md L10: "We release the dataset under the [CDLAv2] license, a permissive license." Licence text (SPDX copy) https://raw.githubusercontent.com/spdx/license-list-data/main/text/CDLA-Permissive-2.0.txt §3.1: "This agreement does not impose any restriction or obligations with respect to the use, modification, or sharing of Results." §5.4: "'Results' means any outcome obtained by computational analysis of Data, including for example machine learning models" | Yes, including training a commercial model | Models trained on it carry no obligation; the Data itself may only be shared with the agreement text (§2.1) | oversight agent, fetched 2026-10-08 (README + SPDX text; `cdla.dev` itself unreachable) | `status: VERIFIED-COMMERCIAL` |
 
-## 5. Required notices for what CP2 and CP3 ship
+## 5. Required notices for what CP2, CP3 and CP5 ship
 
-| Shipped component | Notice to include in the served app's third-party notices page (does not exist yet) |
+The page is `GET /notices`, rendered from `server/notices.json` (CP5, Builder B;
+Oversight verifies it against §8). Corrections made 2026-10-10 from today's fetches are
+marked (CP5).
+
+| Shipped component | Notice to include in the served app's third-party notices page (`server/notices.json`, `GET /notices`) |
 | --- | --- |
 | `dinov2_vits14.onnx` (CP3, server side) | Apache-2.0 text (DINOv2 repository `LICENSE`), the line "Copyright (c) Meta Platforms, Inc. and affiliates." as in the source headers, and the §4(b) modification notice: "dinov2_vits14.onnx is an ONNX export, made by PAM with scripts/export_dinov2_onnx.py, of the DINOv2 ViT-S/14 weights (facebookresearch/dinov2 at commit 7764ea0f, Apache-2.0); the weights were converted, not retrained." No upstream `NOTICE` file exists. |
 | `onnxruntime` 1.30.0 (CP3, server side) | MIT text ("Copyright (c) Microsoft Corporation") and the wheel's `onnxruntime/ThirdPartyNotices.txt` reproduced in full when the server is distributed (a laptop installer); a hosted service does not distribute it. flatbuffers (Apache-2.0), packaging (Apache-2.0 OR BSD-2-Clause) and protobuf (BSD-3-Clause) texts likewise. |
 | Calibration record with `source: "cute"` (CP3, if made) | The CUTE attribution text from §4, in the notices page and in the record's `source_note`. A `holoassist` record needs no notice (CDLA-Permissive-2.0 §3.1) but names its release in `source_note`. |
 | PAM code (`perception/`, `server/`, `phone/`) | Repository `LICENSE` is MIT, "Copyright (c) 2026 Praneeth Samineni". Our own code; a commercial product can keep it MIT or relicense: that is a business decision, not a blocker. The copyright holder named in the file must match the entity that will sign commercial agreements (open question in `docs/OVERSIGHT_CP2.md`). |
-| `@mediapipe/tasks-vision` 1.0.1 files | Apache-2.0 text (MediaPipe repository `LICENSE`), "Copyright Google LLC" line as in the repository headers, plus the package README Privacy Notice disclosure (metrics are blocked by CSP in PAM; say so in the privacy notice rather than pretending the code does not try). |
-| `hand_landmarker.task` | Whatever the model card states, verbatim, once read. Until then it does not ship. |
-| Python server deps | MIT/BSD texts for fastapi, starlette, uvicorn, pydantic, numpy, and the OpenCV Apache-2.0 + FFmpeg LGPL-2.1 texts if the server is ever distributed (a hosted service does not distribute them; a laptop installer would). |
-| Tabler icons (legacy pages) | MIT (noted in `CLAUDE.md`); not loaded by `memory.html` (checked: `PUBLIC_ASSETS` lists no icon set). |
+| `@mediapipe/tasks-vision` 1.0.1 files | Apache-2.0 text (MediaPipe repository `LICENSE`, the stock text with the `[name of copyright owner]` placeholder), the copyright line **"Copyright 2022 The MediaPipe Authors."** exactly as the Tasks Vision source headers read (`mediapipe/tasks/web/vision/index.ts`, `.../hand_landmarker/hand_landmarker.ts`, fetched 2026-10-10; the earlier "Copyright Google LLC" wording in this row was not what the headers say: corrected, CP5), **no `NOTICE` file exists in the repository** (404 at `master`, 2026-10-10), plus the package README Privacy Notice disclosure (metrics are blocked by CSP in PAM; say so in the privacy notice rather than pretending the code does not try). The notices entry is conditional on the asset being provisioned and says whether it is present on this server. |
+| `hand_landmarker.task` | Whatever the model card states, verbatim, once read. Until then it does not ship **and has no licence-bearing entry in `server/notices.json`** (the §8 sync test asserts this while the §2b row is UNVERIFIED). |
+| Python server deps | MIT/BSD texts for fastapi ("Copyright (c) 2018 Sebastián Ramírez"), starlette ("Copyright © 2018, Encode OSS Ltd."), uvicorn ("Copyright © 2017-present, Encode OSS Ltd.") and its installed `[standard]` extras, pydantic/pydantic-core ("Copyright (c) 2017 to present Pydantic Services Inc. and individual contributors"), numpy ("Copyright (c) 2005-2025, NumPy Developers." plus the wheel's `dist-info/licenses/` directory), the transitive anyio, h11, click, typing-extensions, annotated-types, idna, sniffio texts from their wheels (all present in the wheels, checked 2026-10-10), and for OpenCV (CP5): the wheel's `cv2/LICENSE.txt` (MIT, "Copyright (c) Olli-Pekka Heinisuo", 1,070 B, SHA-256 `09d719058e782ac7bc71ba21c944e1136cde2bb957c0e888121f0218d6b5f02c`), the Apache-2.0 text as `opencv/LICENSE` reads, and the wheel's `LICENSE-3RD-PARTY.txt` (opencv-python-headless 5.0.0.93: 179,634 B, SHA-256 `2537f5653345db7231ff12f307bcfa4c89807d45ed1c4bb8ebfb6f26f61b160a`; line 243 "FFmpeg is redistributed within all opencv-python packages" followed by the LGPL-2.1 text; line 710 "Qt 5 is redistributed within non-headless opencv-python Linux and macOS packages", which the headless wheel avoids) reproduced whole, with the note that FFmpeg is dynamically linked and replaceable and where its source is (`docs/OVERSIGHT_CP5.md` §3.1 entry 13). A hosted service does not distribute these; a laptop installer would; the page carries them either way. |
+| Tabler icons | MIT, "Copyright (c) 2020-2026 Paweł Kuna": `phone/assets/tabler-license.txt` is byte-identical to the upstream `LICENSE` (https://raw.githubusercontent.com/tabler/tabler-icons/main/LICENSE, SHA-256 `b740a1d46122672da62833e97f7e7c8a13fa85cbc7445b584b297cc00dde93db`, fetched 2026-10-10). Not loaded by `memory.html` today (no `<svg>` in the page; `PUBLIC_ASSETS` lists no icon file; `agent.html`, which embeds Tabler-derived symbols, redirects to `/`). The notices entry is required the moment any served file embeds a Tabler path (condition `served:tabler`, §8). |
 
 ## 6. REJECTED components (do not reintroduce)
 
@@ -292,3 +305,70 @@ Fetched on 2026-10-09 (CP3), same method:
 | microsoft/playwright-python `LICENSE` / nodejs/node `LICENSE` | `7fab1461b41970ff376f1c9303a637076bfaaeb71cd12dd3a1c44aaf59a1a2b9` / `3ebb7123f4d2b9b916338e11748380972d4339d66f54cb3258270f99bb62faf5` |
 | s-tian/CUTE `README.md` / `datasheet.md` / `LICENSE` | `44502182e5f44466a9c7f8b69dda3416a334f677f76111cccfaa4dbe573fab44` / `8c0fcabce74f3b89d60c78d584a20fa73b12843c6f8011b2306702d1bfc56f4f` / `9b04efaa045e2e47b23a945a4dee7555370be3dfa39a9ab1757d609568060e60` |
 | spdx/license-list-data `text/CC-BY-4.0.txt` | `d557539df68e771cc1eedcc91d13f70fca930e508d11eedcafa4b15db49e3744` |
+
+Fetched on 2026-10-10 (CP5, notices), same method:
+
+| File | SHA-256 |
+| --- | --- |
+| google-ai-edge/mediapipe `LICENSE` at `master` (identical to 2026-10-08); `NOTICE` **does not exist** (HTTP 404) | `8707eef0533987efc5b155d64761eeb6e20793f50b9bd1a68dad1cf4719d0ed8` |
+| google-ai-edge/mediapipe `mediapipe/tasks/web/vision/index.ts` / `mediapipe/tasks/web/vision/hand_landmarker/hand_landmarker.ts` (headers: "Copyright 2022 The MediaPipe Authors.") / `mediapipe/tasks/web/vision/README.md` (Privacy Notice, last modified June 5, 2026) | `ad6d0651ef5d1a8138f5e4a0211a7c2ac938e99198768c66ea517831d2139610` / `1ed18e2e0bee2d2f963bfe4af7700b965ebeef58569a407bd5175d860cefe939` / `8326ed0beb1983b69cccb190937c2e368388969cb3ade06010fe51e0d5339308` |
+| facebookresearch/dinov2 at `7764ea0f…`: `NOTICE` **does not exist** (HTTP 404); `dinov2/models/vision_transformer.py` (header "Copyright (c) Meta Platforms, Inc. and affiliates.") | `7799a260f2d7d0fe197331d08502fb8c542f9b7424723650f6a39b64fa2639ea` (unchanged) |
+| microsoft/onnxruntime `LICENSE` (unchanged) | `2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c` |
+| tabler/tabler-icons `LICENSE` (= `phone/assets/tabler-license.txt`) | `b740a1d46122672da62833e97f7e7c8a13fa85cbc7445b584b297cc00dde93db` |
+| opencv/opencv-python `LICENSE-3RD-PARTY.txt` at `4.x` (179,306 B) / the copy bundled in the `opencv-python-headless` 5.0.0.93 wheel (`cv2/LICENSE-3RD-PARTY.txt`, 179,634 B; the one to ship) / the wheel's `cv2/LICENSE.txt` (1,070 B) | `36bae33968d5e67f66906bc595949cb78d65978604e7392f552a79006c93cf2c` / `2537f5653345db7231ff12f307bcfa4c89807d45ed1c4bb8ebfb6f26f61b160a` / `09d719058e782ac7bc71ba21c944e1136cde2bb957c0e888121f0218d6b5f02c` |
+| opencv/opencv `LICENSE` at `4.x` (stock Apache-2.0 text; unchanged) | `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30` |
+| google/flatbuffers `LICENSE` at `master` (stock Apache-2.0 text) | `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30` |
+| `onnxruntime` 1.29.0 wheel in the sandbox (not the pinned 1.30.0): `onnxruntime/LICENSE` / `onnxruntime/ThirdPartyNotices.txt` (336,906 B); the 1.30.0 values stay the ones in §1 | `2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c` / `53d3fa5821ac016ac24dd35775c996efec86e2ae0841e9a3a5e146c0ae916845` |
+
+## 8. Notices sync list (CP5)
+
+`server/notices.json` must contain exactly the components below with these licence
+identifiers and conditions, and nothing that carries a licence for a row of this
+register marked `UNVERIFIED` or `REJECTED`. The test (`server/test_cp5_api.py` or a
+`test_cp5_notices.py`) parses this fenced block, compares it with `server/notices.json`
+in both directions, checks `version` against `scripts/model_pins.json` for the asset
+rows and against `importlib.metadata.version()` for the Python rows, and fails on any
+difference with the message "update docs/LICENSES.md §1, §8 and server/notices.json
+together" (`docs/OVERSIGHT_CP5.md` §3.4). `condition` is one of `always`,
+`provisioned:hand`, `provisioned:identity`, `calibration:cute`, `served:tabler`. The
+page renders an entry whose condition holds; for `provisioned:*` it says whether the
+component is present on this server. The hand model (§2b) is absent from this list on
+purpose: it joins it, with the licence line the model card states, only when its row
+is flipped to VERIFIED-COMMERCIAL.
+
+```json notices-expected
+[
+  {"component": "@mediapipe/tasks-vision", "version": "1.0.1", "licence": "Apache-2.0", "condition": "provisioned:hand",
+   "files": ["vision_bundle.mjs", "vision_wasm_internal.js", "vision_wasm_internal.wasm", "vision_wasm_nosimd_internal.js", "vision_wasm_nosimd_internal.wasm"],
+   "copyright": "Copyright 2022 The MediaPipe Authors.", "notice_file": null, "privacy_disclosure": true},
+  {"component": "dinov2_vits14.onnx", "version": "dinov2_vits14@7764ea0f-opset17-224", "licence": "Apache-2.0", "condition": "provisioned:identity",
+   "copyright": "Copyright (c) Meta Platforms, Inc. and affiliates.", "notice_file": null, "modification_notice": true},
+  {"component": "onnxruntime", "version": "1.30.0", "licence": "MIT", "condition": "provisioned:identity",
+   "copyright": "Copyright (c) Microsoft Corporation", "third_party_file": "ThirdPartyNotices.txt"},
+  {"component": "flatbuffers", "version": "25.12.19", "licence": "Apache-2.0", "condition": "provisioned:identity", "wheel_ships_licence": false},
+  {"component": "packaging", "version": "26.3", "licence": "Apache-2.0 OR BSD-2-Clause", "condition": "provisioned:identity"},
+  {"component": "protobuf", "version": "7.36.2", "licence": "BSD-3-Clause", "condition": "provisioned:identity", "copyright": "Copyright 2008 Google Inc."},
+  {"component": "fastapi", "version": "0.142.4", "licence": "MIT", "condition": "always", "copyright": "Copyright (c) 2018 Sebastián Ramírez"},
+  {"component": "starlette", "version": "1.6.0", "licence": "BSD-3-Clause", "condition": "always", "copyright": "Copyright © 2018, Encode OSS Ltd."},
+  {"component": "uvicorn", "version": "0.53.0", "licence": "BSD-3-Clause", "condition": "always", "copyright": "Copyright © 2017-present, Encode OSS Ltd.", "extras_if_installed": ["httptools", "uvloop", "watchfiles", "websockets", "python-dotenv", "pyyaml"]},
+  {"component": "pydantic", "version": "2.13.5", "licence": "MIT", "condition": "always", "copyright": "Copyright (c) 2017 to present Pydantic Services Inc. and individual contributors."},
+  {"component": "pydantic-core", "version": "2.46.5", "licence": "MIT", "condition": "always"},
+  {"component": "numpy", "version": "2.5.3", "licence": "BSD-3-Clause", "condition": "always", "copyright": "Copyright (c) 2005-2025, NumPy Developers.", "bundled_licences_dir": "dist-info/licenses"},
+  {"component": "opencv-python-headless", "version": "5.0.0.93", "licence": "MIT AND Apache-2.0 AND LGPL-2.1-only", "condition": "always",
+   "copyright": "Copyright (c) Olli-Pekka Heinisuo", "third_party_file": "LICENSE-3RD-PARTY.txt", "third_party_sha256": "2537f5653345db7231ff12f307bcfa4c89807d45ed1c4bb8ebfb6f26f61b160a", "ffmpeg_lgpl_note": true},
+  {"component": "anyio", "version": "4.15.1", "licence": "MIT", "condition": "always"},
+  {"component": "h11", "version": "0.16.0", "licence": "MIT", "condition": "always"},
+  {"component": "click", "version": "8.5.0", "licence": "BSD-3-Clause", "condition": "always"},
+  {"component": "typing-extensions", "version": "4.16.0", "licence": "PSF-2.0", "condition": "always"},
+  {"component": "annotated-types", "version": "0.8.0", "licence": "MIT", "condition": "always"},
+  {"component": "idna", "version": "3.20", "licence": "BSD-3-Clause", "condition": "always"},
+  {"component": "sniffio", "version": "1.3.1", "licence": "MIT OR Apache-2.0", "condition": "always"},
+  {"component": "tabler-icons", "version": "recorded by Builder C when first embedded", "licence": "MIT", "condition": "served:tabler", "copyright": "Copyright (c) 2020-2026 Paweł Kuna"},
+  {"component": "CUTE", "version": "doi:10.25740/gj714cj0414", "licence": "CC-BY-4.0", "condition": "calibration:cute", "attribution_text": "the §4 paragraph verbatim"}
+]
+```
+
+Versions are the register's pins at the time of writing; the test's installed-version
+comparison is the mechanism that keeps the three places moving together. The
+`onnxruntime` 1.30.0 vs 1.31.0 re-pin (`docs/OVERSIGHT_CP3.md` §7 Q10) is a change to
+§1, this list and `notices.json` in one edit.

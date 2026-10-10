@@ -1,0 +1,100 @@
+{
+ "name": "containment_keys_in_basket",
+ "basis": "synthetic scenario, authored by the tester 2026-10-10; software-correctness expectations, not accuracy",
+ "clock_start_ms": 1790000000000,
+ "description": "Part 1 section 10 case 5: keys placed inside a basket (rest region at least 80 % inside the basket's); the basket later moves. The keys read inferred with the basket's current place and the answer hedges ('I think ... with ...'); the keys' own last observation is not changed by the basket moving. The truth for the keys is given explicitly: the scene itself does not model containment.",
+ "items": {
+  "basket": {
+   "label": "synthetic cp5 basket",
+   "tag": 0
+  },
+  "keys": {
+   "label": "synthetic cp5 keys",
+   "tag": 2
+  }
+ },
+ "steps": [
+  {
+   "kind": "episode",
+   "placements": [
+    {
+     "item": "basket",
+     "outcome": "placed_on_surface",
+     "to": [
+      60,
+      40,
+      100,
+      80
+     ],
+     "location": "fixture counter"
+    },
+    {
+     "item": "keys",
+     "outcome": "placed_on_surface",
+     "to": [
+      68,
+      48,
+      92,
+      72
+     ],
+     "location": "fixture counter"
+    }
+   ]
+  },
+  {
+   "kind": "query",
+   "text": "where are my synthetic cp5 keys",
+   "truth": {
+    "item": "keys"
+   },
+   "expect": {
+    "outcome": "correct",
+    "shape": "confident"
+   }
+  },
+  {
+   "kind": "advance",
+   "hours": 1
+  },
+  {
+   "kind": "episode",
+   "item": "basket",
+   "outcome": "placed_on_surface",
+   "to": [
+    8,
+    8,
+    48,
+    48
+   ],
+   "location": "fixture shelf"
+  },
+  {
+   "kind": "query",
+   "text": "where are my synthetic cp5 keys",
+   "truth": {
+    "item": "keys",
+    "location_status_now": "placed",
+    "location_text_now": "fixture shelf",
+    "moved_since": false
+   },
+   "expect": {
+    "outcome": "hedged-correct",
+    "shape": "hedged"
+   },
+   "expected_basis": [
+    "inferred"
+   ]
+  },
+  {
+   "kind": "query",
+   "text": "where is my synthetic cp5 basket",
+   "truth": {
+    "item": "basket"
+   },
+   "expect": {
+    "outcome": "correct",
+    "shape": "confident"
+   }
+  }
+ ]
+}

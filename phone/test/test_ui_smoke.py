@@ -1481,5 +1481,372 @@ class PrivacySmokeTests(PrivacySmokeFixture):
         self.assertEqual(self.page_errors, [], self.page_errors)
 
 
+# --- CP5: the full flow, "Why this answer", counters and the Status panel, notices -----------
+# A fourth app (the identity app: synthetic embedder, CP3 scripted processor, approved
+# synthetic calibration) so one class can seed a trusted placement AND lookalikes over
+# the API. The browser then has to render the CP5 answer contract. Element ids/classes
+# the page must provide (Builder C), beyond the CP3/CP4 ones above:
+#   chat:    every assistant message carries <details class="why-answer"> whose <summary>
+#            reads "Why this answer" and which lists one li.basis-reason[data-basis=<token>]
+#            per `basis` token, each in plain words (no raw token text, no underscores);
+#            the message text names the answer's room ("room unknown"); a confident or
+#            hedged member card (article.item-card) shows the evidence photo with the
+#            recorded region outlined (.evidence-figure .target once the image loads) and
+#            "Observed: <time>" (never "Time not recorded")
+#   privacy: a Status panel #status-panel with #coverage-today holding one element
+#            [data-coverage=camera_on_ms|gap_ms|episodes|packets|idle_sent|idle_dropped|
+#            sessions] whose text is an integer (today's /api/coverage), #live-counters with
+#            [data-counter=<counter key>] integers for this browser's current capture
+#            session, refreshed by #refresh-privacy; a link a[href="/notices"] to the
+#            third-party notices page (same origin)
+#   camera:  in automatic mode the page POSTs /api/telemetry every 60 s and at stop with
+#            exactly the plan's key sets (see test_cp5_fixtures); the request is observed
+#            through interception, so the fake clock (page.clock) drives the 60 s timer.
+TELEMETRY_TOP = {"schema_version", "device_id", "session_id", "t_ms", "clock_anchor", "window_ms", "counters", "timing", "settings"}
+COUNTER_KEYS = {"frames_captured", "frames_analysed", "frames_skipped_busy", "frames_dropped_backpressure", "landmark_results",
+                "landmark_timeouts", "episodes_started", "episodes_finished", "episodes_aborted", "packets_sent", "packets_acked",
+                "idle_sent", "idle_dropped", "gaps", "gap_ms", "bytes_sent"}
+TIMING_KEYS = {"fps_observed", "infer_ms_p50", "infer_ms_p95", "tick_ms_p95"}
+SETTINGS_KEYS = {"width", "height", "frame_rate"}
+COVERAGE_KEYS = {"camera_on_ms", "gap_ms", "episodes", "packets", "idle_sent", "idle_dropped", "sessions"}
+BASIS_VOCABULARY = {"trusted_match", "provisional_match", "placed", "sighted", "inferred", "aged", "expired", "negative_reobservation",
+                    "coverage_gap", "picked_up", "lookalikes", "name_ambiguous", "no_evidence", "index_pending", "consent_pending"}
+SPECTACLES = "synthetic spectacles"
+
+
+class Cp5SmokeFixture(IdentitySmokeFixture):
+    @classmethod
+    def setUpClass(cls):
+        cls.posted_telemetry = []
+        cls.telemetry_statuses = []
+        super().setUpClass()
+        if getattr(cls, "context", None) is not None:
+            cls.context.on("response", lambda response: cls.telemetry_statuses.append(response.status) if response.url == cls.origin + "/api/telemetry" else None)
+
+    @classmethod
+    def _route(cls, route, request):
+        if request.method == "POST" and request.url == cls.origin + "/api/telemetry":
+            try:
+                cls.posted_telemetry.append(json.loads(request.post_data or ""))
+            except ValueError:
+                cls.posted_telemetry.append({"error": "unparseable body"})
+        super()._route(route, request)
+
+    def api(self):
+        """One signed-in client for the class: sign-ins are rate limited (5 per client
+        per minute) and every case here talks to the API."""
+        client = getattr(type(self), "shared_api", None)
+        if client is None:
+            client = super().api()
+            type(self).shared_api = client
+        return client
+
+    @classmethod
+    def tearDownClass(cls):
+        client = getattr(cls, "shared_api", None)
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+        super().tearDownClass()
+
+    def seed_spectacles(self, api):
+        """One trusted placement (tag 2, a distinct item from the lookalike pair's tag 0/1
+        glasses) observed within the last hour. Idempotent per class; returns the item."""
+        existing = getattr(type(self), "spectacles", None)
+        if existing:
+            return existing
+        self.post_tagged(api, [self.identity.region(self.identity.LEFT, 2)], labels=[SPECTACLES], locations=["synthetic reading table"])
+        items = self.wait_catalogue(api, lambda items: any(i["name"] == SPECTACLES and i["location_status"] == "placed" for i in items), "spectacles expected")
+        type(self).spectacles = next(i for i in items if i["name"] == SPECTACLES)
+        return self.spectacles
+
+    def ask(self, text):
+        page = self.page
+        before = page.locator("#conversation .message.assistant").count()
+        page.fill("#chat-text", text)
+        page.click("#chat-send")
+        page.wait_for_function("n => document.querySelectorAll('#conversation .message.assistant').length > n", arg=before, timeout=10000)
+        self.wait_text("#chat-status", "Answer received.")
+        return page.locator("#conversation .message.assistant").last
+
+    def why(self, message, expected_tokens=None):
+        """The collapsible "Why this answer" of an assistant message: its reasons in
+        plain words, one per basis token. Returns {token: text}."""
+        details = message.locator("details.why-answer")
+        self.assertEqual(details.count(), 1, "every answer carries one 'Why this answer'")
+        summary = details.locator("summary")
+        self.assertEqual(summary.count(), 1)
+        self.assertIn("why this answer", (summary.text_content() or "").lower())
+        self.assertFalse(details.evaluate("node => node.open"), "collapsed until opened")
+        summary.click()
+        self.page.wait_for_function("node => node.open", arg=details.element_handle(), timeout=5000)
+        reasons = details.locator("li.basis-reason")
+        self.assertGreaterEqual(reasons.count(), 1, "the basis is never empty")
+        out = {}
+        for index in range(reasons.count()):
+            reason = reasons.nth(index)
+            token = reason.get_attribute("data-basis")
+            self.assertIn(token, BASIS_VOCABULARY, f"unknown basis token in the page: {token}")
+            text = (reason.text_content() or "").strip()
+            self.assertTrue(len(text) >= 8, f"a reason in plain words, got {text!r}")
+            self.assertNotIn("_", text, f"plain words, not the token: {text!r}")
+            self.assertNotEqual(text.lower(), token.replace("_", " "), "plain words, not the token with spaces")
+            out[token] = text
+        if expected_tokens is not None:
+            self.assertEqual(list(out), list(expected_tokens), out)
+        return out
+
+    def wait_outline(self, message):
+        self.page.wait_for_function("node => { const img = node.querySelector('article.item-card img'); return img && img.complete && img.naturalWidth > 0; }",
+                                    arg=message.element_handle(), timeout=10000)
+        self.pump(0.2)
+        return message.locator("article.item-card .evidence-figure .target")
+
+
+class Cp5SmokeTests(Cp5SmokeFixture):
+    def test_10_placement_answers_with_photo_outline_time_room_and_why(self):
+        api = self.api()
+        item = self.seed_spectacles(api)
+        answer = api.post("/api/chat", json={"text": "where are my synthetic spectacles"}, headers={"origin": self.origin}).json()
+        self.assertEqual(answer["shape"], "confident", answer)
+        self.assertEqual(answer["basis"], ["trusted_match", "placed"])
+        page = self.load(None)
+        self.ensure_signed_in()
+        self.show("chat")
+        message = self.ask("where are my synthetic spectacles")
+        text = message.text_content() or ""
+        self.assertIn("Answer type: confident", text)
+        self.assertIn("synthetic reading table", text)
+        self.assertIn("room unknown", text.lower(), "the answer names its room ('room unknown' until a source exists)")
+        self.assertIn("Observed:", text, "the capture time is shown")
+        self.assertNotIn("Time not recorded", text)
+        year = time.strftime("%Y", time.gmtime(item["observed_at_ms"] / 1000))
+        self.assertIn(year, text, "the capture time is a real date")
+        card = message.locator("article.item-card")
+        self.assertEqual(card.count(), 1)
+        self.assertEqual(card.get_attribute("data-item-id"), item["item_id"])
+        image = card.locator("img")
+        self.assertEqual(image.count(), 1)
+        self.assertEqual(image.get_attribute("src"), f"/api/items/{item['item_id']}/image")
+        outline = self.wait_outline(message)
+        self.assertEqual(outline.count(), 1, "the recorded region is outlined on the photo")
+        self.assertNotIn("target-unverified", outline.get_attribute("class") or "", "a trusted placement is outlined as verified")
+        reasons = self.why(message, ["trusted_match", "placed"])
+        for token, words in reasons.items():
+            self.assertNotIn("last saw", words.lower())
+        self.assertEqual(self.page_errors, [], self.page_errors)
+
+    def test_20_abstain_also_explains_itself_without_a_photo(self):
+        page = self.load(None)
+        self.ensure_signed_in()
+        self.show("chat")
+        message = self.ask("where is my unseen thing")
+        text = message.text_content() or ""
+        self.assertIn("Answer type: abstain", text)
+        self.assertNotIn("last saw", text.lower())
+        self.assertEqual(message.locator("img").count(), 0)
+        self.why(message, ["no_evidence"])
+        self.assertEqual(self.page_errors, [], self.page_errors)
+
+    def test_30_rename_then_re_ask_answers_with_the_new_name(self):
+        # Coordinator ruling 8: matching is word-subset (CP1 rule), so the new name's
+        # words must not be a superset of the old name's for the old question to abstain.
+        api = self.api()
+        item = self.seed_spectacles(api)
+        response = api.post(f"/api/items/{item['item_id']}/name", json={"name": "reading glasses"}, headers={"origin": self.origin})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["name"], "reading glasses")
+        page = self.load(None)
+        self.ensure_signed_in()
+        self.show("chat")
+        message = self.ask("where are my reading glasses")
+        text = message.text_content() or ""
+        self.assertIn("Answer type: confident", text)
+        self.assertIn("reading glasses", text)
+        self.assertIn("synthetic reading table", text)
+        self.assertEqual(message.locator("article.item-card").get_attribute("data-item-id"), item["item_id"])
+        self.why(message, ["trusted_match", "placed"])
+        # The old name no longer matches: honest abstention, no photo.
+        old = self.ask("where are my synthetic spectacles")
+        self.assertIn("Answer type: abstain", old.text_content() or "")
+        self.assertEqual(old.locator("img").count(), 0)
+        self.assertEqual(self.page_errors, [], self.page_errors)
+
+    def test_40_group_answer_tap_a_member_and_re_answer_with_why(self):
+        api = self.api()
+        a, b = self.seed_lookalikes(api)
+        page = self.load(None)
+        self.ensure_signed_in()
+        self.show("chat")
+        message = self.ask(self.identity.ASK_GLASSES)
+        text = message.text_content() or ""
+        self.assertIn("Answer type: group", text)
+        self.assertIn("which one is yours", text.lower())
+        self.assertIn("room unknown", text.lower())
+        members = message.locator(".group-members .group-member")
+        self.assertEqual(members.count(), 2, text)
+        self.assertEqual({members.nth(i).get_attribute("data-item-id") for i in range(2)}, {a, b})
+        page.wait_for_function("() => [...document.querySelectorAll('.group-members img')].every(img => img.complete && img.naturalWidth > 0)", timeout=10000)
+        self.why(message, ["lookalikes"])
+        answers_before = page.locator("#conversation .message.assistant").count()
+        requests_before = len(self.requests)
+        chosen = members.nth(0).get_attribute("data-item-id")
+        members.nth(0).click()
+        page.wait_for_function("n => document.querySelectorAll('#conversation .message.assistant').length > n", arg=answers_before, timeout=10000)
+        self.wait_text("#chat-status", "Answer received.")
+        assigns = [url for source, url in self.requests[requests_before:] if source == "route" and urlsplit(url).path.endswith("/assign")]
+        self.assertEqual(len(assigns), 1, assigns)
+        self.assertTrue(urlsplit(assigns[0]).path.startswith(f"/api/items/{chosen}/observations/"))
+        resolved = page.locator("#conversation .message.assistant").last
+        resolved_text = resolved.text_content() or ""
+        self.assertNotIn("Answer type: group", resolved_text)
+        self.assertNotIn("Answer type: confident", resolved_text, "a member's certainty is never upgraded by selecting it")
+        self.assertEqual(resolved.locator("article.item-card").get_attribute("data-item-id"), chosen)
+        reasons = self.why(resolved)
+        self.assertNotIn("name_ambiguous", reasons)
+        self.assertTrue(set(reasons) & {"trusted_match", "provisional_match", "sighted", "placed", "lookalikes"}, reasons)
+        items = {i["item_id"]: i for i in api.get("/api/items").json()["items"]}
+        self.assertEqual([items[a]["lookalikes"], items[b]["lookalikes"]], [[], []])
+        self.assertEqual(self.page_errors, [], self.page_errors)
+
+    def test_50_counters_are_posted_under_the_fake_clock_and_the_status_panel_shows_coverage(self):
+        self.provision_server()
+        api = self.api()
+        hand = next(cap for cap in api.get("/api/health").json()["capabilities"] if cap["name"] == HAND_CAPABILITY)
+        self.assertTrue(hand["enabled"], hand)
+        # Fake timers for this page only (installed before the page scripts run on load).
+        self.page.clock.install()
+        page = self.load("ready")
+        self.ensure_signed_in()
+        self.show("camera")
+        page.wait_for_function("() => !document.getElementById('automatic-toggle').disabled", timeout=10000, polling=100)
+        hands = self.golden_hands()
+        page.evaluate("script => { window.__pamFake.script = script; window.__pamFake.replies = 0; }", [hands["no_hand"]])
+        posted_before = len(self.posted_telemetry)
+        page.click("#camera-start")
+        self.wait_text("#camera-status", "manual marks only", timeout=15000)
+        page.check("#automatic-toggle")
+        self.wait_text("#camera-status", "automatic capture (hand model fake-0.0)")
+        time.sleep(1.0)   # real time: let a few frames flow before the clock jumps
+        simulated = 0
+        while simulated < 66000 and len(self.posted_telemetry) == posted_before:
+            page.clock.run_for(500)
+            simulated += 500
+            self.pump(0.02)
+        self.assertEqual(len(self.posted_telemetry), posted_before + 1, f"exactly one POST /api/telemetry within {simulated} ms of simulated time")
+        body = self.posted_telemetry[-1]
+        self.assertEqual(set(body), TELEMETRY_TOP, body.keys())
+        self.assertEqual(body["schema_version"], 1)
+        for key in ("device_id", "session_id"):
+            self.assertEqual(str(uuid.UUID(body[key])), body[key].lower())
+        self.assertIsInstance(body["t_ms"], int)
+        self.assertEqual(set(body["clock_anchor"]), {"mono_ms", "wall_ms"})
+        self.assertIsInstance(body["window_ms"], int)
+        self.assertTrue(1000 <= body["window_ms"] <= 120000, body["window_ms"])
+        self.assertEqual(set(body["counters"]), COUNTER_KEYS, body["counters"].keys())
+        self.assertEqual(set(body["timing"]), TIMING_KEYS, body["timing"].keys())
+        self.assertEqual(set(body["settings"]), SETTINGS_KEYS, body["settings"].keys())
+        for key, value in body["counters"].items():
+            self.assertIsInstance(value, int, key)
+            self.assertNotIsInstance(value, bool, key)
+            self.assertGreaterEqual(value, 0, key)
+        for key, value in body["timing"].items():
+            self.assertIsInstance(value, (int, float), key)
+            self.assertNotIsInstance(value, bool, key)
+            self.assertGreaterEqual(value, 0, key)
+        for key, value in body["settings"].items():
+            self.assertIsInstance(value, (int, float), key)
+            # Coordinator ruling 9: frame_rate may read 0 when getSettings() lacks it; the
+            # Chromium fake device used here reports it, so > 0 holds in this environment.
+            self.assertGreater(value, 0, key)
+        self.assertGreaterEqual(body["counters"]["frames_captured"], 1, "the fake camera produced frames")
+        self.assertGreaterEqual(body["counters"]["frames_captured"], body["counters"]["frames_analysed"])
+        self.assertEqual(body["counters"]["episodes_started"], 0, "no hand, no episode")
+        self.assertEqual(body["counters"]["gaps"], 0)
+        self.assertEqual(body["counters"]["gap_ms"], 0)
+        self.assertGreaterEqual(body["settings"]["width"], 160, "the negotiated stream width (getSettings)")
+        self.assertGreaterEqual(body["settings"]["height"], 120)
+        # The server accepted it and it counts for the window's UTC day.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and len(self.telemetry_statuses) < len(self.posted_telemetry) - posted_before:
+            self.pump(0.1)
+        self.assertEqual(set(self.telemetry_statuses), {200}, self.telemetry_statuses)
+        wall_ms = body["clock_anchor"]["wall_ms"] + body["t_ms"] - body["clock_anchor"]["mono_ms"]
+        day = time.strftime("%Y-%m-%d", time.gmtime(wall_ms / 1000))
+        coverage = api.get("/api/coverage", params={"day": day}).json()
+        self.assertTrue(COVERAGE_KEYS <= set(coverage), coverage)
+        self.assertGreaterEqual(coverage["sessions"], 1)
+        self.assertGreaterEqual(coverage["camera_on_ms"], body["window_ms"])
+        # Stopping posts the final window (at most one more post) and the Status panel
+        # shows today's coverage and this browser's live counters.
+        page.click("#camera-stop")
+        self.wait_text("#camera-status", "Camera off")
+        self.pump(0.5)
+        self.assertLessEqual(len(self.posted_telemetry) - posted_before, 2, "one post at 60 s and at most one at stop")
+        self.show("privacy")
+        page.wait_for_selector("#status-panel", timeout=10000)
+        page.click("#refresh-privacy")
+        page.wait_for_function("() => /^\\d+$/.test((document.querySelector('#status-panel #coverage-today [data-coverage=sessions]') || {}).textContent || '')", timeout=10000, polling=100)
+        shown = {}
+        for key in COVERAGE_KEYS:
+            text = (self.text(f"#status-panel #coverage-today [data-coverage='{key}']") or "").strip()
+            self.assertRegex(text, r"^\d+$", f"{key} renders as an integer, got {text!r}")
+            shown[key] = int(text)
+        self.assertGreaterEqual(shown["sessions"], 1)
+        self.assertGreaterEqual(shown["camera_on_ms"], body["window_ms"])
+        self.assertEqual(shown["gap_ms"], coverage["gap_ms"])
+        live = page.locator("#status-panel #live-counters [data-counter]")
+        self.assertGreaterEqual(live.count(), len(COUNTER_KEYS), "every counter of the current session is listed")
+        for index in range(live.count()):
+            element = live.nth(index)
+            self.assertIn(element.get_attribute("data-counter"), COUNTER_KEYS)
+            self.assertRegex((element.text_content() or "").strip(), r"^\d+$")
+        self.assertEqual(page.evaluate("() => window.__pamFake.errors"), [])
+        self.assertEqual(self.page_errors, [], self.page_errors)
+
+    def test_60_privacy_view_links_to_the_notices_page(self):
+        page = self.load(None)
+        self.ensure_signed_in()
+        self.show("privacy")
+        link = page.locator("#view-privacy a[href='/notices']")
+        self.assertEqual(link.count(), 1, "the Privacy view links to /notices")
+        self.assertTrue((link.text_content() or "").strip(), "the link has text")
+        href = link.get_attribute("href")
+        self.assertEqual(href, "/notices")
+        target = link.get_attribute("target")
+        if target == "_blank":
+            with self.context.expect_page(timeout=10000) as opened:
+                link.click()
+            notices = opened.value
+            notices.wait_for_load_state("load")
+            self.assertEqual(urlsplit(notices.url).netloc, urlsplit(self.origin).netloc, "same origin")
+            self.assertEqual(urlsplit(notices.url).path, "/notices")
+            body = notices.locator("body").text_content() or ""
+            notices.close()
+        else:
+            link.click()
+            page.wait_for_url(self.origin + "/notices", timeout=10000)
+            body = page.locator("body").text_content() or ""
+        lowered = body.lower()
+        for name in ("mediapipe", "dino", "onnx", "fastapi", "starlette", "uvicorn", "pydantic", "numpy", "opencv"):
+            self.assertIn(name, lowered, f"the notices page names {name}")
+        self.assertIn("apache license", lowered)
+        statuses = {status for url, status in self.responses if urlsplit(url).path == "/notices"}
+        self.assertEqual(statuses, {200})
+        self.assertEqual(self.page_errors, [], self.page_errors)
+
+    def test_99_no_request_left_the_origin(self):
+        self.assertGreater(len(self.requests), 20, "interception saw too few requests to be meaningful")
+        self.assertEqual(self.foreign, [], f"requests left the origin: {self.foreign}")
+        paths = {urlsplit(url).path for _, url in self.requests}
+        for expected in ("/", "/api/chat", "/api/items", "/api/telemetry", "/notices", "/api/coverage"):
+            self.assertIn(expected, paths)
+        self.assertTrue(any(path.endswith("/assign") for path in paths))
+        self.assertFalse(any(IDENTITY_MODEL in path for path in paths), "the identity model never leaves the server")
+        self.assertEqual(self.page_errors, [], self.page_errors)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

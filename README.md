@@ -25,9 +25,14 @@ review log. Where they differ, Part 1 wins. Section 10 of Part 1 is the build or
 
 ```
 pip install -r perception/requirements.txt -r server/requirements.txt
+pip install -r requirements-dev.txt    # test-only tools (playwright for phone/test/test_ui_smoke.py; torch/onnx for the export script); never installed for the served app
 python -m unittest perception/test_capture.py perception/test_interaction.py
 python -m unittest server/test_memory_lifecycle.py server/test_personal_pipeline.py
 ```
+
+The checkpoint suites (`server/test_cp2_*.py` through `server/test_cp5_*.py`, `python3 -B <file> -v`)
+need only the two runtime requirement files; `python3 -B scripts/check_notices.py` keeps
+`server/notices.json` in step with the licence register.
 
 ## Secrets and weights
 

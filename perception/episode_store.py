@@ -9,9 +9,12 @@ overwritten, or backups, and nothing here claims one.
 
 CP4 adds idle keyframes (a rolling cache, not evidence), re-observation
 (perception/reobservation.py), containment -> inferred locations, retention tiers
-with landmark reduction, and the explicit v1 migration. Windows, thresholds and
-caps in this module are INITIAL VALUES from the build plan unless a measurement is
-cited next to them.
+with landmark reduction, and the explicit v1 migration. CP5 moves the answer
+contract into perception/resolver.py (answer_text delegates to it), adds the
+frame-accounting table frame_counters (ingest_telemetry / coverage; rows expire
+with episodes_days) and stamps consent_version on observation rows. Windows,
+thresholds and caps in this module are INITIAL VALUES from the build plan unless a
+measurement is cited next to them.
 """
 from __future__ import annotations
 
@@ -24,9 +27,10 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+# datetime / timezone: coverage() turns a UTC day into its epoch window.
 
 try:
-    from .episode import parse_packet, parse_idle, jpeg_bytes, decode_jpeg, RevisionLimitError
+    from .episode import parse_packet, parse_idle, parse_telemetry, jpeg_bytes, decode_jpeg, RevisionLimitError
     from .localizer import LocalObservation, localize
     from .identity import (ConformalMatcher, ItemBank, HandCoversRegion, crop_box, padded_crop_box, l2_normalise,
                            mask_from_rle, mask_sufficient, validate_embedder)
@@ -35,8 +39,11 @@ try:
     from .reobservation import ReobservationMixin, inside_fraction, CONTAINMENT_INSIDE
     from .private_files import private_append_fd
     from .consent import CONSENT_VERSION
+    from .resolver import (resolve, query_words, matches, age_item, date_text, AGE_STALE_MS, AGE_ABSTAIN_MS,
+                           REASON_NEGATIVE_REOBSERVATION, REASON_PICKED_UP, REASON_UNCERTAIN,
+                           REASON_SIGHTING_TRUSTED, REASON_SIGHTING_UNVERIFIED, REASON_CLOCK)
 except ImportError:
-    from episode import parse_packet, parse_idle, jpeg_bytes, decode_jpeg, RevisionLimitError
+    from episode import parse_packet, parse_idle, parse_telemetry, jpeg_bytes, decode_jpeg, RevisionLimitError
     from localizer import LocalObservation, localize
     from identity import (ConformalMatcher, ItemBank, HandCoversRegion, crop_box, padded_crop_box, l2_normalise,
                           mask_from_rle, mask_sufficient, validate_embedder)
@@ -45,6 +52,9 @@ except ImportError:
     from reobservation import ReobservationMixin, inside_fraction, CONTAINMENT_INSIDE
     from private_files import private_append_fd
     from consent import CONSENT_VERSION
+    from resolver import (resolve, query_words, matches, age_item, date_text, AGE_STALE_MS, AGE_ABSTAIN_MS,
+                          REASON_NEGATIVE_REOBSERVATION, REASON_PICKED_UP, REASON_UNCERTAIN,
+                          REASON_SIGHTING_TRUSTED, REASON_SIGHTING_UNVERIFIED, REASON_CLOCK)
 
 
 class CannotLinkError(ValueError):
@@ -88,8 +98,23 @@ ERASE_PROFILE_CONFIRM = "ERASE EVERYTHING"
 ERASED_BEFORE_TOLERANCE_MS = 5 * 60 * 1000
 MIGRATION_V1_ID = "v1_observations"
 LEGACY_OUTCOMES = {"placed": "placed_on_surface", "picked_up": "picked_up", "sighted": "sighted"}
+# CP5: the consent_version stamped on every observation row the v1 migration writes
+# (no disclosure of this build was acknowledged for that evidence).
+LEGACY_CONSENT_VERSION = "legacy-v1"
 # A live observation row: not redacted (record NULL) and not an erasure stub.
 LIVE = "record IS NOT NULL AND erased=0"
+# CP5 frame accounting: a telemetry window whose wall time is further than this
+# ahead of the server clock is refused (same tolerance as packets and idle frames).
+TELEMETRY_FUTURE_MS = 300000
+DAY_UTC = re.compile(r"\d{4}-\d{2}-\d{2}")
+# Daily coverage aggregates (coverage_days) are numbers only and are kept this long.
+COVERAGE_DAYS_RETENTION_DAYS = 365
+# Per-profile, per-UTC-day maintenance counters (Finance): bump_counter names.
+# process_cpu_s / reobs_cpu_s are wall seconds of local processing / re-observation
+# work; chat_local counts answer_text calls; image_serves / image_bytes count the
+# evidence images (and their bytes) item_image / observation_image returned.
+MAINTENANCE_COUNTERS = ("process_cpu_s", "reobs_cpu_s", "chat_local", "image_serves", "image_bytes")
+MAX_SOURCE_NOTE = 400
 
 
 def _check_actor(actor):
@@ -118,10 +143,10 @@ def _vector_from_bytes(blob, dim):
 # Clock-only staleness (B-11, CP2). A 'placed' location ages by the evaluation clock
 # alone: no write is needed for an answer to age, and the stored projection never
 # carries an evaluated age. Ageing is applied when a projection is READ, at as_of
-# when the caller gives one, else at the injected clock. Initial values from the
-# build plan; a re-observation stage (CP4) is what refreshes observed_at_ms.
-AGE_STALE_MS = 24 * 3600 * 1000        # age > this: still 'placed', stale_reason "age", aged true, answer hedged
-AGE_ABSTAIN_MS = 7 * 24 * 3600 * 1000  # age > this: location_status 'stale', location_text kept, answer abstains
+# when the caller gives one, else at the injected clock. The windows AGE_STALE_MS
+# (24 h: hedged) and AGE_ABSTAIN_MS (7 d: abstain) are defined in
+# perception/resolver.py (imported above, re-exported here) so the resolver and
+# the store age with one rule. Initial values from the build plan.
 
 
 EPISODE_SCHEMA = """
@@ -207,6 +232,20 @@ CREATE TABLE IF NOT EXISTS migrations (
 CREATE TABLE IF NOT EXISTS maintenance_counters (
  profile_id TEXT NOT NULL, day TEXT NOT NULL, name TEXT NOT NULL, value REAL NOT NULL DEFAULT 0,
  PRIMARY KEY(profile_id,day,name));
+CREATE TABLE IF NOT EXISTS frame_counters (
+ profile_id TEXT NOT NULL, device_id TEXT NOT NULL, session_id TEXT NOT NULL, t_ms INTEGER NOT NULL,
+ received_ms INTEGER NOT NULL, window_ms INTEGER NOT NULL, counters TEXT NOT NULL, timing TEXT NOT NULL,
+ settings TEXT NOT NULL, PRIMARY KEY(profile_id,device_id,session_id,t_ms));
+CREATE INDEX IF NOT EXISTS frame_counters_time ON frame_counters(profile_id,t_ms);
+CREATE TABLE IF NOT EXISTS capture_gaps (
+ gap_no INTEGER PRIMARY KEY AUTOINCREMENT, profile_id TEXT NOT NULL, device_id TEXT NOT NULL, session_id TEXT NOT NULL,
+ source TEXT NOT NULL CHECK(source IN ('packet','telemetry')), t_from_ms INTEGER NOT NULL, t_to_ms INTEGER NOT NULL,
+ gap_ms INTEGER NOT NULL, received_ms INTEGER NOT NULL, reason TEXT,
+ UNIQUE(profile_id,device_id,session_id,source,t_from_ms,t_to_ms));
+CREATE INDEX IF NOT EXISTS capture_gaps_time ON capture_gaps(profile_id,device_id,t_to_ms);
+CREATE TABLE IF NOT EXISTS coverage_days (
+ profile_id TEXT NOT NULL, day TEXT NOT NULL, aggregates TEXT NOT NULL, updated_ms INTEGER NOT NULL,
+ PRIMARY KEY(profile_id,day));
 """
 
 # CP3 (schema user_version 3) and CP4 (user_version 4): columns added to existing
@@ -224,8 +263,16 @@ CREATE TABLE IF NOT EXISTS maintenance_counters (
 # was ingested under; retention.acknowledged_version / erased_at_ms and
 # reobservations.gated are the coordinator fix-round columns (guarded for a
 # database created earlier in CP4).
+# CP5 (user_version 5): local_observations.consent_version is the CONSENT_VERSION
+# the observation's evidence was captured under (process_pending, reobserve) or
+# LEGACY_CONSENT_VERSION for a row the v1 migration wrote; NULL on rows written
+# before CP5.
+# calibrations.source_note (CP5): an optional attribution / provenance note for
+# the record (the CC BY 4.0 attribution text of a CUTE-derived calibration).
 EPISODE_COLUMNS = (("local_observations", "candidates", "TEXT"),
                    ("local_observations", "erased", "INTEGER NOT NULL DEFAULT 0"),
+                   ("local_observations", "consent_version", "TEXT"),
+                   ("calibrations", "source_note", "TEXT"),
                    ("episode_revisions", "redacted_reason", "TEXT"),
                    ("episode_revisions", "reduced_ms", "INTEGER"),
                    ("episode_revisions", "consent_version", "TEXT"),
@@ -337,19 +384,29 @@ class EpisodeStoreMixin(ReobservationMixin):
     # calibration dict (CP2 rule, _calibration_approved) is a separate, code-only path.
     @staticmethod
     def _calibration_dict(row) -> dict:
+        keys = row.keys() if hasattr(row, "keys") else ()
         return {"calibration_id": row["calibration_id"], "embedder": row["embedder"], "alpha": row["alpha"],
                 "quantile": row["quantile"], "n": row["n"], "source": row["source"], "created_ms": row["created_ms"],
-                "approved": bool(row["approved"]), "approved_by": row["approved_by"], "approved_ms": row["approved_ms"]}
+                "approved": bool(row["approved"]), "approved_by": row["approved_by"], "approved_ms": row["approved_ms"],
+                "source_note": row["source_note"] if "source_note" in keys else None}
 
     def register_calibration(self, record) -> dict:
         """Store a calibration record {calibration_id, embedder, alpha, quantile, n,
-        source, created_ms?}; approved is always False here. ValueError on an
-        invalid or duplicate record. Audit row calibration_registered."""
+        source, created_ms?, source_note?}; approved is always False here.
+        source_note (CP5, optional, printable text of at most MAX_SOURCE_NOTE
+        characters) is the record's attribution / provenance note: for a "cute"
+        calibration it carries the CC BY 4.0 attribution text the notices page
+        shows. ValueError on an invalid or duplicate record. Audit row
+        calibration_registered."""
         if not isinstance(record, dict):
             raise ValueError("Invalid calibration record")
-        allowed = {"calibration_id", "embedder", "alpha", "quantile", "n", "source", "created_ms", "approved"}
+        allowed = {"calibration_id", "embedder", "alpha", "quantile", "n", "source", "created_ms", "approved", "source_note"}
         if set(record) - allowed:
             raise ValueError("Invalid calibration record")
+        note = record.get("source_note")
+        if note is not None and (not isinstance(note, str) or not 1 <= len(note.strip()) <= MAX_SOURCE_NOTE or any(ord(c) < 32 for c in note)):
+            raise ValueError("Invalid calibration source_note")
+        note = note.strip() if isinstance(note, str) else None
         calibration_id, embedder, source = record.get("calibration_id"), record.get("embedder"), record.get("source")
         if not isinstance(calibration_id, str) or not CALIBRATION_ID.fullmatch(calibration_id):
             raise ValueError("Invalid calibration_id")
@@ -371,8 +428,8 @@ class EpisodeStoreMixin(ReobservationMixin):
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT 1 FROM calibrations WHERE profile_id=? AND calibration_id=?", (self.profile_id, calibration_id)).fetchone():
                 raise ValueError("Calibration already registered")
-            db.execute("INSERT INTO calibrations(profile_id,calibration_id,embedder,alpha,quantile,n,source,created_ms,approved) VALUES(?,?,?,?,?,?,?,?,0)",
-                       (self.profile_id, calibration_id, embedder, float(alpha), float(quantile), n, source, created))
+            db.execute("INSERT INTO calibrations(profile_id,calibration_id,embedder,alpha,quantile,n,source,created_ms,approved,source_note) VALUES(?,?,?,?,?,?,?,?,0,?)",
+                       (self.profile_id, calibration_id, embedder, float(alpha), float(quantile), n, source, created, note))
             db.execute("INSERT INTO local_audit(profile_id,at_ms,action,item_id,detail) VALUES(?,?,?,?,?)",
                        (self.profile_id, self._now_ms(), "calibration_registered", None, _json({"calibration_id": calibration_id, "embedder": embedder, "source": source, "n": n})))
             return self._calibration_dict(db.execute("SELECT * FROM calibrations WHERE profile_id=? AND calibration_id=?", (self.profile_id, calibration_id)).fetchone())
@@ -477,6 +534,14 @@ class EpisodeStoreMixin(ReobservationMixin):
                        key + (revision, semantic, digest, raw, now, int(accepted), clock_status, CONSENT_VERSION))
             if accepted:
                 db.execute("INSERT INTO episode_jobs(profile_id,device_id,episode_id,revision_no,status) VALUES(?,?,?,?,?)", key + (revision, "pending"))
+                # CP5 (coordinator ruling 1): the packet's observation gaps become
+                # coverage-gap rows on the wall clock, so an item placed before a gap
+                # reads gap_since and the resolver hedges it.
+                for gap in packet.gaps:
+                    self._record_gap(db, packet.device_id, packet.session_id, "packet",
+                                     packet.clock_anchor.wall_ms + gap.t_from_ms - packet.clock_anchor.mono_ms,
+                                     packet.clock_anchor.wall_ms + gap.t_to_ms - packet.clock_anchor.mono_ms,
+                                     gap.t_to_ms - gap.t_from_ms, now)
             return {"episode_id": packet.episode_id, "device_id": packet.device_id, "digest": digest,
                     "revision_no": revision, "retained": True, "status": status,
                     "processing_status": "pending" if accepted else "conflict", "clock_status": clock_status}
@@ -488,9 +553,12 @@ class EpisodeStoreMixin(ReobservationMixin):
         if not callable(processor):
             raise ValueError("Processor must be callable")
         counts = {"processed": 0, "failed": 0, "context_only": 0, "observations": 0,
-                  "embedded": 0, "embedding_failed": 0, "embedding_skipped_hand": 0, "matched": 0, "ambiguous": 0, "containments": 0}
+                  "embedded": 0, "embedding_failed": 0, "embedding_skipped_hand": 0, "matched": 0, "ambiguous": 0, "containments": 0,
+                  "process_cpu_s": 0.0}
         embedder = self.embedder
         embedder_tag = embedder.tag if embedder is not None else None
+        import time as _time
+        spent = 0.0
         for _ in range(limit):
             with self._connection() as db:
                 db.execute("BEGIN IMMEDIATE")
@@ -504,6 +572,9 @@ class EpisodeStoreMixin(ReobservationMixin):
                 key = (self.profile_id, job["device_id"], job["episode_id"], job["revision_no"])
                 token = str(uuid.uuid4())
                 db.execute("UPDATE episode_jobs SET status='processing',token=?,lease_until=?,attempts=attempts+1 WHERE profile_id=? AND device_id=? AND episode_id=? AND revision_no=?", (token, self.clock()+60) + key)
+            # Finance (CP5): the wall time of one job's work (parse, processor,
+            # embedding, write) is charged to the day's process_cpu_s counter.
+            started = _time.perf_counter()
             try:
                 packet = parse_packet(bytes(job["packet"]))
                 result = processor(packet)
@@ -631,8 +702,8 @@ class EpisodeStoreMixin(ReobservationMixin):
                                       identity_source="processor")
                         if match is not None:
                             record["match"] = match
-                        db.execute("INSERT INTO local_observations(profile_id,observation_id,item_id,device_id,episode_id,revision_no,observed_at_ms,decided_at_ms,record,candidates) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                                   (self.profile_id, signature, item_id, packet.device_id, packet.episode_id, job["revision_no"], observed_ms, self._now_ms(), _json(record), _json(candidates) if candidates else None))
+                        db.execute("INSERT INTO local_observations(profile_id,observation_id,item_id,device_id,episode_id,revision_no,observed_at_ms,decided_at_ms,record,candidates,consent_version) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                                   (self.profile_id, signature, item_id, packet.device_id, packet.episode_id, job["revision_no"], observed_ms, self._now_ms(), _json(record), _json(candidates) if candidates else None, CONSENT_VERSION))
                         if vectors[index] is not None:
                             db.execute("INSERT INTO embeddings VALUES(?,?,?,?,?,?)", (self.profile_id, signature, embedder_tag, int(embedder.dim), _vector_bytes(vectors[index]), self._now_ms()))
                         assign[signature] = item_id
@@ -653,6 +724,11 @@ class EpisodeStoreMixin(ReobservationMixin):
                 with self._connection() as db:
                     db.execute("UPDATE episode_jobs SET status='failed',token=NULL,lease_until=NULL,error='local_processing_failed' WHERE profile_id=? AND device_id=? AND episode_id=? AND revision_no=? AND token=?", key + (token,))
                 counts["failed"] += 1
+            finally:
+                spent += _time.perf_counter() - started
+        if spent > 0:
+            counts["process_cpu_s"] = round(spent, 4)
+            self.bump_counter("process_cpu_s", spent)
         with self._connection() as db:
             counts["pending"] = db.execute("SELECT count(*) FROM episode_jobs WHERE profile_id=? AND status IN ('pending','processing')", (self.profile_id,)).fetchone()[0]
             counts["context_only_total"] = db.execute("SELECT count(*) FROM episode_jobs WHERE profile_id=? AND status='context_only'", (self.profile_id,)).fetchone()[0]
@@ -883,30 +959,10 @@ class EpisodeStoreMixin(ReobservationMixin):
 
     @staticmethod
     def _age_item(item, eval_ms):
-        """Clock-only ageing (B-11) of one projected item, evaluated at eval_ms.
-
-        Pure and idempotent: returns a copy. Only a 'placed' location ages (a
-        pickup, an uncertain outcome or a bad capture clock already says so).
-        age = eval_ms - observed_at_ms; age > AGE_ABSTAIN_MS -> location_status
-        'stale', stale_reason "age", location_text kept as history; otherwise
-        age > AGE_STALE_MS -> still 'placed', stale_reason "age". Both set
-        aged=True; everything else reads aged=False.
-        """
-        aged = dict(item, aged=False)
-        aged.setdefault("lookalikes", [])  # CP3 field; a projection stored before CP3 lacks it
-        # CP4 fields; a projection stored before CP4 lacks them.
-        aged.setdefault("inference", None)
-        aged.setdefault("stale_since_ms", None)
-        aged.setdefault("evidence_expired", False)
-        observed = item.get("observed_at_ms")
-        if eval_ms is None or observed is None or item.get("location_status") != "placed":
-            return aged
-        age = eval_ms - observed
-        if age > AGE_ABSTAIN_MS:
-            aged.update(location_status="stale", stale_reason="age", stale_since_ms=observed + AGE_ABSTAIN_MS, aged=True)
-        elif age > AGE_STALE_MS:
-            aged.update(stale_reason="age", aged=True)
-        return aged
+        """Clock-only ageing (B-11) of one projected item, evaluated at eval_ms:
+        perception.resolver.age_item with the build's windows (pure, idempotent,
+        returns a copy; only a 'placed' location ages)."""
+        return age_item(item, eval_ms)
 
     @staticmethod
     def _resolved_identity(row, observation, item_id, merged, resolved):
@@ -970,13 +1026,14 @@ class EpisodeStoreMixin(ReobservationMixin):
         # rows (CP4 stubs) are excluded by the query, so no read path sees them.
         assign, merged, resolved = self._assignments(db, at)
         tombstoned = {row[0] for row in db.execute("SELECT item_id,at_ms FROM item_tombstones WHERE profile_id=?", (self.profile_id,)) if at is None or row[1] <= at}
-        items, latest_candidates, parked, own_label = {}, {}, [], {}
+        items, latest_candidates, parked, own_label, device_of = {}, {}, [], {}, {}
         for row in rows:
             if at is not None and row["observed_at_ms"] > at:
                 continue
             item_id = assign.get(row["observation_id"], row["item_id"])
             if item_id in tombstoned:
                 continue
+            device_of[item_id] = row["device_id"]
             observation = json.loads(row["record"])
             if observation.get("source") == "reobservation":
                 # CP4 rule 13: a positive re-observation refreshes the item's current
@@ -1012,19 +1069,20 @@ class EpisodeStoreMixin(ReobservationMixin):
             # has no producer yet and is never emitted here. Location evidence and
             # identity are independent fields: a provisional identity can still have
             # a sighting; only a trusted identity with a recorded surface is 'placed'.
+            # The stale_reason sentences are perception.resolver constants (the
+            # resolver's decision table keys on them).
             stale = None
             if observation["outcome"] == "picked_up":
-                location_status, stale = "stale", "Observed pickup; resting location is unknown"
+                location_status, stale = "stale", REASON_PICKED_UP
             elif observation["outcome"] == "uncertain":
-                location_status, stale = "unknown", "Episode outcome was uncertain; no resting location recorded"
+                location_status, stale = "unknown", REASON_UNCERTAIN
             elif placed:
                 location_status = "placed"
             else:
                 location_status = "sighted"
-                stale = ("Only a sighting; no resting placement recorded" if trusted
-                         else "Only a sighting; placement and identity are unverified")
+                stale = REASON_SIGHTING_TRUSTED if trusted else REASON_SIGHTING_UNVERIFIED
             if clock_bad:
-                location_status, stale = "unknown", "Capture clock is implausible; location time is uncertain"
+                location_status, stale = "unknown", REASON_CLOCK
             items[item_id] = {
                 "item_id": item_id, "name": observation["label"],
                 "identity_status": identity_state, "relevance": "candidate",
@@ -1049,6 +1107,9 @@ class EpisodeStoreMixin(ReobservationMixin):
                 "stale_since_ms": (row["observed_at_ms"] if location_status == "stale" and row["observed_at_ms"] > 0 else None),
                 "inference": None, "evidence_expired": False,
                 "last_event_ms": row["observed_at_ms"],
+                # CP5: a coverage gap (packet gap or telemetry window with gap_ms > 0,
+                # same device) ended after this evidence time; filled by _apply_gaps.
+                "gap_since": False,
             }
             latest_candidates[item_id] = candidates
         for item_id, item in items.items():
@@ -1080,6 +1141,7 @@ class EpisodeStoreMixin(ReobservationMixin):
         # user name; neither pass depends on lookalikes or names otherwise.
         self._apply_negative_reobservations(db, items, merged, at)
         self._apply_containment(db, items, merged, at)
+        self._apply_gaps(db, items, device_of, at)
         for item in items.values():
             item["evidence_expired"] = self._evidence_expired(db, item)
         if age:
@@ -1144,7 +1206,7 @@ class EpisodeStoreMixin(ReobservationMixin):
                 continue
             gone.setdefault(item_id, row["t_wall_ms"])
         for item_id, since in gone.items():
-            items[item_id].update(location_status="stale", stale_reason="negative_reobservation", stale_since_ms=since)
+            items[item_id].update(location_status="stale", stale_reason=REASON_NEGATIVE_REOBSERVATION, stale_since_ms=since)
 
     def _apply_containment(self, db, items, merged, at):
         """CP4: an item A recorded inside B (containment, most recent row wins;
@@ -1173,7 +1235,7 @@ class EpisodeStoreMixin(ReobservationMixin):
                 a, b = items[inner], items[outer]
                 if (a.get("last_event_ms") or 0) > since or a.get("location_status") not in ("placed", "stale", "inferred"):
                     continue
-                if a.get("location_status") == "stale" and a.get("stale_reason") != "negative_reobservation":
+                if a.get("location_status") == "stale" and a.get("stale_reason") != REASON_NEGATIVE_REOBSERVATION:
                     continue
                 changed_at = None
                 if (b.get("last_event_ms") or 0) > since:
@@ -1184,6 +1246,44 @@ class EpisodeStoreMixin(ReobservationMixin):
                     continue
                 a.update(location_status="inferred", location_text=b.get("location_text"), stale_reason=None, stale_since_ms=None,
                          inference={"container": outer, "container_name": b.get("name"), "since_ms": since})
+
+    def _record_gap(self, db, device_id, session_id, source, t_from_ms, t_to_ms, gap_ms, received_ms):
+        """One coverage-gap row (CP5): a packet gap entry or a telemetry window
+        that reported gap_ms > 0, on the wall clock. Times, ids and the source
+        only: a packet gap's free-text reason stays in the packet (it is personal
+        content under the erasure rules), so the reason column is left NULL.
+        Idempotent for a resend. Returns True when a new row was written."""
+        if gap_ms <= 0 or t_to_ms <= 0:
+            return False
+        cursor = db.execute("INSERT OR IGNORE INTO capture_gaps(profile_id,device_id,session_id,source,t_from_ms,t_to_ms,gap_ms,received_ms,reason) VALUES(?,?,?,?,?,?,?,?,NULL)",
+                            (self.profile_id, device_id, session_id, source, int(t_from_ms), int(t_to_ms), int(gap_ms), int(received_ms)))
+        return cursor.rowcount == 1
+
+    def _apply_gaps(self, db, items, device_of, at):
+        """CP5 (coordinator ruling 1): gap_since = a coverage gap of the item's
+        device (a packet gap or a telemetry window with gap_ms > 0) ended after
+        the item's current evidence time (and, under as_of, no later than at).
+        A positive re-observation or a new placement moves the evidence time, so
+        the flag clears on fresh evidence. Derived from capture_gaps, so a replay
+        reproduces it from storage."""
+        for item in items.values():
+            item["gap_since"] = False
+        times = [item["observed_at_ms"] for item in items.values() if item.get("observed_at_ms")]
+        if not times:
+            return
+        rows = db.execute("SELECT device_id,t_to_ms FROM capture_gaps WHERE profile_id=? AND gap_ms>0 AND t_to_ms>?", (self.profile_id, min(times))).fetchall()
+        if not rows:
+            return
+        latest = {}
+        for row in rows:
+            if at is not None and row["t_to_ms"] > at:
+                continue
+            latest[row["device_id"]] = max(latest.get(row["device_id"], 0), row["t_to_ms"])
+        for item_id, item in items.items():
+            observed = item.get("observed_at_ms")
+            device = device_of.get(item_id)
+            if observed and device in latest and latest[device] > observed:
+                item["gap_since"] = True
 
     def _rebuild_projection(self, db):
         # Stored without ageing: the projection must not depend on wall-clock time.
@@ -1220,10 +1320,13 @@ class EpisodeStoreMixin(ReobservationMixin):
 
     @staticmethod
     def _query_words(query):
-        return set(re.findall(r"[\w]+", query.casefold())) - {"where", "is", "are", "my", "the", "a", "an", "did", "i", "leave", "find", "please", "can", "you", "me", "show"}
+        """perception.resolver.query_words: the catalogue and the resolver match
+        the same words."""
+        return query_words(query)
 
-    def _matches(self, item, words, query):
-        return not words or query.strip() == item["item_id"] or words <= self._query_words(item["name"])
+    @staticmethod
+    def _matches(item, words, query):
+        return matches(item, words, query)
 
     def get_item(self, item_id, *, as_of=None) -> dict:
         """One catalogue item aged at as_of or at the injected clock (see list_items)."""
@@ -1337,7 +1440,16 @@ class EpisodeStoreMixin(ReobservationMixin):
             assign, _, _ = self._assignments(db)
             if assign.get(observation_id) != item_id:
                 return None
-            return self._keyframe_bytes(db, row)
+            data = self._keyframe_bytes(db, row)
+        return self._count_image(data)
+
+    def _count_image(self, data):
+        """Finance (CP5): every evidence image served is counted (image_serves,
+        image_bytes) on the day's maintenance counters; the bytes pass through."""
+        if data is not None:
+            self.bump_counter("image_serves")
+            self.bump_counter("image_bytes", len(data))
+        return data
 
     def item_image(self, item_id) -> bytes | None:
         """The item's reference image: the stored keyframe bytes, unmodified.
@@ -1355,7 +1467,8 @@ class EpisodeStoreMixin(ReobservationMixin):
             row = db.execute(f"SELECT * FROM local_observations WHERE profile_id=? AND observation_id=? AND {LIVE}", (self.profile_id, item["observation_id"])).fetchone()
             if row is None:
                 return None
-            return self._keyframe_bytes(db, row)
+            data = self._keyframe_bytes(db, row)
+        return self._count_image(data)
 
     def rename_item(self, item_id, name) -> dict:
         if not isinstance(name, str) or not 1 <= len(name.strip()) <= 100 or any(ord(c) < 32 for c in name):
@@ -1520,79 +1633,29 @@ class EpisodeStoreMixin(ReobservationMixin):
         return self.get_item(item_id)
 
     def answer_text(self, text, *, as_of=None) -> dict:
+        """The Answer (perception.resolver.resolve) for a question over the
+        projection aged at as_of (epoch ms) or at the injected clock. The store
+        supplies what only it knows: the aged projection, the parked (B-14)
+        observations for a group's unresolved_observation_id, whether a candidate
+        is still unprocessed (index_pending) and whether the build's consent
+        version is unacknowledged (basis consent_pending). ValueError for a bad
+        question or as_of."""
         if not isinstance(text, str) or not 1 <= len(text.strip()) <= 2000:
             raise ValueError("Invalid question")
         at = self._as_of_ms(as_of)
         with self._connection() as db:
             projected, parked = self._project(db, at)
-            items = list(projected.values())
             pending = self._pending(db)
-        words = self._query_words(text)
-        members = [dict(item, index_pending=pending) for item in items if self._matches(item, words, text)] if words else []
-        answer = {"shape": "abstain", "text": "I have no matching stored evidence.", "members": [], "index_pending": pending}
-        if not members:
-            return answer
-        if len(members) > 1:
-            members = members[:8]
-            options = [{"item_id": x["item_id"], "name": x["name"]} for x in members]
-            # CP3 group (B-14): the matched items are mutual lookalikes (each lists
-            # every other), so the question is which physical one, not which name.
-            # Each member keeps its own evidence and certainty; nothing is upgraded.
-            ids = {x["item_id"] for x in members}
-            if all(ids - {x["item_id"]} <= set(x.get("lookalikes") or ()) for x in members):
-                group = [dict(x, provenance={"observation_id": x.get("observation_id"), "identity_status": x["identity_status"]}) for x in members]
-                # The newest parked observation whose candidates are exactly these
-                # members: the browser passes it to assign_observation when the user
-                # picks one ("which one is yours" -> this one). null when none.
-                unresolved = next((entry["observation_id"] for entry in reversed(parked) if set(entry["candidates"]) == ids), None)
-                return dict(answer, shape="group", text=f"I have {len(group)} items that look alike; which one is yours?",
-                            members=group, question="Which one is yours?", options=options,
-                            unresolved_observation_id=unresolved)
-            return dict(answer, shape="clarify", text="Which stored item do you mean?", members=members, question="Which stored item?", options=options)
-        item = members[0]
-        shape = "hedged"
-        # Clock-only staleness (B-11): the projection above is already aged at as_of
-        # (or now). Confident needs trusted + placed AND not aged; an aged placement
-        # is hedged with its observed date; beyond AGE_ABSTAIN_MS the historical
-        # location_text is not usable evidence, so the answer abstains without members.
-        if item["identity_status"] == "trusted" and item["location_status"] == "placed" and not item.get("aged"):
-            message = f"The recorded location of {item['name']} is {item['location_text']}."
-            shape = "confident"
-        elif item["location_status"] == "inferred" and isinstance(item.get("inference"), dict):
-            # CP4 containment: never confident; the location is the container's.
-            container = item["inference"].get("container_name") or "another stored item"
-            if item["location_text"]:
-                message = f"I think {item['name']} is with {container}, which I last saw at {item['location_text']}."
-            else:
-                message = f"I think {item['name']} is with {container}, but I do not know where {container} is now."
-        elif item.get("stale_reason") == "negative_reobservation" and item["location_text"]:
-            # CP4 rule 13: the place is known, the item was seen to be gone from it.
-            message = (f"I recorded {item['name']} at {item['location_text']} on {self._date_text(item['observed_at_ms'])}, "
-                       f"but it was no longer there when I looked on {self._date_text(item.get('stale_since_ms'))}.")
-        elif item.get("stale_reason") == "age" and item["location_text"]:
-            if item["location_status"] == "stale":
-                return dict(answer, text=f"I have no recent evidence for {item['name']}.")
-            message = (f"I recorded {item['name']} at {item['location_text']} on {self._date_text(item['observed_at_ms'])}, "
-                       "but that was more than a day ago; it may have moved since.")
-        elif item["location_text"]:
-            message = f"Earlier evidence recorded {item['name']} at {item['location_text']}; its current location is uncertain."
-        elif item.get("lookalikes"):
-            # CP3: one name matched, but the item has lookalikes that did not; the
-            # identity is not separable, so the answer hedges without a location.
-            message = (f"I have evidence for {item['name']}, but it looks like {len(item['lookalikes'])} other stored "
-                       f"item{'s' if len(item['lookalikes']) != 1 else ''} and I cannot tell them apart.")
-        else:
-            message = f"I have a stored sighting for {item['name']}, but cannot confirm its identity or current resting location."
-        return dict(answer, shape=shape, text=message, members=members)
+            consent_ok = self._consent_state(db)["ok"]
+        eval_ms = at if at is not None else self._now_ms()
+        self.bump_counter("chat_local")
+        return resolve(text, list(projected.values()), as_of_ms=eval_ms, index_pending=pending,
+                       parked=parked, consent_pending=not consent_ok)
 
     @staticmethod
     def _date_text(observed_ms):
-        """UTC calendar date of an observation for answer text (deterministic across
-        machines; the store has no user time zone)."""
-        try:
-            return datetime.fromtimestamp(observed_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
-        except (OverflowError, OSError, ValueError, TypeError):
-            return "an unknown date"
+        """perception.resolver.date_text (kept for callers)."""
+        return date_text(observed_ms)
 
     def rebuild_all(self, *, as_of=None) -> dict:
         """Replay stored decisions (observation assignments, stored embeddings'
@@ -1621,9 +1684,10 @@ class EpisodeStoreMixin(ReobservationMixin):
                     "plan": "Preserve legacy records, budgets and leases. Explicit reviewed conversion may import legacy evidence as untrusted; never infer calibrated identity."}
 
     # ------------------------------------------------------------------ erasure (CP4)
-    def redact_item(self, item_id) -> dict:
-        """CP1 alias kept for callers and tests: erase_item with actor "operator"."""
-        return self.erase_item(item_id, actor="operator")
+    def redact_item(self, item_id, actor="operator") -> dict:
+        """CP1 alias kept for callers and tests: erase_item under `actor` (default
+        "operator"; the closed ACTORS set applies, CP5 carried item)."""
+        return self.erase_item(item_id, actor=actor)
 
     def _closure(self, db, item_id):
         """(affected item ids, affected (device, episode) keys): the CP1 co-visibility
@@ -1765,9 +1829,10 @@ class EpisodeStoreMixin(ReobservationMixin):
         """Erase everything personal in this profile (B-07, P-107): every item as
         erase_item does, every idle frame (promoted or not), every re-observation,
         containment row, cannot-link, correction payload, audit detail and packet,
-        and the legacy v1 objects/candidates/observations/bindings rows (api_calls,
-        the spend ledger, calibrations, retention and migration rows stay: none is
-        personal). confirm must be True or the literal ERASE_PROFILE_CONFIRM
+        the CP5 telemetry windows, gap rows, daily coverage aggregates and
+        maintenance counters, and the legacy v1 objects/candidates/observations/
+        bindings rows (api_calls, the spend ledger, calibrations, retention and
+        migration rows stay: none is personal). confirm must be True or the literal ERASE_PROFILE_CONFIRM
         (ValueError "confirmation required" otherwise; the server maps it to 409).
         After the transaction commits, the file is rebuilt with VACUUM INTO into a
         fresh private file and swapped in (os.replace), and the persisted journal
@@ -1791,6 +1856,13 @@ class EpisodeStoreMixin(ReobservationMixin):
             counts["reobservations"] += db.execute("DELETE FROM reobservations WHERE profile_id=?", (self.profile_id,)).rowcount
             counts["containment"] += db.execute("DELETE FROM containment WHERE profile_id=?", (self.profile_id,)).rowcount
             counts["cannot_links"] += db.execute("DELETE FROM local_cannot_links WHERE profile_id=?", (self.profile_id,)).rowcount
+            # CP5: frame-accounting windows and gap rows carry device and session ids,
+            # so they go; the daily aggregates and maintenance counters go too
+            # (Oversight pass 2), so the Status panel shows zeros after "Erase everything".
+            counts["telemetry"] = db.execute("DELETE FROM frame_counters WHERE profile_id=?", (self.profile_id,)).rowcount
+            counts["gaps"] = db.execute("DELETE FROM capture_gaps WHERE profile_id=?", (self.profile_id,)).rowcount
+            counts["coverage_days"] = db.execute("DELETE FROM coverage_days WHERE profile_id=?", (self.profile_id,)).rowcount
+            counts["maintenance_counters"] = db.execute("DELETE FROM maintenance_counters WHERE profile_id=?", (self.profile_id,)).rowcount
             counts["names"] += db.execute("UPDATE item_names SET name=NULL,erased=1 WHERE profile_id=? AND erased=0", (self.profile_id,)).rowcount
             counts["audit_rows"] += db.execute("UPDATE local_audit SET detail='{}',erased=1 WHERE profile_id=? AND erased=0", (self.profile_id,)).rowcount
             counts["corrections"] += db.execute("UPDATE corrections SET payload='{}',erased=1 WHERE profile_id=? AND erased=0", (self.profile_id,)).rowcount
@@ -1972,6 +2044,177 @@ class EpisodeStoreMixin(ReobservationMixin):
             promoted = db.execute("SELECT count(*) FROM idle_frames WHERE profile_id=? AND promoted=1", (self.profile_id,)).fetchone()[0]
             return {"expired": expired, "remaining": remaining, "promoted": promoted}
 
+    # --------------------------------------------------------- frame accounting (CP5)
+    def ingest_telemetry(self, raw: bytes) -> dict:
+        """Store one browser telemetry window (POST /api/telemetry) in
+        frame_counters. Strict parsing (perception.episode.parse_telemetry:
+        PacketTooLarge over MAX_TELEMETRY_BYTES -> 413, ValueError -> 400, an
+        implausible window clock is a ValueError too). Counters are numbers only,
+        so no consent acknowledgement is needed and nothing personal is stored.
+        Returns {"retained": True, "t_ms"} with t_ms the window's wall-clock end
+        time; a resend of the same (device, session, t_ms) is idempotent."""
+        window = parse_telemetry(raw)
+        now = self._now_ms()
+        wall = window.wall_ms
+        if wall <= 0 or wall > now + TELEMETRY_FUTURE_MS:
+            raise ValueError("Implausible telemetry clock")
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("INSERT OR IGNORE INTO frame_counters(profile_id,device_id,session_id,t_ms,received_ms,window_ms,counters,timing,settings) VALUES(?,?,?,?,?,?,?,?,?)",
+                       (self.profile_id, window.device_id, window.session_id, wall, now, window.window_ms,
+                        _json(window.counters.model_dump()), _json(window.timing.model_dump()), _json(window.settings.model_dump())))
+            # A window that reports coverage loss is also a coverage-gap row (ruling 1):
+            # items placed before its end then read gap_since, so the stored projection
+            # is rebuilt when a new gap row lands.
+            if window.counters.gap_ms > 0 and self._record_gap(db, window.device_id, window.session_id, "telemetry",
+                                                                 wall - window.window_ms, wall, window.counters.gap_ms, now):
+                self._rebuild_projection(db)
+        return {"retained": True, "t_ms": wall}
+
+    def bump_counter(self, name, value=1) -> float:
+        """Add value to the per-profile, per-UTC-day maintenance counter `name`
+        (MAINTENANCE_COUNTERS; the day is the injected clock's). value is a finite
+        nonnegative number. Returns the counter's new value."""
+        if name not in MAINTENANCE_COUNTERS:
+            raise ValueError("Unknown maintenance counter")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError("Invalid counter value")
+        day = self._utc_day(self._now_ms())
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("INSERT INTO maintenance_counters(profile_id,day,name,value) VALUES(?,?,?,?) "
+                       "ON CONFLICT(profile_id,day,name) DO UPDATE SET value=value+excluded.value", (self.profile_id, day, name, float(value)))
+            return float(db.execute("SELECT value FROM maintenance_counters WHERE profile_id=? AND day=? AND name=?", (self.profile_id, day, name)).fetchone()[0])
+
+    @staticmethod
+    def _utc_day(now_ms) -> str:
+        return datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _day_window(day_utc):
+        """(start_ms, end_ms) of a UTC calendar day; ValueError for a malformed day."""
+        if not isinstance(day_utc, str) or not DAY_UTC.fullmatch(day_utc):
+            raise ValueError("Invalid day")
+        try:
+            start = datetime.strptime(day_utc, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise ValueError("Invalid day") from None
+        start_ms = int(start.timestamp() * 1000)
+        return start_ms, start_ms + 24 * 3600 * 1000
+
+    def _maintenance_counters(self, db, day_utc) -> dict:
+        """{name: value} of the day's maintenance counters (every name, 0 when unset)."""
+        values = {name: 0.0 for name in MAINTENANCE_COUNTERS}
+        for row in db.execute("SELECT name,value FROM maintenance_counters WHERE profile_id=? AND day=?", (self.profile_id, day_utc)):
+            if row["name"] in values:
+                values[row["name"]] = float(row["value"])
+        return values
+
+    def _live_coverage(self, db, day_utc) -> dict | None:
+        """The day's totals from the live frame_counters rows (None when the day has
+        none): the seven plan keys plus effective_ms, packets_acked, episodes_started,
+        frames_captured, frames_analysed, frames_dropped, bytes_sent and windows."""
+        start_ms, end_ms = self._day_window(day_utc)
+        rows = db.execute("SELECT session_id,window_ms,counters FROM frame_counters WHERE profile_id=? AND t_ms>=? AND t_ms<?",
+                          (self.profile_id, start_ms, end_ms)).fetchall()
+        if not rows:
+            return None
+        totals = {"camera_on_ms": 0, "gap_ms": 0, "episodes": 0, "packets": 0, "idle_sent": 0, "idle_dropped": 0, "sessions": 0,
+                  "effective_ms": 0, "packets_acked": 0, "episodes_started": 0, "frames_captured": 0, "frames_analysed": 0,
+                  "frames_dropped": 0, "bytes_sent": 0, "windows": 0}
+        sessions = set()
+        for row in rows:
+            try:
+                counters = json.loads(row["counters"])
+            except ValueError:
+                continue
+            if not isinstance(counters, dict):
+                continue
+            def count(name):
+                value = counters.get(name, 0)
+                return value if type(value) is int and value >= 0 else 0
+            sessions.add(row["session_id"])
+            totals["windows"] += 1
+            totals["camera_on_ms"] += int(row["window_ms"])
+            totals["gap_ms"] += count("gap_ms")
+            totals["episodes"] += count("episodes_finished")
+            totals["episodes_started"] += count("episodes_started")
+            totals["packets"] += count("packets_sent")
+            totals["packets_acked"] += count("packets_acked")
+            totals["idle_sent"] += count("idle_sent")
+            totals["idle_dropped"] += count("idle_dropped")
+            totals["frames_captured"] += count("frames_captured")
+            totals["frames_analysed"] += count("frames_analysed")
+            totals["frames_dropped"] += count("frames_skipped_busy") + count("frames_dropped_backpressure")
+            totals["bytes_sent"] += count("bytes_sent")
+        totals["sessions"] = len(sessions)
+        totals["effective_ms"] = max(0, totals["camera_on_ms"] - totals["gap_ms"])
+        return totals
+
+    def _rollup_day(self, db, day_utc, now_ms):
+        """Write the day's aggregate (coverage_days, numbers only: the live totals
+        plus the maintenance counters, cpu seconds as integer milliseconds) from the
+        live rows; returns the aggregate or None when the day has no live rows."""
+        totals = self._live_coverage(db, day_utc)
+        if totals is None:
+            return None
+        counters = self._maintenance_counters(db, day_utc)
+        aggregates = dict(totals)
+        aggregates.update(process_cpu_ms=int(round(counters["process_cpu_s"] * 1000)), reobs_cpu_ms=int(round(counters["reobs_cpu_s"] * 1000)),
+                          chat_local=int(round(counters["chat_local"])), image_serves=int(round(counters["image_serves"])),
+                          image_bytes=int(round(counters["image_bytes"])))
+        db.execute("INSERT INTO coverage_days(profile_id,day,aggregates,updated_ms) VALUES(?,?,?,?) "
+                   "ON CONFLICT(profile_id,day) DO UPDATE SET aggregates=excluded.aggregates,updated_ms=excluded.updated_ms",
+                   (self.profile_id, day_utc, _json(aggregates), int(now_ms)))
+        return aggregates
+
+    def coverage(self, day_utc: str) -> dict:
+        """Frame accounting for one UTC calendar day ("YYYY-MM-DD"): the telemetry
+        windows whose wall-clock end falls in that day (a window straddling
+        midnight counts for the day it ended in). camera_on_ms is the sum of
+        window_ms over every session that day (the time the browser reported the
+        camera running), gap_ms the reported coverage loss inside those windows,
+        episodes the episodes the browser finished, packets the packets it sent,
+        idle_sent / idle_dropped the idle keyframes, sessions the distinct capture
+        sessions. Extra keys: effective_ms (camera_on_ms minus gap_ms, floored at
+        0: the time capture actually ran), packets_acked, episodes_started,
+        frames_captured, frames_analysed, frames_dropped (busy + backpressure),
+        bytes_sent, windows (row count), day, counters (the day's maintenance
+        counters: process_cpu_s, reobs_cpu_s, chat_local, image_serves,
+        image_bytes) and source: "live" when the day still has telemetry rows (the
+        daily aggregate in coverage_days is refreshed on the way), "rollup" when
+        only the aggregate survives (telemetry rows expire with episodes_days), or
+        "none". ValueError for a malformed day."""
+        self._day_window(day_utc)
+        now = self._now_ms()
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            live = self._live_coverage(db, day_utc)
+            if live is not None:
+                self._rollup_day(db, day_utc, now)
+                result = dict(live, day=day_utc, counters=self._maintenance_counters(db, day_utc), source="live")
+                return result
+            row = db.execute("SELECT aggregates FROM coverage_days WHERE profile_id=? AND day=?", (self.profile_id, day_utc)).fetchone()
+            counters = self._maintenance_counters(db, day_utc)
+        zeros = {"camera_on_ms": 0, "gap_ms": 0, "episodes": 0, "packets": 0, "idle_sent": 0, "idle_dropped": 0, "sessions": 0,
+                 "effective_ms": 0, "packets_acked": 0, "episodes_started": 0, "frames_captured": 0, "frames_analysed": 0,
+                 "frames_dropped": 0, "bytes_sent": 0, "windows": 0}
+        if row is None:
+            return dict(zeros, day=day_utc, counters=counters, source="none")
+        try:
+            aggregates = json.loads(row["aggregates"])
+        except ValueError:
+            aggregates = {}
+        result = {key: (aggregates.get(key) if type(aggregates.get(key)) is int and aggregates.get(key) >= 0 else 0) for key in zeros}
+        rolled = {"process_cpu_s": aggregates.get("process_cpu_ms", 0) / 1000.0, "reobs_cpu_s": aggregates.get("reobs_cpu_ms", 0) / 1000.0,
+                  "chat_local": float(aggregates.get("chat_local", 0)), "image_serves": float(aggregates.get("image_serves", 0)),
+                  "image_bytes": float(aggregates.get("image_bytes", 0))}
+        # The rollup carries the counters as they were when the live rows expired;
+        # anything bumped since (a chat about that day's evidence) is still live.
+        for name in MAINTENANCE_COUNTERS:
+            counters[name] = max(counters[name], rolled.get(name, 0.0))
+        return dict(result, day=day_utc, counters=counters, source="rollup")
+
     # --------------------------------------------------------------- retention (CP4)
     def _retention_row(self, db) -> dict:
         row = db.execute("SELECT * FROM retention WHERE profile_id=?", (self.profile_id,)).fetchone()
@@ -2067,11 +2310,14 @@ class EpisodeStoreMixin(ReobservationMixin):
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             current = self._retention_row(db)
+            # CP5 carried item: the audit detail records the old and the new value of
+            # every window the call changed (ints only, never free text).
+            old = {name: current[name] for name in fields}
             current.update(fields)
             now = self._now_ms()
             self._write_retention(db, current, now)
             db.execute("INSERT INTO local_audit(profile_id,at_ms,action,item_id,detail) VALUES(?,?,?,?,?)",
-                       (self.profile_id, now, "retention_set", None, _json({"actor": actor, "fields": fields})))
+                       (self.profile_id, now, "retention_set", None, _json({"actor": actor, "fields": fields, "old": old, "new": dict(fields)})))
             return self._retention_row(db)
 
     def apply_retention(self, now_ms=None, *, limit=RETENTION_BATCH) -> dict:
@@ -2091,7 +2337,8 @@ class EpisodeStoreMixin(ReobservationMixin):
             raise ValueError("Invalid retention batch")
         counts = {"revisions_expired": 0, "revisions_superseded": 0, "idle_promoted_expired": 0, "jobs_expired": 0,
                   "reobservations_expired": 0, "landmarks_reduced": 0, "reduction_checked": 0, "reduction_failed": 0,
-                  "reduction_deferred": 0}
+                  "reduction_deferred": 0, "telemetry_expired": 0, "gaps_expired": 0, "coverage_days_rolled": 0,
+                  "coverage_days_expired": 0}
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             retention = self._retention_row(db)
@@ -2116,7 +2363,23 @@ class EpisodeStoreMixin(ReobservationMixin):
                 counts["jobs_expired"] += db.execute("UPDATE episode_jobs SET status='expired',token=NULL,lease_until=NULL WHERE profile_id=? AND device_id=? AND episode_id=? AND revision_no=? AND status IN ('pending','processing')", key).rowcount
                 counts["revisions_superseded"] += 1
             counts["idle_promoted_expired"] = db.execute("DELETE FROM idle_frames WHERE profile_id=? AND promoted=1 AND received_ms<?", (self.profile_id, cutoff)).rowcount
-            counts["reobservations_expired"] = db.execute("DELETE FROM reobservations WHERE profile_id=? AND t_wall_ms<?", (self.profile_id, cutoff)).rowcount
+            # CP5 (coordinator ruling 2): the most recent re-observation decision of
+            # every item is kept whatever its age, so a stale item stays stale at the
+            # episodes_days boundary; older decisions expire.
+            counts["reobservations_expired"] = db.execute("""DELETE FROM reobservations WHERE profile_id=? AND t_wall_ms<?
+                AND t_wall_ms<(SELECT max(r2.t_wall_ms) FROM reobservations r2 WHERE r2.profile_id=reobservations.profile_id AND r2.item_id=reobservations.item_id)""",
+                                                          (self.profile_id, cutoff)).rowcount
+            # CP5: telemetry windows expire with the episodes (by the time they were
+            # received); each day they cover is rolled up into coverage_days first so
+            # the day's numbers outlive the rows. Coverage-gap rows expire the same way.
+            days = {self._utc_day(row[0]) for row in db.execute("SELECT t_ms FROM frame_counters WHERE profile_id=? AND received_ms<?", (self.profile_id, cutoff))}
+            for day in sorted(days):
+                if self._rollup_day(db, day, now) is not None:
+                    counts["coverage_days_rolled"] += 1
+            counts["telemetry_expired"] = db.execute("DELETE FROM frame_counters WHERE profile_id=? AND received_ms<?", (self.profile_id, cutoff)).rowcount
+            counts["gaps_expired"] = db.execute("DELETE FROM capture_gaps WHERE profile_id=? AND t_to_ms<?", (self.profile_id, cutoff)).rowcount
+            counts["coverage_days_expired"] = db.execute("DELETE FROM coverage_days WHERE profile_id=? AND day<?",
+                                                         (self.profile_id, self._utc_day(now - COVERAGE_DAYS_RETENTION_DAYS * 24 * 3600 * 1000))).rowcount
             reduce_before = now - retention["landmarks_hours"] * 3600 * 1000
             # F2: a revision whose job is still pending/processing keeps its raw
             # landmarks (the hand hull needs them at processing time); it is deferred
@@ -2141,7 +2404,8 @@ class EpisodeStoreMixin(ReobservationMixin):
                     counts["landmarks_reduced"] += 1
                 else:
                     db.execute("UPDATE episode_revisions SET reduced_ms=? WHERE profile_id=? AND device_id=? AND episode_id=? AND revision_no=?", (now,) + key)
-            if counts["revisions_expired"] or counts["revisions_superseded"] or counts["idle_promoted_expired"] or counts["reobservations_expired"]:
+            if (counts["revisions_expired"] or counts["revisions_superseded"] or counts["idle_promoted_expired"]
+                    or counts["reobservations_expired"] or counts["gaps_expired"]):
                 self._rebuild_projection(db)
         idle = self.expire_idle(now)
         counts["idle_expired"] = idle["expired"]
@@ -2206,11 +2470,15 @@ class EpisodeStoreMixin(ReobservationMixin):
         outcome from the legacy action (placed -> placed_on_surface, picked_up ->
         picked_up, sighted -> sighted, anything else -> uncertain), location_text
         from the legacy scene description, observed_at_ms from its timestamp and no
-        image (reference_image null; legacy frames were paths on disk). Legacy
-        rows, budgets, unknown spend and leases are untouched. dry_run=True returns
-        counts and up to 5 sample rows without writing; a real run is one
-        transaction with a migrations row and is idempotent (a second run reports
-        status "already_migrated"). Any exception rolls everything back."""
+        image (reference_image null; legacy frames were paths on disk). Every
+        migrated row (local_observations.consent_version, the observation record
+        and its legacy episode_revisions row) is stamped consent_version
+        LEGACY_CONSENT_VERSION ("legacy-v1"); counts carries the number stamped as
+        consent_stamped_legacy_v1. Legacy rows, budgets, unknown spend and leases
+        are untouched. dry_run=True returns counts and up to 5 sample rows without
+        writing; a real run is one transaction with a migrations row and is
+        idempotent (a second run reports status "already_migrated"). Any exception
+        rolls everything back."""
         _check_actor(actor)
         if type(dry_run) is not bool:
             raise ValueError("dry_run must be a bool")
@@ -2270,10 +2538,11 @@ class EpisodeStoreMixin(ReobservationMixin):
                           "capture_mode": "manual", "observed_at_ms": observed_ms, "item_id": item_id, "observation_id": observation_id,
                           "device_id": device_id, "episode_id": episode_id, "revision_no": 1, "source": "legacy_v1",
                           "identity_source": "legacy_v1", "legacy_object_id": row["object_id"], "legacy_event_id": event_id,
-                          "legacy_action": row["action"]}
+                          "legacy_action": row["action"], "consent_version": LEGACY_CONSENT_VERSION}
                 rows.append(record)
                 counts["converted"] += 1
             counts["legacy_media_files"] = len(media)
+            counts["consent_stamped_legacy_v1"] = len(rows)
             samples = [{key: record[key] for key in ("item_id", "label", "outcome", "location_text", "observed_at_ms", "identity_state", "legacy_event_id")} for record in rows[:5]]
             if dry_run:
                 return {"status": "dry_run", "dry_run": True, "from_version": version, "counts": counts, "samples": samples, "mutates_data": False}
@@ -2281,11 +2550,11 @@ class EpisodeStoreMixin(ReobservationMixin):
             for record in rows:
                 key = (self.profile_id, record["device_id"], record["episode_id"], record["revision_no"])
                 digest = hashlib.sha256(("legacy:" + record["legacy_event_id"]).encode()).hexdigest()
-                db.execute("INSERT INTO episode_revisions(profile_id,device_id,episode_id,revision_no,semantic_digest,transport_digest,packet,received_at_ms,accepted,clock_status,redacted,redacted_reason) VALUES(?,?,?,?,?,?,NULL,?,0,'ok',0,'legacy_v1')",
-                           key + (digest, digest, record["observed_at_ms"]))
-                db.execute("INSERT INTO local_observations(profile_id,observation_id,item_id,device_id,episode_id,revision_no,observed_at_ms,decided_at_ms,record,candidates,erased) VALUES(?,?,?,?,?,?,?,?,?,NULL,0)",
+                db.execute("INSERT INTO episode_revisions(profile_id,device_id,episode_id,revision_no,semantic_digest,transport_digest,packet,received_at_ms,accepted,clock_status,redacted,redacted_reason,consent_version) VALUES(?,?,?,?,?,?,NULL,?,0,'ok',0,'legacy_v1',?)",
+                           key + (digest, digest, record["observed_at_ms"], LEGACY_CONSENT_VERSION))
+                db.execute("INSERT INTO local_observations(profile_id,observation_id,item_id,device_id,episode_id,revision_no,observed_at_ms,decided_at_ms,record,candidates,erased,consent_version) VALUES(?,?,?,?,?,?,?,?,?,NULL,0,?)",
                            (self.profile_id, record["observation_id"], record["item_id"], record["device_id"], record["episode_id"], record["revision_no"],
-                            record["observed_at_ms"], now, _json(record)))
+                            record["observed_at_ms"], now, _json(record), LEGACY_CONSENT_VERSION))
             db.execute("INSERT INTO migrations(profile_id,migration_id,from_version,counts,at_ms,actor) VALUES(?,?,?,?,?,?)",
                        (self.profile_id, MIGRATION_V1_ID, version, _json(counts), now, actor))
             db.execute("INSERT INTO local_audit(profile_id,at_ms,action,item_id,detail) VALUES(?,?,?,?,?)",

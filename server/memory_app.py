@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime, timezone
 import hmac
+import html
 import json
 import os
 from pathlib import Path
@@ -14,7 +16,7 @@ import threading
 import time
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.background import BackgroundTask
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +26,21 @@ MAX_EPISODE_BYTES = 4 * 1024 * 1024
 # store parses a byte, exactly as MAX_EPISODE_BYTES does for episodes. Equal to
 # perception.episode.MAX_IDLE_BYTES (the store raises PacketTooLarge above it too).
 MAX_IDLE_BYTES = 256 * 1024
+# CP5 frame accounting (POST /api/telemetry): the same pattern; equal to
+# perception.episode.MAX_TELEMETRY_BYTES. Counters only (numbers and two ids), so
+# the route is session-protected and origin-checked but not consent-gated.
+MAX_TELEMETRY_BYTES = 64 * 1024
+# GET /api/coverage?day= and the health "coverage": a UTC calendar day. The route
+# validates the shape and the calendar before the store is asked (400 otherwise).
+DAY_UTC = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+# The seven plan keys of coverage(day) first, then the store's integer extras; the
+# maintenance counters (Finance) are flattened to integers. Every value of the
+# response except "day" is a nonnegative integer: aggregates only, never a row.
+COVERAGE_KEYS = ("camera_on_ms", "gap_ms", "episodes", "packets", "idle_sent", "idle_dropped", "sessions")
+COVERAGE_EXTRA_KEYS = ("effective_ms", "packets_acked", "episodes_started", "frames_captured", "frames_analysed",
+                       "frames_dropped", "bytes_sent", "windows")
+COVERAGE_COUNTERS = ("chat_local", "image_serves", "image_bytes")
+COVERAGE_CPU = {"process_cpu_ms": "process_cpu_s", "reobs_cpu_ms": "reobs_cpu_s"}
 # CP4 erasure: the phrase the caregiver types for POST /api/erase-all; equal to
 # perception.episode_store.ERASE_PROFILE_CONFIRM, which the store checks again.
 ERASE_ALL_PHRASE = "ERASE EVERYTHING"
@@ -137,6 +154,39 @@ CORRECTION_REFUSALS = {
     "not_ambiguous": "That sighting is not waiting for a choice; it is already attributed to an item.",
     "invalid_correction": "That correction cannot be applied to this item.",
 }
+# Third-party notices (CP5, docs/OVERSIGHT_CP5.md section 3). server/notices.json is
+# derived from the licence register (docs/LICENSES.md section 8, the source); the
+# app never reads the register's expected list at runtime: scripts/check_notices.py
+# compares the two. GET /notices (public, no session, HTML, everything escaped,
+# no script) reads the file per request under MAX_NOTICES_BYTES and renders each
+# entry only while its `condition` holds on this server. The closed condition set:
+#   always                 rendered in full on every server
+#   provisioned:hand       the @mediapipe/tasks-vision runtime files are provisioned
+#                          in the browser inventory (phone/assets/models/MANIFEST.json)
+#   provisioned:identity   dinov2_vits14.onnx is provisioned in the server inventory
+#   served:tabler          a served page embeds Tabler icon paths: NEVER today (no
+#                          served file does: phone/memory.html has no <svg> and
+#                          PUBLIC_ASSETS lists no icon file; agent.html, which embeds
+#                          Tabler-derived symbols, redirects). TABLER_SERVED flips to
+#                          True, with the icon-set version recorded in notices.json and
+#                          the register, the moment a served page carries the icons.
+#   calibration:cute       the profile holds an APPROVED calibration record with
+#                          source "cute" (the only store read of the page: a boolean)
+# A provisioned:* entry whose component is absent renders as a one-line "present on
+# this server: no" (truthful and complete, the Oversight recommendation); the CUTE
+# attribution is omitted entirely without such a calibration (an attribution for
+# data never used would itself be a false provenance statement).
+NOTICES_PATH = ROOT / "server" / "notices.json"
+MAX_NOTICES_BYTES = 2 * 1024 * 1024
+NOTICE_KEYS = frozenset({"component", "version", "licence", "source_url", "notice_text", "condition"})
+NOTICE_CONDITIONS = frozenset({"always", "provisioned:hand", "provisioned:identity", "calibration:cute", "served:tabler"})
+MAX_NOTICE_FIELD = 400
+TABLER_SERVED = False
+# The @mediapipe/tasks-vision 1.0.1 files (docs/LICENSES.md section 2a; scripts/model_pins.json).
+TASKS_VISION_FILES = frozenset({"vision_bundle.mjs", "vision_wasm_internal.js", "vision_wasm_internal.wasm",
+                                "vision_wasm_nosimd_internal.js", "vision_wasm_nosimd_internal.wasm"})
+NOTICE_BLOCK_START = "---- "
+NOTICE_BLOCK_END = "---- end of "
 
 
 class CorrectionRefused(Exception):
@@ -490,6 +540,187 @@ def identity_load_failure(exc):
     return f"Identity model failed to load: {text}"
 
 
+def _notice_field(entry, key, *, maximum=MAX_NOTICE_FIELD):
+    value = entry.get(key)
+    if not isinstance(value, str) or not value.strip() or len(value) > maximum or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError(f"notices entry {key} is missing, empty, too long or not printable")
+    return value
+
+
+def validate_notices(data):
+    """The validated notices document: {"components": [entries], "application":
+    {...} | None}. ValueError (never a path) when the document is not an object
+    with a "components" list of 1..64 entries, when an entry does not carry
+    exactly NOTICE_KEYS with non-empty strings (the short fields printable and at
+    most MAX_NOTICE_FIELD characters; source_url https; condition in
+    NOTICE_CONDITIONS; notice_text non-empty), or when a component name repeats.
+    The register comparison is scripts/check_notices.py's job, not the app's."""
+    if not isinstance(data, dict) or not isinstance(data.get("components"), list) or not 1 <= len(data["components"]) <= 64:
+        raise ValueError("notices document must be an object with a components list")
+    components, names = [], set()
+    for entry in data["components"]:
+        if not isinstance(entry, dict) or set(entry) != NOTICE_KEYS:
+            raise ValueError("notices entry must carry exactly component, version, licence, source_url, notice_text, condition")
+        component = _notice_field(entry, "component")
+        if component in names:
+            raise ValueError("notices entry component repeats")
+        names.add(component)
+        version, licence = _notice_field(entry, "version"), _notice_field(entry, "licence")
+        source_url = _notice_field(entry, "source_url", maximum=1000)
+        if not source_url.startswith("https://") or any(c.isspace() for c in source_url):
+            raise ValueError("notices entry source_url must be an https URL")
+        condition = _notice_field(entry, "condition")
+        if condition not in NOTICE_CONDITIONS:
+            raise ValueError("notices entry condition is outside the closed set")
+        notice_text = entry.get("notice_text")
+        if not isinstance(notice_text, str) or not notice_text.strip():
+            raise ValueError("notices entry notice_text is empty")
+        components.append({"component": component, "version": version, "licence": licence, "source_url": source_url,
+                           "notice_text": notice_text, "condition": condition})
+    application = data.get("application")
+    if application is not None:
+        if not isinstance(application, dict):
+            raise ValueError("notices application must be an object")
+        application = {"heading": _notice_field(application, "heading"), "licence": _notice_field(application, "licence"),
+                       "copyright": _notice_field(application, "copyright"),
+                       "notice_text": application.get("notice_text") if isinstance(application.get("notice_text"), str) else ""}
+    return {"components": components, "application": application}
+
+
+def load_notices(path=None):
+    """server/notices.json (or `path`) read and validated per call: at most
+    MAX_NOTICES_BYTES, UTF-8 JSON, validate_notices. ValueError (no path in the
+    message) when absent, unreadable, over the cap or invalid: the app's startup
+    self-check raises it; GET /notices answers 503."""
+    target = Path(path) if path is not None else NOTICES_PATH
+    try:
+        if target.is_symlink() or not target.is_file():
+            raise ValueError("notices file is not installed")
+        with open(target, "rb") as handle:
+            raw = handle.read(MAX_NOTICES_BYTES + 1)
+    except OSError:
+        raise ValueError("notices file is not readable") from None
+    if len(raw) > MAX_NOTICES_BYTES:
+        raise ValueError("notices file exceeds the size cap")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeError):
+        raise ValueError("notices file is not valid JSON") from None
+    return validate_notices(data)
+
+
+def hand_runtime_provisioned(models):
+    """provisioned:hand holds when any @mediapipe/tasks-vision runtime file is
+    provisioned in the browser inventory (the hand model bundle itself has no
+    notices entry while its register row is UNVERIFIED)."""
+    return any(entry.get("provisioned") is True and entry["name"].rsplit("/", 1)[-1] in TASKS_VISION_FILES for entry in models)
+
+
+def identity_provisioned(models):
+    """provisioned:identity holds when dinov2_vits14.onnx is provisioned in the
+    server inventory (the file exists where DinoV2Embedder would load it)."""
+    entry = identity_model_entry(models)
+    return entry is not None and entry.get("provisioned") is True
+
+
+def _notice_text_html(text):
+    """notice_text as HTML: the reproduced licence files (between a "---- <title>
+    (...) ----" line and its "---- end of <title> ----" line) as <pre>, the prose
+    paragraphs between them as <p>. Everything is escaped; nothing is markup."""
+    parts, prose, block = [], [], None
+
+    def flush_prose():
+        if prose:
+            paragraph = "\n".join(prose).strip()
+            if paragraph:
+                parts.append("<p>" + html.escape(paragraph, quote=True).replace("\n", "<br>\n") + "</p>")
+            prose.clear()
+    for line in text.split("\n"):
+        if block is not None:
+            block.append(line)
+            if line.startswith(NOTICE_BLOCK_END):
+                parts.append("<pre>" + html.escape("\n".join(block), quote=True) + "</pre>")
+                block = None
+        elif line.startswith(NOTICE_BLOCK_START) and not line.startswith(NOTICE_BLOCK_END):
+            flush_prose()
+            block = [line]
+        elif line.strip():
+            prose.append(line)
+        else:
+            flush_prose()
+    flush_prose()
+    if block is not None:
+        parts.append("<pre>" + html.escape("\n".join(block), quote=True) + "</pre>")
+    return "\n".join(parts)
+
+
+def render_notices(document, conditions):
+    """The /notices page (plain HTML, no script, no style, every value escaped)
+    for a validated document and the conditions evaluated on this server
+    ({condition: bool | None}; None = unknown). An "always" entry and any entry
+    whose condition holds render in full; a provisioned:* or served:tabler entry
+    whose condition does not hold renders as its heading, version, licence and
+    source URL plus a one-line "present on this server: no"; a calibration:cute
+    entry whose condition does not hold (or is unknown) is omitted. The page
+    carries no personal data: no names, counts, ids or calibration numbers."""
+    def e(value):
+        return html.escape(str(value), quote=True)
+    parts = ["<!DOCTYPE html>", '<html lang="en">', "<head>", '<meta charset="utf-8">',
+             '<meta name="viewport" content="width=device-width, initial-scale=1">',
+             "<title>Third-party notices</title>", "</head>", "<body>", "<h1>Third-party notices</h1>",
+             "<p>The third-party software this PAM server serves to the browser or runs on the laptop, with the "
+             "copyright lines, licence texts and statements their licences require. Optional components say "
+             "whether they are present on this server; a notice for data or icons this server does not use is "
+             "not shown. Source URLs are printed, not linked: this page makes no request outside its own origin.</p>"]
+    rendered = []
+    for entry in document["components"]:
+        condition = entry["condition"]
+        holds = conditions.get(condition) if condition != "always" else True
+        if condition == "calibration:cute" and holds is not True:
+            continue
+        rendered.append((entry, holds is True))
+    parts.append("<h2>Contents</h2>")
+    parts.append("<ol>")
+    for index, (entry, _) in enumerate(rendered, 1):
+        parts.append(f'<li><a href="#notice-{index}">{e(entry["component"])}</a> ({e(entry["licence"])})</li>')
+    if document.get("application"):
+        parts.append(f'<li><a href="#application">{e(document["application"]["heading"])}</a></li>')
+    parts.append("</ol>")
+    for index, (entry, holds) in enumerate(rendered, 1):
+        condition = entry["condition"]
+        parts.append(f'<section id="notice-{index}">')
+        parts.append(f"<h2>{e(entry['component'])}</h2>")
+        parts.append("<dl>")
+        parts.append(f"<dt>Version</dt><dd>{e(entry['version'])}</dd>")
+        parts.append(f"<dt>Licence</dt><dd>{e(entry['licence'])}</dd>")
+        parts.append(f"<dt>Source</dt><dd><code>{e(entry['source_url'])}</code></dd>")
+        if condition.startswith("provisioned:"):
+            parts.append(f"<dt>Availability</dt><dd>Optional component; present on this server: {'yes' if holds else 'no'}</dd>")
+        elif condition == "served:tabler":
+            parts.append("<dt>Availability</dt><dd>" + ("Embedded in a page served by this server: yes" if holds else
+                         "Embedded in a page served by this server: no (no served page carries these icons, so no notice is owed today)") + "</dd>")
+        elif condition == "calibration:cute":
+            parts.append("<dt>Availability</dt><dd>An approved identity calibration derived from this dataset exists on this server: yes</dd>")
+        parts.append("</dl>")
+        if holds:
+            parts.append(_notice_text_html(entry["notice_text"]))
+        elif condition == "served:tabler":
+            parts.append("<p>Not embedded in any served page; the licence text is shown when it is.</p>")
+        else:
+            parts.append("<p>Not present on this server; the licence text is shown when it is.</p>")
+        parts.append("</section>")
+    application = document.get("application")
+    if application:
+        parts.append('<section id="application">')
+        parts.append(f"<h2>{e(application['heading'])}</h2>")
+        parts.append(f"<dl><dt>Licence</dt><dd>{e(application['licence'])}</dd><dt>Copyright</dt><dd>{e(application['copyright'])}</dd></dl>")
+        if application["notice_text"].strip():
+            parts.append("<pre>" + html.escape(application["notice_text"], quote=True) + "</pre>")
+        parts.append("</section>")
+    parts.extend(["</body>", "</html>", ""])
+    return "\n".join(parts)
+
+
 def create_app(database_path=None, profile_id="local", processor=None, clock=None,
                auth_pin=None, chat_provider=None, models_dir=None, licence_register=None,
                embedder=None, server_models_dir=None):
@@ -518,6 +749,12 @@ def create_app(database_path=None, profile_id="local", processor=None, clock=Non
     server_models_path = (Path(server_models_dir) if server_models_dir is not None
                           else (models_path if models_dir is not None else SERVER_MODELS_DIR))
     register_path = Path(licence_register) if licence_register is not None else LICENCE_REGISTER
+    # CP5 startup self-check: server/notices.json must be present and well-formed
+    # (every entry exactly NOTICE_KEYS, a closed condition, no duplicate component);
+    # a ValueError here names no path. Whether its component set equals the
+    # register's expected list is scripts/check_notices.py's check, never a
+    # runtime read of docs/.
+    load_notices()
     pin = auth_pin if auth_pin is not None else os.environ.get("PAM_AUTH_PIN", os.environ.get("CAREGIVER_PIN"))
     if not isinstance(pin, str) or not pin.strip():
         pin = None
@@ -745,7 +982,8 @@ def create_app(database_path=None, profile_id="local", processor=None, clock=Non
         # Unknown legacy endpoints remain retired, even if their original verbs changed.
         known = path in {"/api/auth/session", "/api/auth/login", "/api/auth/logout",
                          "/api/health", "/api/episodes", "/api/items", "/api/chat",
-                         "/api/idle", "/api/consent", "/api/retention", "/api/erase-all", "/api/migrate"} or path.startswith("/api/items/")
+                         "/api/idle", "/api/consent", "/api/retention", "/api/erase-all", "/api/migrate",
+                         "/api/telemetry", "/api/coverage"} or path.startswith("/api/items/")
         if is_api and not known:
             response = JSONResponse({"error": "Route retired."}, status_code=410)
         elif is_api and not public and not authenticated(request):
@@ -987,22 +1225,88 @@ def create_app(database_path=None, profile_id="local", processor=None, clock=Non
                 "image_url": f"/api/items/{ident}/observations/{observation}/image" if valid else None}
 
     def present_answer(answer):
-        """The chat Answer DTO: shape, text, index_pending, members (present_item,
-        with provenance on group members), and for clarify/group the question,
-        options and the parked observation the browser hands to .../assign."""
-        result = {"shape": answer.get("shape"), "text": answer.get("text"),
+        """The chat Answer DTO (CP5): a whitelist of exactly the resolver's keys,
+        each re-validated against perception.resolver's closed vocabularies:
+        shape, text, members (present_item, with provenance on group members),
+        reference_image ({frame_id, bbox} or null; null for abstain),
+        target_indicated (false whenever reference_image is null), capture_time_ms
+        (null for abstain), identity_status, location_status, room ("room unknown"
+        until a source exists), index_pending, basis (tokens from resolver.BASIS
+        only, order kept, no repeats); and for clarify/group only the question,
+        options and the parked observation the browser hands to .../assign.
+        Nothing numeric from identity internals and no store-internal field
+        crosses (a forged key in the store's answer is simply not copied)."""
+        from perception.resolver import BASIS, IDENTITY_STATUSES, LOCATION_STATUSES, ROOM_UNKNOWN, SHAPES
+        shape = answer.get("shape")
+        if shape not in SHAPES:
+            raise ValueError("Invalid answer shape")
+        abstain = shape == "abstain"
+        reference = None if abstain else reference_image(answer.get("reference_image"))
+        capture = answer.get("capture_time_ms")
+        room = answer.get("room")
+        tokens = []
+        for token in (answer.get("basis") if isinstance(answer.get("basis"), list) else []):
+            if token in BASIS and token not in tokens:
+                tokens.append(token)
+        identity_status, location_status = answer.get("identity_status"), answer.get("location_status")
+        result = {"shape": shape, "text": answer.get("text") if isinstance(answer.get("text"), str) else "",
+                  "members": [] if abstain else [present_item(member) for member in answer.get("members", []) if isinstance(member, dict)],
+                  "reference_image": reference,
+                  "target_indicated": reference is not None and answer.get("target_indicated") is True,
+                  "capture_time_ms": capture if not abstain and type(capture) is int and capture > 0 else None,
+                  "identity_status": identity_status if not abstain and identity_status in IDENTITY_STATUSES else "unknown",
+                  "location_status": location_status if not abstain and location_status in LOCATION_STATUSES else "unknown",
+                  "room": room if isinstance(room, str) and 0 < len(room) <= 120 and room.isprintable() else ROOM_UNKNOWN,
                   "index_pending": answer.get("index_pending") is True,
-                  "members": [present_item(member) for member in answer.get("members", []) if isinstance(member, dict)]}
-        if isinstance(answer.get("question"), str):
-            result["question"] = answer["question"]
-        if isinstance(answer.get("options"), list):
-            result["options"] = [{"item_id": option.get("item_id"), "name": option.get("name")}
-                                 for option in answer["options"] if isinstance(option, dict)
-                                 and isinstance(option.get("item_id"), str) and ITEM_ID.fullmatch(option["item_id"])]
-        if "unresolved_observation_id" in answer:
-            unresolved = answer["unresolved_observation_id"]
-            result["unresolved_observation_id"] = unresolved if isinstance(unresolved, str) and OBSERVATION_ID.fullmatch(unresolved) else None
+                  "basis": tokens}
+        if shape in ("clarify", "group"):
+            if isinstance(answer.get("question"), str):
+                result["question"] = answer["question"]
+            if isinstance(answer.get("options"), list):
+                result["options"] = [{"item_id": option.get("item_id"), "name": option.get("name")}
+                                     for option in answer["options"] if isinstance(option, dict)
+                                     and isinstance(option.get("item_id"), str) and ITEM_ID.fullmatch(option["item_id"])]
+            if "unresolved_observation_id" in answer:
+                unresolved = answer["unresolved_observation_id"]
+                result["unresolved_observation_id"] = unresolved if isinstance(unresolved, str) and OBSERVATION_ID.fullmatch(unresolved) else None
         return result
+
+    def utc_day(seconds):
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).strftime("%Y-%m-%d")
+
+    def day_query(value):
+        """The day query string -> "YYYY-MM-DD" (a real UTC calendar day) or 400;
+        None (absent) -> today by the app's clock."""
+        if value is None:
+            return utc_day(now())
+        if not isinstance(value, str) or len(value) != 10 or not value.isascii() or not DAY_UTC.fullmatch(value):
+            raise HTTPException(400, "Invalid day value.")
+        try:
+            datetime.strptime(value, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(400, "Invalid day value.") from None
+        return value
+
+    def present_coverage(value, day):
+        """The coverage DTO for one UTC day: the seven plan keys, the store's
+        integer extras, the maintenance counters as integers (cpu seconds as
+        milliseconds) and day. Every value but day is a nonnegative int; the
+        store's source tag and anything else is not copied (aggregates only)."""
+        source = value if isinstance(value, dict) else {}
+        counters = source.get("counters") if isinstance(source.get("counters"), dict) else {}
+
+        def count(item, scale=1):
+            if isinstance(item, bool) or not isinstance(item, (int, float)) or item != item or abs(item) == float("inf"):
+                return 0
+            return max(0, int(round(item * scale)))
+        result = {key: count(source.get(key)) for key in COVERAGE_KEYS + COVERAGE_EXTRA_KEYS}
+        result.update({name: count(counters.get(name)) for name in COVERAGE_COUNTERS})
+        result.update({name: count(counters.get(seconds), 1000) for name, seconds in COVERAGE_CPU.items()})
+        result["day"] = day
+        return result
+
+    def zero_coverage(day):
+        return present_coverage({}, day)
 
     def without_identity_internals(value):
         """A copy of a stored record with embedding internals removed at any depth
@@ -1074,24 +1378,56 @@ def create_app(database_path=None, profile_id="local", processor=None, clock=Non
         without a manifest); "capabilities" carries the server-decided
         automatic_hand_recognition and physical_instance_recognition entries
         (hand_model_capability, identity_model_capability), identical to the ones
-        /api/items returns."""
+        /api/items returns. CP5: "coverage" is today's frame accounting, the same
+        DTO GET /api/coverage returns for the app clock's UTC day."""
         models = await asyncio.to_thread(models_synced)
         capabilities = await call_store("capabilities") if db_path else []
         # CP4: "retention" is the store's live counts (retention_counts), "consent"
         # its consent state without the disclosure text, "reobservation" the counts
         # of the worker's last reobserve pass ({} before the first). "processing"
         # keeps its CP1 shape.
+        # CP5: "coverage" is today's frame accounting (the same DTO as
+        # GET /api/coverage for the app clock's UTC day; zeros without a store).
+        today = utc_day(now())
         if db_path:
             retention = numeric_counts(await call_store("retention_counts"))
             consent = present_consent(await call_store("consent_state"))
+            coverage = present_coverage(await call_store("coverage", today), today)
         else:
             retention, consent = {}, {"required_version": consent_constants()[0], "acknowledged_version": None, "ok": False}
+            coverage = zero_coverage(today)
         return {"status": "ok" if db_path else "setup_required",
                 "capabilities": policy(capabilities, models), "models": models,
                 "processing": dict(processing_stats),
                 "retention": retention, "consent": consent,
                 "reobservation": dict(maintenance["reobservation"]),
+                "coverage": coverage,
                 "chat": {"configured": False, "enabled": False}}
+
+    @app.post("/api/telemetry")
+    async def telemetry(request: Request):
+        """CP5 frame accounting: one browser telemetry window (the counters of the
+        last window_ms, posted every 60 s and at stop). Protected and
+        origin-checked by the middleware; the body cap MAX_TELEMETRY_BYTES is
+        enforced here (413) before the store parses it (PacketTooLarge 413, any
+        other ValueError 400: an unknown key, a string where a number belongs, an
+        out-of-range value or an implausible clock). Not consent-gated: the window
+        is numbers and two ids, never an image or text. 200 {retained: true,
+        t_ms}; a resend of the same (device, session, t_ms) is idempotent."""
+        raw = await body_bytes(request, MAX_TELEMETRY_BYTES)
+        ack = await call_store("ingest_telemetry", raw)
+        t_ms = ack.get("t_ms") if isinstance(ack, dict) else None
+        return {"retained": isinstance(ack, dict) and ack.get("retained") is True,
+                "t_ms": t_ms if type(t_ms) is int and t_ms >= 0 else None}
+
+    @app.get("/api/coverage")
+    async def coverage(day: str = None):
+        """Frame accounting for one UTC calendar day (?day=YYYY-MM-DD; default
+        today by the app's clock): the store's coverage(day) as present_coverage
+        (aggregates only, every value but day an integer). 400 for a day that is
+        not a real calendar date."""
+        chosen = day_query(day)
+        return present_coverage(await call_store("coverage", chosen), chosen)
 
     def consent_constants():
         """(CONSENT_VERSION, DISCLOSURE_TEXT) from perception.consent, read when a
@@ -1370,6 +1706,40 @@ def create_app(database_path=None, profile_id="local", processor=None, clock=Non
     @app.get("/agent.html")
     async def old_page():
         return RedirectResponse("/", status_code=307)
+
+    async def cute_calibration_approved():
+        """True when the profile holds an approved calibration with source "cute",
+        False when it does not, None when there is no store to ask (no database
+        configured or the store is unavailable): the page's only store read, a
+        boolean, never a number or an id."""
+        if not db_path:
+            return None
+        try:
+            rows = await call_store("list_calibrations")
+        except HTTPException:
+            return None
+        return any(isinstance(row, dict) and row.get("source") == "cute" and row.get("approved") is True for row in rows)
+
+    @app.api_route("/notices", methods=["GET", "HEAD"])
+    async def notices():
+        """Third-party notices: public (no session, not under /api/), plain HTML
+        with every value escaped and no script, rendered per request from
+        server/notices.json (load_notices, 503 when it is missing or invalid).
+        Conditions are evaluated now: provisioned:hand and provisioned:identity
+        from the two model inventories (files only, no model is loaded),
+        served:tabler from TABLER_SERVED, calibration:cute from the store. No
+        personal data: the only store read is the boolean above."""
+        try:
+            document = await asyncio.to_thread(load_notices)
+        except ValueError:
+            raise HTTPException(503, "Third-party notices are not installed.") from None
+        models = await asyncio.to_thread(models_now)
+        conditions = {"always": True,
+                      "provisioned:hand": hand_runtime_provisioned(models),
+                      "provisioned:identity": identity_provisioned(models),
+                      "served:tabler": TABLER_SERVED,
+                      "calibration:cute": await cute_calibration_approved()}
+        return HTMLResponse(render_notices(document, conditions))
 
     @app.get("/assets/models/{name:path}")
     async def model_asset(name: str):

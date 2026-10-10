@@ -280,6 +280,10 @@ Coordinator-run, Linux sandbox (Python 3.13.16, Node 22, Playwright 1.56.0 / chr
 
 Coordinator-run, Linux sandbox. 341/341 methods, 0 skips: see `docs/CONTINUATION_HANDOFF.md` §5 and `docs/BUILD_PLAN.md` "CP4 result". P-107 (deletion without resurrection) is now executed on synthetic markers across every table, derived view, replay path and the database file bytes; B-09 sidecar privacy is executed on POSIX (Windows branch pending the laptop). Re-observation thresholds (0.06 / 0.18, gate 0.03, hourly refresh, 300 CPU-s/day) are initial values pending P-105 on the rig. No real footage, device, model download or paid call was used.
 
+## X-010 / CP5 — resolver contract, scripted scenarios and frame accounting (observed here, 2026-10-10)
+
+Coordinator-run, Linux sandbox. 431/431 methods, 0 skips. The eight scripted scenarios (`server/fixtures/cp5/scenarios/`) produce 24 queries with 0 confident-wrong outcomes on synthetic data; per the rubric's mandatory sentence these are software-correctness checks, not accuracy measurements, and no number from them may be quoted as recall or precision. P-106's synthetic half is therefore executed; its real-footage half, and P-101/P-103/P-105, remain not run and are now the first items of the rig checklist (`docs/OVERSIGHT_CP5.md` §5).
+
 ## Proposed experiment queue — historical proposals; no outcomes implied
 
 These entries preserve pre-build proposals, not a substitute for BUILD_CONTRACT.
